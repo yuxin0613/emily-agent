@@ -96,10 +96,7 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       printHealth(runtime.health());
       return;
     case "doctor":
-      printJson(await runtime.doctor({
-        deep: args.includes("deep") || args.includes("--deep"),
-        repair: args.includes("repair") || args.includes("--repair"),
-      }));
+      printJson(await runtime.runCommand("doctor", { args }));
       return;
     case "providers":
       printProviders(runtime.listProviders());
@@ -137,13 +134,15 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       printCandidates(runtime.listSkillCandidates({ status: parseStatus(args[0]), limit: 50 }));
       return;
     case "build-skills":
-      printJson(runtime.buildSkillCandidates({ minOccurrences: numberArg(args[0], 3), minScore: numberArg(args[1], 0.68) }));
+      printJson(await runtime.runCommand("skills.candidates.build", {
+        input: { minOccurrences: numberArg(args[0], 3), minScore: numberArg(args[1], 0.68) },
+      }));
       return;
     case "approve-skill":
       await approveSkill(runtime, args);
       return;
     case "reject-skill":
-      rejectSkill(runtime, args);
+      await rejectSkill(runtime, args);
       return;
     case "experiences":
       printExperiences(searchExperiences(runtime, args.join(" ")));
@@ -155,19 +154,21 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       printTrace(runtime, args[0]);
       return;
     case "diagnostics":
-      printJson(runtime.diagnostics({ repair: args[0] === "repair" || args[0] === "true" }));
+      printJson(args[0] === "repair" || args[0] === "true"
+        ? await runtime.runCommand("diagnostics.repair")
+        : runtime.diagnostics({ repair: false }));
       return;
     case "maintenance":
-      printJson(await runtime.maintenance());
+      printJson(await runtime.runCommand("maintenance.run"));
       return;
     case "new":
-      startNewSession(runtime, state, args);
+      await startNewSession(runtime, state, args);
       return;
     case "restore-session":
-      restoreSession(runtime, state, args);
+      await restoreSession(runtime, state, args);
       return;
     case "trash-session":
-      trashSession(runtime, args);
+      await trashSession(runtime, args);
       return;
     case "session":
       if (!args[0]) throw new Error("session id is required");
@@ -179,7 +180,7 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     case "clear":
       if (prefix === "/") {
-        clearCurrentSession(runtime, state);
+        await clearCurrentSession(runtime, state);
         return;
       }
       output.write("\x1Bc");
@@ -269,11 +270,13 @@ function printCommands(commands): void {
   output.write("\n");
 }
 
-function startNewSession(runtime, state, args: string[] = []): void {
-  const session = runtime.createSession({
-    title: args.join(" ") || "New session",
-    source: "tui",
-    metadata: { createdBy: "tui" },
+async function startNewSession(runtime, state, args: string[] = []): Promise<void> {
+  const session = await runtime.runCommand("session.create", {
+    input: {
+      title: args.join(" ") || "New session",
+      source: "tui",
+      metadata: { createdBy: "tui" },
+    },
   });
   state.sessionId = session.id;
   state.lastRunId = "";
@@ -322,28 +325,36 @@ function printSessionMessages(messages): void {
   output.write("\n");
 }
 
-function clearCurrentSession(runtime, state): void {
-  const result = runtime.clearSession(state.sessionId, {
-    source: "tui",
-    reason: "cleared from TUI",
-    nextTitle: "New session",
+async function clearCurrentSession(runtime, state): Promise<void> {
+  const result = await runtime.runCommand("session.clear", {
+    input: {
+      sessionId: state.sessionId,
+      source: "tui",
+      reason: "cleared from TUI",
+      nextTitle: "New session",
+    },
   });
   state.sessionId = result.next.id;
   state.lastRunId = "";
   output.write(`\nHidden session: ${result.hidden?.id || "(none)"}\nNew session: ${result.next.id}\n\n`);
 }
 
-function restoreSession(runtime, state, args: string[]): void {
+async function restoreSession(runtime, state, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("session id is required");
-  const session = runtime.restoreSession(args[0]);
+  const session = await runtime.runCommand("session.restore", {
+    input: { sessionId: args[0] },
+  });
   state.sessionId = session.id;
   output.write(`\nRestored session: ${session.id}\n\n`);
 }
 
-function trashSession(runtime, args: string[]): void {
+async function trashSession(runtime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("session id is required");
-  const session = runtime.trashSession(args[0], {
-    reason: "trashed from TUI",
+  const session = await runtime.runCommand("session.trash", {
+    input: {
+      sessionId: args[0],
+      reason: "trashed from TUI",
+    },
   });
   output.write(`\nTrashed session: ${session.id}\nDelete after: ${session.deleteAfter || "(not scheduled)"}\n\n`);
 }
@@ -385,13 +396,17 @@ function printCandidates(candidates): void {
 async function approveSkill(runtime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("candidate id is required");
   const reason = args.slice(1).join(" ") || "approved from TUI";
-  printJson(await runtime.approveSkillCandidate(args[0], { reason }));
+  printJson(await runtime.runCommand("skills.candidates.approve", {
+    input: { candidateId: args[0], reason },
+  }));
 }
 
-function rejectSkill(runtime, args: string[]): void {
+async function rejectSkill(runtime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("candidate id is required");
   const reason = args.slice(1).join(" ") || "rejected from TUI";
-  printJson(runtime.rejectSkillCandidate(args[0], reason));
+  printJson(await runtime.runCommand("skills.candidates.reject", {
+    input: { candidateId: args[0], reason },
+  }));
 }
 
 function searchExperiences(runtime, query: string): unknown[] {

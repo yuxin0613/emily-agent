@@ -164,27 +164,27 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/providers") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.addProvider({
-          id: String(body.id || ""),
-          type: parseProviderType(body.type),
-          enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
-          model: typeof body.model === "string" ? body.model : undefined,
-          config: typeof body.config === "object" && body.config ? body.config as Record<string, unknown> : undefined,
-        }));
+        return sendJson(response, 200, await runtime.runCommand("provider.add", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/providers/enable") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.enableProvider(String(body.id || body.providerId || "")));
+        return sendJson(response, 200, await runtime.runCommand("provider.enable", {
+          input: { providerId: String(body.id || body.providerId || "") },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/providers/disable") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.disableProvider(String(body.id || body.providerId || "")));
+        return sendJson(response, 200, await runtime.runCommand("provider.disable", {
+          input: { providerId: String(body.id || body.providerId || "") },
+        }));
       }
 
       if (request.method === "DELETE" && url.pathname === "/providers") {
-        return sendJson(response, 200, await runtime.removeProvider(String(url.searchParams.get("id") || url.searchParams.get("providerId") || "")));
+        return sendJson(response, 200, await runtime.runCommand("provider.remove", {
+          input: { providerId: String(url.searchParams.get("id") || url.searchParams.get("providerId") || "") },
+        }));
       }
 
       if (request.method === "GET" && url.pathname === "/tools") {
@@ -220,25 +220,27 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/skill-candidates/build") {
         const body = await readJson(request);
-        return sendJson(response, 200, runtime.buildSkillCandidates({
-          day: typeof body.day === "string" ? new Date(body.day) : new Date(),
-          lookbackDays: typeof body.lookbackDays === "number" ? body.lookbackDays : undefined,
-          minOccurrences: typeof body.minOccurrences === "number" ? body.minOccurrences : undefined,
-          minScore: typeof body.minScore === "number" ? body.minScore : undefined,
-          dailyLimit: typeof body.dailyLimit === "number" ? body.dailyLimit : undefined,
-        }));
+        return sendJson(response, 200, await runtime.runCommand("skills.candidates.build", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/skill-candidates/approve") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.approveSkillCandidate(String(body.candidateId || body.id || ""), {
-          reason: typeof body.reason === "string" ? body.reason : undefined,
+        return sendJson(response, 200, await runtime.runCommand("skills.candidates.approve", {
+          input: {
+            candidateId: String(body.candidateId || body.id || ""),
+            reason: typeof body.reason === "string" ? body.reason : undefined,
+          },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/skill-candidates/reject") {
         const body = await readJson(request);
-        return sendJson(response, 200, runtime.rejectSkillCandidate(String(body.candidateId || body.id || ""), String(body.reason || "rejected")));
+        return sendJson(response, 200, await runtime.runCommand("skills.candidates.reject", {
+          input: {
+            candidateId: String(body.candidateId || body.id || ""),
+            reason: String(body.reason || "rejected"),
+          },
+        }));
       }
 
       if (request.method === "GET" && url.pathname === "/roles") {
@@ -247,26 +249,19 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/roles") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.addRole({
-          name: String(body.name || ""),
-          role: String(body.role || body.name || ""),
-          provider: typeof body.provider === "string" ? body.provider : undefined,
-          model: typeof body.model === "string" ? body.model : undefined,
-          temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-          allowedTools: Array.isArray(body.allowedTools) ? body.allowedTools.map(String) : undefined,
-          forbiddenTools: Array.isArray(body.forbiddenTools) ? body.forbiddenTools.map(String) : undefined,
-          capabilities: Array.isArray(body.capabilities) ? body.capabilities.map(String) : undefined,
-          skills: Array.isArray(body.skills) ? body.skills.map(String) : undefined,
-          skillAllowlist: Array.isArray(body.skillAllowlist) ? body.skillAllowlist.map(String) : undefined,
-          outputContract: typeof body.outputContract === "string" ? body.outputContract : undefined,
-          instructions: String(body.instructions || "Follow the task requirements and return a concise result."),
+        return sendJson(response, 200, await runtime.runCommand("role.add", {
+          input: {
+            ...body,
+            role: typeof body.role === "string" ? body.role : String(body.name || ""),
+            instructions: typeof body.instructions === "string" ? body.instructions : "Follow the task requirements and return a concise result.",
+          },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/roles/defaults") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.initializeDefaultRoles({
-          overwrite: body.overwrite === true,
+        return sendJson(response, 200, await runtime.runCommand("role.initialize_defaults", {
+          input: { overwrite: body.overwrite === true },
         }));
       }
 
@@ -313,41 +308,54 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/sessions/new") {
         const body = await readJson(request);
-        return sendJson(response, 200, runtime.createSession({
-          title: typeof body.title === "string" ? body.title : "New session",
-          source: typeof body.source === "string" ? body.source : "web",
-          metadata: { createdBy: "web" },
+        return sendJson(response, 200, await runtime.runCommand("session.create", {
+          input: {
+            title: typeof body.title === "string" ? body.title : "New session",
+            source: typeof body.source === "string" ? body.source : "web",
+            metadata: { createdBy: "web" },
+          },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/clear") {
         const body = await readJson(request);
-        return sendJson(response, 200, runtime.clearSession(String(body.sessionId || ""), {
-          source: "web",
-          reason: typeof body.reason === "string" ? body.reason : "cleared from web",
-          nextTitle: typeof body.nextTitle === "string" ? body.nextTitle : "New session",
+        return sendJson(response, 200, await runtime.runCommand("session.clear", {
+          input: {
+            sessionId: String(body.sessionId || ""),
+            source: "web",
+            reason: typeof body.reason === "string" ? body.reason : "cleared from web",
+            nextTitle: typeof body.nextTitle === "string" ? body.nextTitle : "New session",
+          },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/restore") {
         const body = await readJson(request);
-        return sendJson(response, 200, runtime.restoreSession(String(body.sessionId || body.id || "")));
+        return sendJson(response, 200, await runtime.runCommand("session.restore", {
+          input: { sessionId: String(body.sessionId || body.id || "") },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/trash") {
         const body = await readJson(request);
-        return sendJson(response, 200, runtime.trashSession(String(body.sessionId || body.id || ""), {
-          deleteAfterDays: typeof body.deleteAfterDays === "number" ? body.deleteAfterDays : 30,
-          reason: typeof body.reason === "string" ? body.reason : "trashed from web",
+        return sendJson(response, 200, await runtime.runCommand("session.trash", {
+          input: {
+            sessionId: String(body.sessionId || body.id || ""),
+            deleteAfterDays: typeof body.deleteAfterDays === "number" ? body.deleteAfterDays : 30,
+            reason: typeof body.reason === "string" ? body.reason : "trashed from web",
+          },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/roles/provider") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.updateRoleProvider(String(body.name || ""), {
-          provider: typeof body.provider === "string" ? body.provider : undefined,
-          model: typeof body.model === "string" ? body.model : undefined,
-          temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+        return sendJson(response, 200, await runtime.runCommand("role.update_provider", {
+          input: {
+            name: String(body.name || ""),
+            provider: typeof body.provider === "string" ? body.provider : undefined,
+            model: typeof body.model === "string" ? body.model : undefined,
+            temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+          },
         }));
       }
 
@@ -400,7 +408,7 @@ export async function startWebServer({
       }
 
       if (request.method === "POST" && url.pathname === "/diagnostics/repair") {
-        return sendJson(response, 200, runtime.diagnostics({ repair: true }));
+        return sendJson(response, 200, await runtime.runCommand("diagnostics.repair"));
       }
 
       if (request.method === "POST" && url.pathname === "/experiences/build-daily") {
@@ -413,20 +421,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/maintenance") {
         const body = await readJson(request);
-        const result = await runtime.maintenance({
-          day: typeof body.day === "string" ? new Date(body.day) : new Date(),
-          staleRunMs: typeof body.staleRunMs === "number" ? body.staleRunMs : undefined,
-          maxEvents: typeof body.maxEvents === "number" ? body.maxEvents : undefined,
-          pruneMemoryCandidateDays: typeof body.pruneMemoryCandidateDays === "number" ? body.pruneMemoryCandidateDays : undefined,
-          maxFileMemoryRecords: typeof body.maxFileMemoryRecords === "number" ? body.maxFileMemoryRecords : undefined,
-          maxVectorMemoryRecords: typeof body.maxVectorMemoryRecords === "number" ? body.maxVectorMemoryRecords : undefined,
-          pruneArchivedExperienceVectorDays: typeof body.pruneArchivedExperienceVectorDays === "number" ? body.pruneArchivedExperienceVectorDays : undefined,
-          sessionTrashDays: typeof body.sessionTrashDays === "number" ? body.sessionTrashDays : undefined,
-          skillLookbackDays: typeof body.skillLookbackDays === "number" ? body.skillLookbackDays : undefined,
-          skillMinOccurrences: typeof body.skillMinOccurrences === "number" ? body.skillMinOccurrences : undefined,
-          skillMinScore: typeof body.skillMinScore === "number" ? body.skillMinScore : undefined,
-          skillDailyLimit: typeof body.skillDailyLimit === "number" ? body.skillDailyLimit : undefined,
-        });
+        const result = await runtime.runCommand("maintenance.run", { input: body });
         return sendJson(response, 200, result);
       }
 
@@ -442,12 +437,22 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/cancel-task") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.cancelTask(String(body.taskId || ""), String(body.reason || "cancelled by user")));
+        return sendJson(response, 200, await runtime.runCommand("task.cancel", {
+          input: {
+            taskId: String(body.taskId || ""),
+            reason: String(body.reason || "cancelled by user"),
+          },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/cancel-run") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.cancelRun(String(body.runId || ""), String(body.reason || "cancelled by user")));
+        return sendJson(response, 200, await runtime.runCommand("run.cancel", {
+          input: {
+            runId: String(body.runId || ""),
+            reason: String(body.reason || "cancelled by user"),
+          },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/chat") {

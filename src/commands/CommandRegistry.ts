@@ -122,7 +122,16 @@ interface CommandRuntime {
   maintenance: (options?: Record<string, unknown>) => Promise<unknown>;
   cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
   cancelRun: (runId: string, reason?: string) => Promise<unknown>;
-  executeTool: (input: { tool: string; args?: Record<string, unknown>; role?: string; permissionMode?: unknown; taskId?: string; runId?: string; sessionId?: string }) => Promise<unknown>;
+  executeTool: (input: {
+    tool: string;
+    args?: Record<string, unknown>;
+    approval?: { approved?: boolean; reason?: string; approvedBy?: string };
+    role?: string;
+    permissionMode?: unknown;
+    taskId?: string;
+    runId?: string;
+    sessionId?: string;
+  }) => Promise<unknown>;
 }
 
 function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
@@ -233,7 +242,10 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ args, input }) => runtime.createSession({
         title: stringOptional(input.title) || args.join(" ") || "New session",
         source: stringOptional(input.source) || "command",
-        metadata: objectInput(input.metadata),
+        metadata: {
+          createdBy: "command",
+          ...objectInput(input.metadata),
+        },
       }),
     },
     {
@@ -245,10 +257,10 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         args: ["<sessionId>"],
         examples: ["session.clear sess_123"],
         required: ["sessionId"],
-        properties: { sessionId: "string", reason: "string", nextTitle: "string" },
+        properties: { sessionId: "string", source: "string", reason: "string", nextTitle: "string" },
       },
       run: ({ args, input }) => runtime.clearSession(stringInput(input.sessionId, args[0], "sessionId"), {
-        source: "command",
+        source: stringOptional(input.source) || "command",
         reason: stringOptional(input.reason) || "cleared from command registry",
         nextTitle: stringOptional(input.nextTitle) || "New session",
       }),
@@ -395,9 +407,9 @@ function skillCandidateCommands(runtime: CommandRuntime): RuntimeCommand[] {
       inputSchema: {
         args: [],
         examples: ["skills.candidates.build"],
-        properties: { lookbackDays: "number", minOccurrences: "number", minScore: "number", dailyLimit: "number" },
+        properties: { day: "string", lookbackDays: "number", minOccurrences: "number", minScore: "number", dailyLimit: "number" },
       },
-      run: ({ input }) => runtime.buildSkillCandidates(input),
+      run: ({ input }) => runtime.buildSkillCandidates(normalizeDatedOptions(input)),
     },
     {
       name: "skills.candidates.approve",
@@ -448,9 +460,22 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
       inputSchema: {
         args: [],
         examples: ["maintenance.run"],
-        properties: { staleRunMs: "number", maxEvents: "number", sessionTrashDays: "number" },
+        properties: {
+          day: "string",
+          staleRunMs: "number",
+          maxEvents: "number",
+          pruneMemoryCandidateDays: "number",
+          maxFileMemoryRecords: "number",
+          maxVectorMemoryRecords: "number",
+          pruneArchivedExperienceVectorDays: "number",
+          sessionTrashDays: "number",
+          skillLookbackDays: "number",
+          skillMinOccurrences: "number",
+          skillMinScore: "number",
+          skillDailyLimit: "number",
+        },
       },
-      run: ({ input }) => runtime.maintenance(input),
+      run: ({ input }) => runtime.maintenance(normalizeDatedOptions(input)),
     },
     {
       name: "task.cancel",
@@ -487,11 +512,12 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         args: ["<tool>"],
         examples: ['tool.execute read_file {"path":"README.md"}'],
         required: ["tool"],
-        properties: { tool: "string", args: "object", role: "string", permissionMode: "string", taskId: "string", runId: "string", sessionId: "string" },
+        properties: { tool: "string", args: "object", approval: "object", role: "string", permissionMode: "string", taskId: "string", runId: "string", sessionId: "string" },
       },
       run: ({ args, input }) => runtime.executeTool({
         tool: stringInput(input.tool, args[0], "tool"),
         args: objectInput(input.args),
+        approval: objectInput(input.approval) as { approved?: boolean; reason?: string; approvedBy?: string },
         role: stringOptional(input.role),
         permissionMode: input.permissionMode,
         taskId: stringOptional(input.taskId),
@@ -589,6 +615,13 @@ function numberInput(input: unknown, arg: string | undefined, fallback: number):
 
 function objectInput(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function normalizeDatedOptions(input: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...input,
+    ...(typeof input.day === "string" && input.day.trim() ? { day: new Date(input.day) } : {}),
+  };
 }
 
 function stringArray(value: unknown): string[] | undefined {

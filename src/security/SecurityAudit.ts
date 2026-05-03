@@ -29,7 +29,7 @@ export interface SecurityAuditReport {
 }
 
 const HIGH_RISK_TOOLS = new Set<ToolPermission>(["git_reset", "delete_file"]);
-const APPROVAL_TOOLS = new Set<ToolPermission>(["shell", "network"]);
+const APPROVAL_TOOLS = new Set<ToolPermission>(["shell", "network", "http_fetch", "browser", "github"]);
 const SECRET_KEY_PATTERN = /(apiKey|authorization|token|secret|password)/i;
 
 export async function runSecurityAudit({

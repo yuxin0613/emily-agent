@@ -8,8 +8,20 @@ export interface VectorStoreConfig {
   baseUrl?: string;
   collection?: string;
   connectionStringEnv?: string;
+  pgDriver?: PgVectorDriver;
+  tableName?: string;
+  dimensions?: number;
   timeoutMs?: number;
   fallbackToFile?: boolean;
+}
+
+export interface PgVectorDriver {
+  query(sql: string, params?: unknown[]): Promise<PgVectorQueryResult | Record<string, unknown>[]>;
+}
+
+export interface PgVectorQueryResult {
+  rows?: Record<string, unknown>[];
+  rowCount?: number;
 }
 
 export interface VectorStoreItem {
@@ -267,26 +279,116 @@ export class PgVectorStoreAdapter implements VectorStoreAdapter {
   collection: string;
   fallbackToFile: boolean;
   private readonly connectionStringEnv: string;
+  private readonly tableName: string;
+  private readonly dimensions: number;
+  private readonly driver: PgVectorDriver | null;
+  private ready = false;
 
   constructor(config: VectorStoreConfig & { collection: string; fallbackToFile: boolean }) {
     this.collection = config.collection;
     this.fallbackToFile = config.fallbackToFile;
     this.connectionStringEnv = config.connectionStringEnv || "DATABASE_URL";
+    this.driver = config.pgDriver || null;
+    this.tableName = sqlIdentifier(config.tableName || "agentos_memory_vectors");
+    this.dimensions = positiveInteger(config.dimensions, 64);
   }
 
-  async upsert(): Promise<void> {
-    throw new Error(`pgvector adapter requires a database driver bound by the host app via ${this.connectionStringEnv}.`);
+  async upsert(items: VectorStoreItem[]): Promise<void> {
+    if (!items.length) return;
+    await this.ensureReady(items[0].embedding.length);
+    for (const item of items) {
+      await this.query(`
+        INSERT INTO ${this.tableName} (
+          id, collection, scope, kind, content, record_json, vector_json, embedding, content_hash, updated_at, hits
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::vector, $9, $10, $11
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          collection = excluded.collection,
+          scope = excluded.scope,
+          kind = excluded.kind,
+          content = excluded.content,
+          record_json = excluded.record_json,
+          vector_json = excluded.vector_json,
+          embedding = excluded.embedding,
+          content_hash = excluded.content_hash,
+          updated_at = excluded.updated_at,
+          hits = excluded.hits
+      `, [
+        item.id,
+        this.collection,
+        item.record.scope,
+        item.record.kind,
+        item.record.content,
+        JSON.stringify(item.record),
+        JSON.stringify(item.vector),
+        vectorLiteral(item.embedding),
+        item.contentHash,
+        item.updatedAt,
+        item.hits,
+      ]);
+    }
   }
 
-  async search(): Promise<VectorStoreSearchResult[]> {
-    throw new Error(`pgvector adapter requires a database driver bound by the host app via ${this.connectionStringEnv}.`);
+  async search(input: VectorStoreSearchInput): Promise<VectorStoreSearchResult[]> {
+    await this.ensureReady(input.queryEmbedding.length);
+    const rows = await this.queryRows(`
+      SELECT
+        record_json AS record,
+        1 / (1 + (embedding <=> $2::vector)) AS score
+      FROM ${this.tableName}
+      WHERE collection = $1 AND scope = $3
+      ORDER BY embedding <=> $2::vector
+      LIMIT $4
+    `, [
+      this.collection,
+      vectorLiteral(input.queryEmbedding),
+      input.scope,
+      input.limit,
+    ]);
+    return rows.map(recordFromPgRow).filter(isSearchResult);
   }
 
-  async compact(): Promise<{ before: number; after: number; removed: number; algorithm: string }> {
-    return { before: 0, after: 0, removed: 0, algorithm: "pgvector:external" };
+  async compact({ maxItems }: { maxItems: number }): Promise<{ before: number; after: number; removed: number; algorithm: string }> {
+    await this.ensureReady();
+    const before = await this.count();
+    await this.query(`
+      WITH ranked AS (
+        SELECT id, row_number() OVER (
+          ORDER BY hits DESC, updated_at DESC, id ASC
+        ) AS rn
+        FROM ${this.tableName}
+        WHERE collection = $1
+      )
+      DELETE FROM ${this.tableName}
+      WHERE id IN (SELECT id FROM ranked WHERE rn > $2)
+    `, [this.collection, maxItems]);
+    const after = await this.count();
+    return { before, after, removed: Math.max(0, before - after), algorithm: "pgvector:cosine" };
   }
 
   async health(): Promise<VectorStoreHealth> {
+    if (this.driver) {
+      try {
+        await this.ensureReady();
+        const count = await this.count();
+        return {
+          kind: "pgvector",
+          ok: true,
+          collection: this.collection,
+          fallbackToFile: this.fallbackToFile,
+          message: `reachable; ${count} indexed records`,
+        };
+      } catch (error) {
+        return {
+          kind: "pgvector",
+          ok: false,
+          collection: this.collection,
+          fallbackToFile: this.fallbackToFile,
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
     return {
       kind: "pgvector",
       ok: false,
@@ -294,6 +396,46 @@ export class PgVectorStoreAdapter implements VectorStoreAdapter {
       fallbackToFile: this.fallbackToFile,
       message: `No built-in pg driver is bundled; inject a host adapter or configure ${this.connectionStringEnv}.`,
     };
+  }
+
+  private async ensureReady(dimensions = this.dimensions): Promise<void> {
+    if (this.ready) return;
+    await this.query("CREATE EXTENSION IF NOT EXISTS vector");
+    await this.query(`
+      CREATE TABLE IF NOT EXISTS ${this.tableName} (
+        id TEXT PRIMARY KEY,
+        collection TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        content TEXT NOT NULL,
+        record_json JSONB NOT NULL,
+        vector_json JSONB NOT NULL,
+        embedding vector(${positiveInteger(dimensions, this.dimensions)}) NOT NULL,
+        content_hash TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        hits INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    await this.query(`CREATE INDEX IF NOT EXISTS ${sqlIdentifier(`${unquotedIdentifier(this.tableName)}_collection_scope_idx`)} ON ${this.tableName} (collection, scope)`);
+    await this.query(`CREATE INDEX IF NOT EXISTS ${sqlIdentifier(`${unquotedIdentifier(this.tableName)}_embedding_idx`)} ON ${this.tableName} USING ivfflat (embedding vector_cosine_ops)`);
+    this.ready = true;
+  }
+
+  private async count(): Promise<number> {
+    const rows = await this.queryRows(`SELECT count(*)::int AS count FROM ${this.tableName} WHERE collection = $1`, [this.collection]);
+    return Number(rows[0]?.count || 0);
+  }
+
+  private async query(sql: string, params: unknown[] = []): Promise<PgVectorQueryResult | Record<string, unknown>[]> {
+    if (!this.driver) {
+      throw new Error(`pgvector adapter requires a host-injected PgVectorDriver; configure vectorStore.pgDriver or ${this.connectionStringEnv}.`);
+    }
+    return this.driver.query(sql, params);
+  }
+
+  private async queryRows(sql: string, params: unknown[] = []): Promise<Record<string, unknown>[]> {
+    const result = await this.query(sql, params);
+    return Array.isArray(result) ? result : result.rows || [];
   }
 }
 
@@ -325,6 +467,21 @@ function recordFromPayload(payload: Record<string, unknown>, score: number): Vec
   return { ...record, score };
 }
 
+function recordFromPgRow(row: Record<string, unknown>): VectorStoreSearchResult | null {
+  try {
+    const recordValue = row.record;
+    const record = typeof recordValue === "string"
+      ? JSON.parse(recordValue) as MemoryRecord
+      : recordValue && typeof recordValue === "object"
+        ? recordValue as MemoryRecord
+        : null;
+    if (!record) return null;
+    return recordFromPayload({ record }, Number(row.score || 0));
+  } catch {
+    return null;
+  }
+}
+
 function isSearchResult(value: VectorStoreSearchResult | null): value is VectorStoreSearchResult {
   return Boolean(value);
 }
@@ -345,6 +502,28 @@ function distanceToScore(distance: unknown): number {
 
 function escapeFilterValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
+function vectorLiteral(embedding: number[]): string {
+  return `[${embedding.map((value) => Number.isFinite(value) ? Number(value).toFixed(8) : "0").join(",")}]`;
+}
+
+function sqlIdentifier(input: string): string {
+  const parts = input.split(".").map((part) => part.replace(/^"|"$/g, ""));
+  if (!parts.length || parts.some((part) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) {
+    throw new Error(`Invalid SQL identifier: ${input}`);
+  }
+  return parts.map((part) => `"${part}"`).join(".");
+}
+
+function unquotedIdentifier(input: string): string {
+  const parts = input.split(".");
+  return parts[parts.length - 1]!.replace(/"/g, "");
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : fallback;
 }
 
 function parseVectorStoreKind(value: unknown): VectorStoreKind {

@@ -53,6 +53,11 @@ const runtime = {
   buildDailyExperiences: () => ({}),
   health: () => ({ ok: true }),
   maintenance: async () => ({}),
+  runCommand: async (name: string, options: { input?: Record<string, unknown> } = {}) => {
+    if (name === "diagnostics.repair") return runtime.diagnostics({ repair: true });
+    if (name === "maintenance.run") return runtime.maintenance(options.input);
+    return {};
+  },
   roleAgentManager: {
     on: () => undefined,
     off: () => undefined,

@@ -171,23 +171,40 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         limit: parseLimit(params.limit, 50, 500),
       });
     case "sessions.create":
-      return runtime.createSession({
-        title: typeof params.title === "string" ? params.title : "New session",
-        source: typeof params.source === "string" ? params.source : "gateway",
-        metadata: { createdBy: "gateway" },
+      return runtime.runCommand("session.create", {
+        input: {
+          title: typeof params.title === "string" ? params.title : "New session",
+          source: typeof params.source === "string" ? params.source : "gateway",
+          metadata: { createdBy: "gateway" },
+        },
       });
     case "sessions.clear":
-      return runtime.clearSession(String(params.sessionId || ""), {
-        source: "gateway",
-        reason: typeof params.reason === "string" ? params.reason : "cleared from gateway",
-        nextTitle: typeof params.nextTitle === "string" ? params.nextTitle : "New session",
+      return runtime.runCommand("session.clear", {
+        input: {
+          sessionId: String(params.sessionId || ""),
+          source: "gateway",
+          reason: typeof params.reason === "string" ? params.reason : "cleared from gateway",
+          nextTitle: typeof params.nextTitle === "string" ? params.nextTitle : "New session",
+        },
       });
     case "sessions.restore":
-      return runtime.restoreSession(String(params.sessionId || params.id || ""));
+      return runtime.runCommand("session.restore", {
+        input: { sessionId: String(params.sessionId || params.id || "") },
+      });
     case "tasks.cancel":
-      return runtime.cancelTask(String(params.taskId || ""), typeof params.reason === "string" ? params.reason : "cancelled from gateway");
+      return runtime.runCommand("task.cancel", {
+        input: {
+          taskId: String(params.taskId || ""),
+          reason: typeof params.reason === "string" ? params.reason : "cancelled from gateway",
+        },
+      });
     case "runs.cancel":
-      return runtime.cancelRun(String(params.runId || ""), typeof params.reason === "string" ? params.reason : "cancelled from gateway");
+      return runtime.runCommand("run.cancel", {
+        input: {
+          runId: String(params.runId || ""),
+          reason: typeof params.reason === "string" ? params.reason : "cancelled from gateway",
+        },
+      });
     case "providers.list":
       return runtime.listProviders();
     case "providers.health":
@@ -200,7 +217,7 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
     case "roles.list":
       return runtime.listRoles();
     case "roles.add":
-      return runtime.addRole(params as Parameters<GatewayRuntime["addRole"]>[0]);
+      return runtime.runCommand("role.add", { input: params });
     case "tools.list":
       return runtime.listTools();
     case "skills.list":
@@ -217,11 +234,11 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
     case "timeline.get":
       return runtime.getTimeline({ runId: String(params.runId || "") });
     case "diagnostics.run":
-      return runtime.diagnostics({ repair: params.repair === true });
+      return params.repair === true ? runtime.runCommand("diagnostics.repair") : runtime.diagnostics({ repair: false });
     case "doctor.run":
       return runtime.doctor({ deep: params.deep === true, repair: params.repair === true });
     case "maintenance.run":
-      return runtime.maintenance({});
+      return runtime.runCommand("maintenance.run", { input: params });
     case "security.audit":
       return runtime.securityAudit();
     case "sessions.resume_latest":

@@ -55,6 +55,14 @@ try {
     limit: 5,
   });
   assert.ok(memory.semantic.some((item) => item.content.includes("memory candidate approval")));
+
+  const replan = await harness.runMultiRoundReplanBenchmark();
+  assertHasEvent(replan.timeline.events, "task_graph.failure_clustered", (event) => event.payload.cluster === "timeout");
+  assertHasEvent(replan.timeline.events, "task_graph.failure_clustered", (event) => event.payload.cluster === "provider");
+  assertHasEvent(replan.timeline.events, "task_graph.replan_quality", (event) => typeof event.payload.score === "number");
+  assert.ok(replan.timeline.events.filter((event) => event.type === "task_graph.replanned").length >= 2);
+  assert.ok(replan.result.quality.failureClusters.timeout >= 1);
+  assert.equal(harness.runtime.taskStore.getTaskGraph(replan.result.graphId!)?.status, "done");
 } finally {
   await harness.close();
 }

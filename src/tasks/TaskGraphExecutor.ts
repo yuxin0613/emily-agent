@@ -27,10 +27,19 @@ export interface TaskGraphExecutionResult {
 export interface TaskGraphQuality {
   score: number;
   issues: string[];
+  recommendations: string[];
   taskCount: number;
   failedCount: number;
   blockedCount: number;
   dynamicCount: number;
+  failureClusters: Record<string, number>;
+  budget: {
+    maxParallelTasks: number;
+    finalParallelTasks: number;
+    maxDynamicTasks: number;
+    maxReplanAttempts: number;
+    expandedTasks: number;
+  };
 }
 
 export interface TaskGraphPause {
@@ -89,7 +98,9 @@ export class TaskGraphExecutor {
     let pause: TaskGraphPause | null = null;
     const recorded = new Set<string>();
     const recordedInternal = new Set<string>();
+    const clusteredTerminal = new Set<string>();
     const graphId = graphIdFrom(tasksByKey);
+    let effectiveParallelTasks = this.maxParallelTasks;
 
     const record = (task: Task | null) => {
       if (!task || recorded.has(task.id)) return;
@@ -98,6 +109,11 @@ export class TaskGraphExecutor {
       completed.push(task);
       if (task.status === "blocked") blocked.push(task);
       if (task.status === "failed" || task.status === "dead_letter") failed.push(task);
+      if ((task.status === "blocked" || task.status === "failed" || task.status === "dead_letter" || task.status === "cancelled")
+        && !clusteredTerminal.has(task.id)) {
+        clusteredTerminal.add(task.id);
+        this.recordFailureCluster(task, tasksByKey);
+      }
     };
     const recordInternal = (task: Task | null) => {
       if (!task || recordedInternal.has(task.id)) return;
@@ -112,6 +128,29 @@ export class TaskGraphExecutor {
         record(task);
       }
 
+      const adjustedParallelTasks = this.adaptiveParallelLimit({
+        current: effectiveParallelTasks,
+        failedCount: failed.length,
+        blockedCount: blocked.length,
+        pendingCount: pending.size,
+        expandedCount: expanded.length,
+      });
+      if (adjustedParallelTasks !== effectiveParallelTasks) {
+        effectiveParallelTasks = adjustedParallelTasks;
+        this.taskStore.addEvent({
+          type: "task_graph.budget_adjusted",
+          payload: {
+            graphId: graphId || "",
+            runId: runIdFrom(tasksByKey) || "",
+            maxParallelTasks: this.maxParallelTasks,
+            effectiveParallelTasks,
+            failedCount: failed.length,
+            blockedCount: blocked.length,
+            pendingCount: pending.size,
+          },
+        });
+      }
+
       const ready = [...pending]
         .map((key) => tasksByKey[key])
         .filter((task) => {
@@ -119,7 +158,7 @@ export class TaskGraphExecutor {
           return status === "pending" || status === "queued";
         })
         .filter((task) => this.taskStore.dependenciesSatisfied(task.id))
-        .slice(0, this.maxParallelTasks);
+        .slice(0, effectiveParallelTasks);
 
       if (!ready.length) {
         for (const task of await this.blockRemaining([...pending].map((key) => tasksByKey[key]).filter(Boolean), "no executable tasks remain")) {
@@ -174,7 +213,20 @@ export class TaskGraphExecutor {
     }
 
     this.taskStore.refreshTaskGraphStatuses();
-    const quality = assessGraphQuality({ tasksByKey, completed, blocked, failed, expanded });
+    const quality = assessGraphQuality({
+      tasksByKey,
+      completed,
+      blocked,
+      failed,
+      expanded,
+      budget: {
+        maxParallelTasks: this.maxParallelTasks,
+        finalParallelTasks: effectiveParallelTasks,
+        maxDynamicTasks: this.maxDynamicTasks,
+        maxReplanAttempts: this.maxReplanAttempts,
+        expandedTasks: expanded.length,
+      },
+    });
     if (graphId) {
       this.taskStore.addEvent({
         type: "task_graph.quality",
@@ -342,12 +394,19 @@ export class TaskGraphExecutor {
     }
     const availableSlots = this.maxDynamicTasks - Object.keys(tasksByKey).length;
     if (availableSlots <= 0) return emptyExpansion();
+    const failureCluster = classifyFailure(task);
+    const maxNewTasks = this.replanTaskBudget({
+      availableSlots,
+      failureCluster,
+      attempt: attempts + 1,
+    });
 
     const plannerTask = this.createReplanPlannerTask({
       failedTask: task,
       existingKeys: new Set(Object.keys(tasksByKey)),
-      maxNewTasks: Math.min(availableSlots, 6),
+      maxNewTasks,
       attempt: attempts + 1,
+      failureCluster,
     });
     this.taskStore.addTaskDependency(plannerTask.id, task.id, "finished");
     const finishedPlanner = await this.runOne(plannerTask);
@@ -360,6 +419,8 @@ export class TaskGraphExecutor {
         plannerTaskId: finishedPlanner.id,
         plannerStatus: finishedPlanner.status,
         attempt: attempts + 1,
+        failureCluster,
+        maxNewTasks,
       },
     });
 
@@ -375,13 +436,30 @@ export class TaskGraphExecutor {
     const validation = validateGraphPatchSpec(parsed, {
       parentKey: graphKey,
       existingKeys: new Set(Object.keys(tasksByKey)),
-      maxTasks: Math.min(availableSlots, 6),
+      maxTasks: maxNewTasks,
       maxWave: readNonNegativeNumber(task.metadata.maxWaves, this.plan.maxWaves || 100),
     });
     if (!validation.ok) {
       this.recordPatchAnomaly(finishedPlanner, "planner_replan_invalid", validation.errors);
       return { plannerTask: finishedPlanner, created: [], pause: null };
     }
+    const replanQuality = assessPatchQuality(parsed, {
+      failedTask: task,
+      existingKeys: new Set(Object.keys(tasksByKey)),
+      failureCluster,
+      maxNewTasks,
+    });
+    this.taskStore.addEvent({
+      type: "task_graph.replan_quality",
+      taskId: task.id,
+      payload: {
+        graphId: typeof task.metadata.graphId === "string" ? task.metadata.graphId : "",
+        graphKey,
+        plannerTaskId: finishedPlanner.id,
+        failureCluster,
+        ...replanQuality,
+      },
+    });
     if (parsed.needsUserInput) {
       return {
         plannerTask: finishedPlanner,
@@ -413,7 +491,14 @@ export class TaskGraphExecutor {
         graphKey,
         plannerTaskId: finishedPlanner.id,
         addedTasks: specs.map((item) => item.key),
+        qualityScore: replanQuality.score,
+        qualityIssues: replanQuality.issues,
       },
+    });
+    this.markTaskReplanSuperseded(task, {
+      plannerTaskId: finishedPlanner.id,
+      recoveryKeys: specs.map((item) => item.key),
+      qualityScore: replanQuality.score,
     });
     return {
       plannerTask: finishedPlanner,
@@ -646,11 +731,13 @@ export class TaskGraphExecutor {
     existingKeys,
     maxNewTasks,
     attempt,
+    failureCluster,
   }: {
     failedTask: Task;
     existingKeys: Set<string>;
     maxNewTasks: number;
     attempt: number;
+    failureCluster: string;
   }): Task {
     const parentKey = String(failedTask.metadata.graphKey || "");
     const graphKey = uniqueInternalKey(`replan_${parentKey}_${attempt}`, existingKeys);
@@ -676,14 +763,24 @@ export class TaskGraphExecutor {
     return this.taskStore.createTask({
       role: "planner",
       title: `replan graph: ${parentKey}`,
-      input: this.replanPrompt({ failedTask, maxNewTasks, attempt }),
+      input: this.replanPrompt({ failedTask, maxNewTasks, attempt, failureCluster }),
       parentTaskId: failedTask.id,
       maxRetries: 1,
       metadata,
     });
   }
 
-  private replanPrompt({ failedTask, maxNewTasks, attempt }: { failedTask: Task; maxNewTasks: number; attempt: number }): string {
+  private replanPrompt({
+    failedTask,
+    maxNewTasks,
+    attempt,
+    failureCluster,
+  }: {
+    failedTask: Task;
+    maxNewTasks: number;
+    attempt: number;
+    failureCluster: string;
+  }): string {
     const parentKey = String(failedTask.metadata.graphKey || "");
     return [
       "Create a GraphPatchSpec JSON object to replan after a failed task in the current task graph.",
@@ -725,8 +822,10 @@ export class TaskGraphExecutor {
       "- Recovery tasks may depend on the failed parent with dependencyType=finished.",
       "- Ask for user input if the failure cannot be resolved with current context.",
       "- Do not recreate the same failing task without narrowing scope or changing approach.",
+      "- Prefer fewer high-confidence recovery tasks over a broad retry fan-out.",
       "",
       `attempt: ${attempt}`,
+      `failure cluster: ${failureCluster}`,
       `failed task role: ${failedTask.role}`,
       `failed task title: ${failedTask.title}`,
       `failed task error: ${failedTask.error || "(none)"}`,
@@ -769,6 +868,79 @@ export class TaskGraphExecutor {
     }
 
     return created.map((item) => this.taskStore.getTaskOrThrow(item.task.id));
+  }
+
+  private adaptiveParallelLimit({
+    current,
+    failedCount,
+    blockedCount,
+    pendingCount,
+    expandedCount,
+  }: {
+    current: number;
+    failedCount: number;
+    blockedCount: number;
+    pendingCount: number;
+    expandedCount: number;
+  }): number {
+    if (failedCount + blockedCount >= 2) return 1;
+    if (failedCount || blockedCount) return Math.max(1, Math.min(current, Math.ceil(this.maxParallelTasks / 2)));
+    if (expandedCount >= this.maxDynamicTasks * 0.8) return Math.max(1, Math.min(current, 2));
+    if (pendingCount > this.maxParallelTasks * 2) return this.maxParallelTasks;
+    return Math.max(1, Math.min(this.maxParallelTasks, current));
+  }
+
+  private replanTaskBudget({
+    availableSlots,
+    failureCluster,
+    attempt,
+  }: {
+    availableSlots: number;
+    failureCluster: string;
+    attempt: number;
+  }): number {
+    const base = failureCluster === "permission_or_policy" || failureCluster === "needs_user_input"
+      ? 2
+      : failureCluster === "timeout" || failureCluster === "provider"
+        ? 3
+        : 6;
+    return Math.max(1, Math.min(availableSlots, base, Math.max(1, 7 - attempt)));
+  }
+
+  private recordFailureCluster(task: Task, tasksByKey: Record<string, Task>): void {
+    const graphId = typeof task.metadata.graphId === "string" ? task.metadata.graphId : graphIdFrom(tasksByKey) || "";
+    this.taskStore.addEvent({
+      type: "task_graph.failure_clustered",
+      taskId: task.id,
+      payload: {
+        graphId,
+        runId: runIdFrom(tasksByKey) || "",
+        graphKey: typeof task.metadata.graphKey === "string" ? task.metadata.graphKey : "",
+        status: task.status,
+        cluster: classifyFailure(task),
+        retryCount: task.retryCount,
+      },
+    });
+  }
+
+  private markTaskReplanSuperseded(task: Task, {
+    plannerTaskId,
+    recoveryKeys,
+    qualityScore,
+  }: {
+    plannerTaskId: string;
+    recoveryKeys: string[];
+    qualityScore: number;
+  }): void {
+    this.taskStore.updateTaskMetadata(task.id, {
+      ...task.metadata,
+      replanSupersededAt: new Date().toISOString(),
+      replanPlannerTaskId: plannerTaskId,
+      replanRecoveryKeys: recoveryKeys,
+      replanQualityScore: qualityScore,
+    }, {
+      reason: "failed task superseded by replan recovery tasks",
+    });
   }
 
   private createDynamicTask(spec: PlanTaskSpec, parentTask: Task, expansionDepth: number): Task {
@@ -845,22 +1017,30 @@ function assessGraphQuality({
   blocked,
   failed,
   expanded,
+  budget,
 }: {
   tasksByKey: Record<string, Task>;
   completed: Task[];
   blocked: Task[];
   failed: Task[];
   expanded: Task[];
+  budget: TaskGraphQuality["budget"];
 }): TaskGraphQuality {
   const issues: string[] = [];
+  const recommendations: string[] = [];
   const tasks = Object.values(tasksByKey);
   const missingAcceptance = tasks.filter((task) => !Array.isArray(task.metadata.acceptanceCriteria) || !task.metadata.acceptanceCriteria.length).length;
   const failedCount = failed.length;
   const blockedCount = blocked.length;
+  const failureClusters = countFailureClusters([...failed, ...blocked]);
   if (missingAcceptance) issues.push(`${missingAcceptance} task(s) lack acceptance criteria`);
   if (failedCount) issues.push(`${failedCount} task(s) failed`);
   if (blockedCount) issues.push(`${blockedCount} task(s) blocked`);
   if (!completed.length) issues.push("no terminal task was recorded");
+  if (failureClusters.permission_or_policy) recommendations.push("narrow role permissions or request explicit approval before retrying the affected branch");
+  if (failureClusters.timeout) recommendations.push("split timeout-prone tasks into smaller recovery tasks with shorter acceptance criteria");
+  if (failureClusters.provider) recommendations.push("retry provider-sensitive work through fallback provider or reduce prompt size");
+  if (blockedCount) recommendations.push("surface blocked dependencies before adding more dynamic work");
   const terminalRatio = tasks.length ? completed.length / tasks.length : 0;
   const acceptancePenalty = tasks.length ? missingAcceptance / tasks.length : 0;
   const failurePenalty = tasks.length ? (failedCount + blockedCount * 0.5) / tasks.length : 0;
@@ -868,11 +1048,73 @@ function assessGraphQuality({
   return {
     score: Number(score.toFixed(3)),
     issues,
+    recommendations,
     taskCount: tasks.length,
     failedCount,
     blockedCount,
     dynamicCount: expanded.length,
+    failureClusters,
+    budget,
   };
+}
+
+function assessPatchQuality(
+  patch: GraphPatchSpec,
+  {
+    failedTask,
+    existingKeys,
+    failureCluster,
+    maxNewTasks,
+  }: {
+    failedTask: Task;
+    existingKeys: Set<string>;
+    failureCluster: string;
+    maxNewTasks: number;
+  },
+): { score: number; issues: string[]; taskCount: number; asksUser: boolean } {
+  const issues: string[] = [];
+  if (patch.tasks.length > maxNewTasks) issues.push(`patch exceeds adaptive replan budget ${maxNewTasks}`);
+  if (!patch.tasks.length && !patch.needsUserInput && !patch.stop) issues.push("patch did not add recovery work or ask for input");
+  if (patch.tasks.some((task) => existingKeys.has(task.key))) issues.push("patch reuses existing graph keys");
+  if (patch.tasks.some((task) => task.dependsOn.includes(String(failedTask.metadata.graphKey || "")) && task.dependencyType !== "finished")) {
+    issues.push("recovery task depends on failed parent with success dependency");
+  }
+  if (failureCluster === "permission_or_policy" && !patch.needsUserInput && patch.tasks.some((task) => task.permissionMode === "danger_full_access")) {
+    issues.push("permission failure recovery escalates to danger_full_access without asking user");
+  }
+  const narrowed = patch.tasks.some((task) => !sameText(task.input, failedTask.input) || task.role !== failedTask.role);
+  if (patch.tasks.length && !narrowed) issues.push("recovery tasks look identical to the failed task");
+  const score = clamp01(1 - issues.length * 0.2 - Math.max(0, patch.tasks.length - maxNewTasks) * 0.1);
+  return {
+    score: Number(score.toFixed(3)),
+    issues,
+    taskCount: patch.tasks.length,
+    asksUser: patch.needsUserInput,
+  };
+}
+
+function countFailureClusters(tasks: Task[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const task of tasks) {
+    const cluster = classifyFailure(task);
+    counts[cluster] = (counts[cluster] || 0) + 1;
+  }
+  return counts;
+}
+
+function classifyFailure(task: Task): string {
+  const text = `${task.status}\n${task.error || ""}\n${task.result || ""}\n${String(task.metadata.lastError || "")}`.toLowerCase();
+  if (task.status === "cancelled" || /cancel/.test(text)) return "cancelled";
+  if (/timed out|timeout|lease expired|stale/.test(text)) return "timeout";
+  if (/provider|model|llm|rate limit|json|parse/.test(text)) return "provider";
+  if (/not allowed|permission|forbidden|approval|policy|tool/.test(text)) return "permission_or_policy";
+  if (/user input|clarification|missing context|blocked|dependency/.test(text)) return "needs_user_input";
+  if (/test|assert|verification|review/.test(text)) return "verification";
+  return "unknown";
+}
+
+function sameText(left: string, right: string): boolean {
+  return left.replace(/\s+/g, " ").trim() === right.replace(/\s+/g, " ").trim();
 }
 
 function clamp01(value: number): number {

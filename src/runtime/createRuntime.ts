@@ -246,6 +246,7 @@ export async function createRuntime(options: {
   async function executeTool(input: {
     tool: string;
     args?: Record<string, unknown>;
+    approval?: { approved?: boolean; reason?: string; approvedBy?: string };
     role?: string;
     permissionMode?: unknown;
     taskId?: string;
@@ -258,6 +259,7 @@ export async function createRuntime(options: {
     return toolExecutor.execute({
       tool: input.tool,
       args: input.args || {},
+      approval: input.approval,
       roleDefinition,
       permissionMode: parsePermissionMode(input.permissionMode ?? task?.metadata.permissionMode),
       task,

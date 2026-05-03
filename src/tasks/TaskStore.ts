@@ -1525,6 +1525,27 @@ export class TaskStore {
     };
   }
 
+  updateTaskMetadata(taskId: string, metadata: Metadata, {
+    reason = "metadata updated",
+  }: {
+    reason?: string;
+  } = {}): number {
+    const task = this.getTaskOrThrow(taskId);
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare("UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(metadata), now, taskId);
+    if (result.changes === 0) {
+      throw new TaskTransitionConflictError(`Task metadata update conflict: ${taskId}`);
+    }
+    return this.addEvent({
+      type: "task.metadata.updated",
+      taskId,
+      agentId: task.assignedAgentId,
+      payload: { reason },
+    });
+  }
+
   getTasksForRun(runId: string): Task[] {
     const rows = this.db
       .prepare("SELECT * FROM tasks WHERE json_extract(metadata, '$.runId') = ? ORDER BY created_at ASC")
@@ -2048,27 +2069,34 @@ function expectedLeaseFor(
 }
 
 function graphStatusFromTasks(tasks: Task[]): TaskGraph["status"] {
-  if (!tasks.length) return "pending";
-  if (tasks.some((task) => task.status === "failed" || task.status === "dead_letter" || task.status === "blocked" || task.status === "cancelled")) {
+  const activeTasks = tasks.filter((task) => !isReplanSupersededTerminal(task));
+  if (!activeTasks.length) return tasks.length ? "done" : "pending";
+  if (activeTasks.some((task) => task.status === "failed" || task.status === "dead_letter" || task.status === "blocked" || task.status === "cancelled")) {
     return "failed";
   }
-  if (tasks.every((task) => task.status === "done")) return "done";
-  if (tasks.some((task) => task.status === "queued" || task.status === "running" || task.status === "needs_inspection")) {
+  if (activeTasks.every((task) => task.status === "done")) return "done";
+  if (activeTasks.some((task) => task.status === "queued" || task.status === "running" || task.status === "needs_inspection")) {
     return "running";
   }
   return "pending";
 }
 
 function recoverableRunStatusFromTasks(tasks: Task[]): Run["status"] | null {
-  if (!tasks.length) return "failed";
-  if (tasks.some((task) => task.status === "pending" || task.status === "queued" || task.status === "running" || task.status === "needs_inspection")) {
+  const activeTasks = tasks.filter((task) => !isReplanSupersededTerminal(task));
+  if (!activeTasks.length) return tasks.length ? "done" : "failed";
+  if (activeTasks.some((task) => task.status === "pending" || task.status === "queued" || task.status === "running" || task.status === "needs_inspection")) {
     return null;
   }
-  if (tasks.every((task) => task.status === "done")) return "done";
-  if (tasks.some((task) => task.status === "cancelled")) return "cancelled";
-  if (tasks.some((task) => task.status === "blocked")) return "blocked";
-  if (tasks.some((task) => task.status === "done")) return "partially_done";
+  if (activeTasks.every((task) => task.status === "done")) return "done";
+  if (activeTasks.some((task) => task.status === "cancelled")) return "cancelled";
+  if (activeTasks.some((task) => task.status === "blocked")) return "blocked";
+  if (activeTasks.some((task) => task.status === "done")) return "partially_done";
   return "failed";
+}
+
+function isReplanSupersededTerminal(task: Task): boolean {
+  return Boolean(task.metadata.replanSupersededAt)
+    && (task.status === "failed" || task.status === "dead_letter" || task.status === "blocked" || task.status === "cancelled");
 }
 
 function normalizeSessionTitle(title: string): string {
