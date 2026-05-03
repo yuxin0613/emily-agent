@@ -37,7 +37,7 @@ const read = await executor.execute({
   sessionId: "tool-executor",
 });
 assert.equal(read.ok, true);
-assert.match(String((read.output as { content?: string }).content || ""), /emily-agent/);
+assert.match(String((read.output as { content?: string }).content || ""), /Emily AgentOS/);
 
 const deniedByMode = await executor.execute({
   tool: "http_fetch",
@@ -140,6 +140,17 @@ assert.equal(symlinkRead.ok, false);
 assert.match(String(symlinkRead.error || ""), /symlink|escapes workspace/);
 
 const browserServer = http.createServer((request, response) => {
+  if (request.url?.startsWith("/web-search")) {
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      results: [{
+        title: "AgentOS launch notes",
+        url: "https://example.com/agentos",
+        content: "Bounded external search result for launch readiness.",
+      }],
+    }));
+    return;
+  }
   if (request.url === "/next") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end("<html><head><title>Next page</title></head><body><h1>Arrived</h1><p>Second page text.</p></body></html>");
@@ -153,6 +164,20 @@ const address = browserServer.address() as AddressInfo;
 const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
 process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 try {
+  const webSearch = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "endpoint", endpoint: `http://127.0.0.1:${address.port}/web-search`, count: 99 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test web search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(webSearch.ok, true);
+  const webSearchOutput = webSearch.output as { count?: number; results?: Array<{ title?: string; snippet?: string }> };
+  assert.equal(webSearchOutput.count, 1);
+  assert.equal(webSearchOutput.results?.[0]?.title, "AgentOS launch notes");
+  assert.equal(webSearchOutput.results?.[0]?.snippet, "Bounded external search result for launch readiness.");
+
   const browser = await executor.execute({
     tool: "browser",
     args: { url: `http://127.0.0.1:${address.port}/`, action: "follow_link", text: "Next" },

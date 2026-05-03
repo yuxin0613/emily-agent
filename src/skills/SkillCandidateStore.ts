@@ -138,17 +138,17 @@ export class SkillCandidateStore {
     const rows = status
       ? this.db
         .prepare("SELECT * FROM skill_candidates WHERE status = ? ORDER BY score DESC, updated_at DESC LIMIT ?")
-        .all(status, limit) as SkillCandidateRow[]
+        .all(status, limit) as unknown as SkillCandidateRow[]
       : this.db
         .prepare("SELECT * FROM skill_candidates ORDER BY updated_at DESC LIMIT ?")
-        .all(limit) as SkillCandidateRow[];
+        .all(limit) as unknown as SkillCandidateRow[];
     return rows.map(parseCandidate);
   }
 
   getCandidate(candidateId: string): SkillCandidate | null {
     const row = this.db
       .prepare("SELECT * FROM skill_candidates WHERE id = ?")
-      .get(candidateId) as SkillCandidateRow | undefined;
+      .get(candidateId) as unknown as SkillCandidateRow | undefined;
     return row ? parseCandidate(row) : null;
   }
 
@@ -215,7 +215,7 @@ export class SkillCandidateStore {
   private getOpenCandidateByWorkflowKey(workflowKey: string): SkillCandidate | null {
     const row = this.db
       .prepare("SELECT * FROM skill_candidates WHERE workflow_key = ? AND status = 'proposed' ORDER BY score DESC, updated_at DESC LIMIT 1")
-      .get(workflowKey) as SkillCandidateRow | undefined;
+      .get(workflowKey) as unknown as SkillCandidateRow | undefined;
     return row ? parseCandidate(row) : null;
   }
 

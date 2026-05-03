@@ -76,6 +76,10 @@ try {
   assert.equal(app.status, 200);
   assert.equal((await app.text()).includes("test-token"), false);
 
+  const dashboard = await fetch(`${server.url}/providers/dashboard?token=test-token`);
+  assert.equal(dashboard.status, 200);
+  assert.equal((await dashboard.text()).includes("test-token"), false);
+
   const health = await fetch(`${server.url}/health`);
   assert.equal(health.status, 200);
 

@@ -449,7 +449,7 @@ export class TaskStore {
   }
 
   getSession(sessionId: string): Session | null {
-    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId) as SessionRow | undefined;
+    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId) as unknown as SessionRow | undefined;
     return row ? parseSession(row) : null;
   }
 
@@ -483,7 +483,7 @@ export class TaskStore {
         ORDER BY COALESCE(last_active_at, updated_at, created_at) DESC
         LIMIT ?
       `)
-      .all(...statuses, limit) as SessionRow[];
+      .all(...statuses, limit) as unknown as SessionRow[];
     return rows.map(parseSession);
   }
 
@@ -684,7 +684,7 @@ export class TaskStore {
         )
         ORDER BY created_at ASC, rowid ASC
       `)
-      .all(sessionId, limit) as SessionMessageRow[];
+      .all(sessionId, limit) as unknown as SessionMessageRow[];
     return rows.map(parseSessionMessage);
   }
 
@@ -732,14 +732,14 @@ export class TaskStore {
   }
 
   getRun(runId: string): Run | null {
-    const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as RunRow | undefined;
+    const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as unknown as RunRow | undefined;
     return row ? parseRun(row) : null;
   }
 
   getRunsForSession(sessionId: string, { limit = 50 }: { includeHidden?: boolean; limit?: number } = {}): Run[] {
     const rows = this.db
       .prepare("SELECT * FROM runs WHERE session_id = ? ORDER BY started_at DESC LIMIT ?")
-      .all(sessionId, limit) as RunRow[];
+      .all(sessionId, limit) as unknown as RunRow[];
     return rows.map(parseRun);
   }
 
@@ -752,7 +752,7 @@ export class TaskStore {
           AND started_at <= ?
         ORDER BY started_at ASC
       `)
-      .all(cutoff) as RunRow[];
+      .all(cutoff) as unknown as RunRow[];
     return rows.map(parseRun);
   }
 
@@ -820,14 +820,14 @@ export class TaskStore {
   getTaskGraph(graphId: string): TaskGraph | null {
     const row = this.db
       .prepare("SELECT * FROM task_graphs WHERE id = ?")
-      .get(graphId) as TaskGraphRow | undefined;
+      .get(graphId) as unknown as TaskGraphRow | undefined;
     return row ? parseTaskGraph(row) : null;
   }
 
   getOpenTaskGraphs(): TaskGraph[] {
     const rows = this.db
       .prepare("SELECT * FROM task_graphs WHERE status IN ('pending', 'running') ORDER BY created_at ASC")
-      .all() as TaskGraphRow[];
+      .all() as unknown as TaskGraphRow[];
     return rows.map(parseTaskGraph);
   }
 
@@ -857,7 +857,7 @@ export class TaskStore {
   getDependencies(taskId: string): TaskDependency[] {
     const rows = this.db
       .prepare("SELECT * FROM task_dependencies WHERE task_id = ? ORDER BY created_at ASC")
-      .all(taskId) as TaskDependencyRow[];
+      .all(taskId) as unknown as TaskDependencyRow[];
     return rows.map(parseDependency);
   }
 
@@ -868,7 +868,7 @@ export class TaskStore {
         JOIN task_dependencies d ON d.task_id = t.id
         WHERE d.depends_on_task_id = ?
       `)
-      .all(taskId) as TaskRow[];
+      .all(taskId) as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
@@ -1294,24 +1294,24 @@ export class TaskStore {
     const rows = runId
       ? this.db
         .prepare("SELECT * FROM memory_candidates WHERE status = 'pending' AND run_id = ? ORDER BY created_at ASC LIMIT ?")
-        .all(runId, limit) as MemoryCandidateRow[]
+        .all(runId, limit) as unknown as MemoryCandidateRow[]
       : this.db
         .prepare("SELECT * FROM memory_candidates WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?")
-        .all(limit) as MemoryCandidateRow[];
+        .all(limit) as unknown as MemoryCandidateRow[];
     return rows.map(parseMemoryCandidate);
   }
 
   getMemoryCandidate(candidateId: string): MemoryCandidate | null {
     const row = this.db
       .prepare("SELECT * FROM memory_candidates WHERE id = ?")
-      .get(candidateId) as MemoryCandidateRow | undefined;
+      .get(candidateId) as unknown as MemoryCandidateRow | undefined;
     return row ? parseMemoryCandidate(row) : null;
   }
 
   getMemoryCandidatesForRun(runId: string): MemoryCandidate[] {
     const rows = this.db
       .prepare("SELECT * FROM memory_candidates WHERE run_id = ? ORDER BY created_at ASC")
-      .all(runId) as MemoryCandidateRow[];
+      .all(runId) as unknown as MemoryCandidateRow[];
     return rows.map(parseMemoryCandidate);
   }
 
@@ -1410,7 +1410,7 @@ export class TaskStore {
   }
 
   getTask(taskId: string): Task | null {
-    const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as TaskRow | undefined;
+    const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as unknown as TaskRow | undefined;
     return row ? parseTask(row) : null;
   }
 
@@ -1427,7 +1427,7 @@ export class TaskStore {
   getRunningTasksForAgent(agentId: string): Task[] {
     const rows = this.db
       .prepare("SELECT * FROM tasks WHERE assigned_agent_id = ? AND status = 'running'")
-      .all(agentId) as TaskRow[];
+      .all(agentId) as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
@@ -1435,7 +1435,7 @@ export class TaskStore {
     const now = new Date().toISOString();
     const rows = this.db
       .prepare("SELECT * FROM tasks WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?")
-      .all(now) as TaskRow[];
+      .all(now) as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
@@ -1449,7 +1449,7 @@ export class TaskStore {
             OR json_extract(metadata, '$.inspectionTaskId') = ''
           )
       `)
-      .all() as TaskRow[];
+      .all() as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
@@ -1458,7 +1458,7 @@ export class TaskStore {
       .prepare(
         "SELECT * FROM tasks WHERE status IN ('done', 'failed', 'blocked', 'cancelled', 'dead_letter') AND main_ack_at IS NULL",
       )
-      .all() as TaskRow[];
+      .all() as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
@@ -1487,14 +1487,14 @@ export class TaskStore {
         ORDER BY updated_at DESC
         LIMIT ?
       `)
-      .all(start, end, limit) as TaskRow[];
+      .all(start, end, limit) as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
   getLatestEvents({ limit = 20, afterId = 0 }: { limit?: number; afterId?: number } = {}): TaskEvent[] {
     const rows = this.db
       .prepare("SELECT * FROM events WHERE id > ? ORDER BY id ASC LIMIT ?")
-      .all(afterId, limit) as EventRow[];
+      .all(afterId, limit) as unknown as EventRow[];
     return rows.map(parseEvent);
   }
 
@@ -1504,7 +1504,7 @@ export class TaskStore {
     const taskIds = new Set(tasks.map((task) => task.id));
     const rows = this.db
       .prepare("SELECT * FROM events ORDER BY id ASC")
-      .all() as EventRow[];
+      .all() as unknown as EventRow[];
     const events = rows
       .map(parseEvent)
       .filter((event) => event.payload.runId === runId || (event.taskId && taskIds.has(event.taskId)));
@@ -1517,7 +1517,7 @@ export class TaskStore {
     const run = runId ? this.getRun(runId) : null;
     const rows = this.db
       .prepare("SELECT * FROM events WHERE task_id = ? ORDER BY id ASC")
-      .all(taskId) as EventRow[];
+      .all(taskId) as unknown as EventRow[];
     return {
       run,
       tasks: task ? [task] : [],
@@ -1549,14 +1549,14 @@ export class TaskStore {
   getTasksForRun(runId: string): Task[] {
     const rows = this.db
       .prepare("SELECT * FROM tasks WHERE json_extract(metadata, '$.runId') = ? ORDER BY created_at ASC")
-      .all(runId) as TaskRow[];
+      .all(runId) as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
   getTasksForGraph(graphId: string): Task[] {
     const rows = this.db
       .prepare("SELECT * FROM tasks WHERE json_extract(metadata, '$.graphId') = ? ORDER BY created_at ASC")
-      .all(graphId) as TaskRow[];
+      .all(graphId) as unknown as TaskRow[];
     return rows.map(parseTask);
   }
 
@@ -1592,7 +1592,7 @@ export class TaskStore {
         LEFT JOIN role_queues q ON q.task_id = t.id AND q.status = 'queued'
         WHERE t.status = 'queued' AND q.task_id IS NULL
       `)
-      .all() as TaskRow[];
+      .all() as unknown as TaskRow[];
     for (const row of queuedWithoutQueue) {
       const task = parseTask(row);
       if (repair) this.enqueueTask(task.id);
@@ -1607,7 +1607,7 @@ export class TaskStore {
 
     const runningWithoutLease = this.db
       .prepare("SELECT * FROM tasks WHERE status = 'running' AND (lease_expires_at IS NULL OR lease_owner IS NULL)")
-      .all() as TaskRow[];
+      .all() as unknown as TaskRow[];
     for (const row of runningWithoutLease) {
       const task = parseTask(row);
       add({
@@ -1625,7 +1625,7 @@ export class TaskStore {
         WHERE t.status IN ('done', 'failed', 'blocked', 'cancelled', 'dead_letter')
           AND q.status = 'running'
       `)
-      .all() as TaskRow[];
+      .all() as unknown as TaskRow[];
     for (const row of terminalRunningQueue) {
       const task = parseTask(row);
       if (repair) this.completeQueueItem(task.id, queueStatusForTask(task));
@@ -2005,7 +2005,7 @@ function parseSessionMessage(row: SessionMessageRow): SessionMessage {
     runId: row.run_id,
     role: row.role,
     content: row.content,
-    delegatedTo: JSON.parse(row.delegated_to || "[]") as string[],
+    delegatedTo: JSON.parse(row.delegated_to || "[]") as unknown as string[],
     metadata: JSON.parse(row.metadata || "{}") as Metadata,
     createdAt: row.created_at,
   };

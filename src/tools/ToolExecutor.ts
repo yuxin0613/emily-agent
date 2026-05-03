@@ -414,7 +414,7 @@ export class ToolExecutor {
       const detail = await readResponseText(response, 64000);
       throw new Error(`web_search endpoint failed (${response.status}): ${detail.text || ""}`.trim());
     }
-    const payload = await response.json();
+    const payload = parseJsonPayload((await readResponseText(response, 256000)).text, "web_search endpoint response");
     return webSearchResponse(query, "endpoint", normalizeWebSearchPayload(payload, count), startedAt);
   }
 
@@ -446,7 +446,7 @@ export class ToolExecutor {
       const detail = await readResponseText(response, 64000);
       throw new Error(`Ollama web search failed (${response.status}): ${detail.text || ""}`.trim());
     }
-    const payload = await response.json();
+    const payload = parseJsonPayload((await readResponseText(response, 256000)).text, "Ollama web search response");
     return webSearchResponse(query, "ollama", normalizeWebSearchPayload(payload, count), startedAt);
   }
 
@@ -1208,6 +1208,19 @@ function positiveNumber(value: unknown, fallback: number): number {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
+function boundedPositiveNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const number = Math.floor(positiveNumber(value, fallback));
+  return Math.max(min, Math.min(max, number));
+}
+
+function parseJsonPayload(text: string, label: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${label} must be valid JSON.`);
+  }
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -1228,14 +1241,19 @@ function summarizeOutput(output: unknown): unknown {
   if ("content" in output && typeof output.content === "string") {
     return { ...output, content: `[${output.content.length} chars]` };
   }
-  if ("stdout" in output && typeof output.stdout === "string") {
+  if (hasStringProperty(output, "stdout")) {
+    const stderr = hasStringProperty(output, "stderr") ? output.stderr : undefined;
     return {
       ...output,
       stdout: `[${output.stdout.length} chars]`,
-      stderr: typeof output.stderr === "string" ? `[${output.stderr.length} chars]` : output.stderr,
+      stderr: stderr === undefined ? undefined : `[${stderr.length} chars]`,
     };
   }
   return output;
+}
+
+function hasStringProperty<T extends string>(value: object, key: T): value is object & Record<T, string> {
+  return key in value && typeof (value as Record<string, unknown>)[key] === "string";
 }
 
 class ToolApprovalRequiredError extends Error {

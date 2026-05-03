@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { webAppHtml } from "./webUi.ts";
+import type { Metadata, ToolPermission } from "../types.ts";
 
 export interface WebServerHandle {
   server: http.Server;
@@ -20,7 +21,10 @@ export async function startWebServer({
 }: {
   runtime: {
     handleUserMessage: (message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown }) => Promise<unknown>;
-    taskStore: { getLatestEvents: (options?: { afterId?: number; limit?: number }) => unknown[] };
+    taskStore: {
+      getLatestEvents: (options?: { afterId?: number; limit?: number }) => unknown[];
+      addEvent?: (input: { type: string; payload?: Record<string, unknown> }) => number;
+    };
     experienceStore: {
       listActive: () => unknown[];
       recall: (query: string, options?: { scope?: "project"; limit?: number }) => unknown[];
@@ -55,8 +59,8 @@ export async function startWebServer({
       provider?: string;
       model?: string;
       temperature?: number;
-      allowedTools?: string[];
-      forbiddenTools?: string[];
+      allowedTools?: ToolPermission[];
+      forbiddenTools?: ToolPermission[];
       capabilities?: string[];
       skills?: string[];
       skillAllowlist?: string[];
@@ -67,7 +71,7 @@ export async function startWebServer({
     initializeDefaultRoles: (options?: { overwrite?: boolean }) => Promise<unknown[]>;
     listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
     getSession: (sessionId: string) => unknown;
-    createSession: (options?: { title?: string; source?: string; metadata?: Record<string, unknown> }) => unknown;
+    createSession: (options?: { title?: string; source?: string; metadata?: Metadata }) => unknown;
     clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
     restoreSession: (sessionId: string) => unknown;
     trashSession: (sessionId: string, options?: { deleteAfterDays?: number; reason?: string }) => unknown;
@@ -163,7 +167,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/providers/dashboard") {
-        return sendHtml(response, 200, providerDashboardHtml(authToken));
+        return sendHtml(response, 200, providerDashboardHtml());
       }
 
       if (request.method === "POST" && url.pathname === "/providers") {
@@ -506,19 +510,20 @@ export async function startWebServer({
 
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
+    const netSocket = socket as Socket;
     if (url.pathname !== "/gateway" && url.pathname !== "/ws") {
-      rejectUpgrade(socket, 404, "Not Found");
+      rejectUpgrade(netSocket, 404, "Not Found");
       return;
     }
     if (!isAuthorized(request, url, authToken)) {
-      rejectUpgrade(socket, 401, "Unauthorized");
+      rejectUpgrade(netSocket, 401, "Unauthorized");
       return;
     }
     if (!isAllowedOrigin(request, url)) {
-      rejectUpgrade(socket, 403, "Forbidden origin");
+      rejectUpgrade(netSocket, 403, "Forbidden origin");
       return;
     }
-    acceptGatewaySocket({ runtime, request, socket, head });
+    acceptGatewaySocket({ runtime, request, socket: netSocket, head });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -863,7 +868,7 @@ async function readJson(request: IncomingMessage, { maxBytes = 1024 * 1024 }: { 
   }
 }
 
-function providerDashboardHtml(authToken: string): string {
+function providerDashboardHtml(): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -897,8 +902,21 @@ function providerDashboardHtml(authToken: string): string {
   <table><thead><tr><th>Time</th><th>Provider</th><th>Agent</th><th>Status</th><th>Error</th><th>Cost</th></tr></thead><tbody id="recent"></tbody></table>
 </main>
 <script>
+let AUTH_TOKEN = localStorage.getItem('emily.authToken') || '';
+const params = new URLSearchParams(location.search);
+const token = params.get('token') || '';
+if (token) {
+  AUTH_TOKEN = token;
+  localStorage.setItem('emily.authToken', token);
+  params.delete('token');
+  const next = location.pathname + (params.toString() ? '?' + params.toString() : '');
+  history.replaceState(null, '', next);
+}
+function authHeaders() {
+  return AUTH_TOKEN ? { 'x-emily-token': AUTH_TOKEN } : {};
+}
 async function load() {
-  const data = await fetch('/providers/usage', { headers: { 'x-emily-token': ${JSON.stringify(authToken)} } }).then((res) => res.json());
+  const data = await fetch('/providers/usage', { headers: authHeaders() }).then((res) => res.json());
   const metrics = [
     ['Calls', data.totals.calls],
     ['Success', data.totals.success],

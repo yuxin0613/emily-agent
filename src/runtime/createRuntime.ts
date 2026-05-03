@@ -373,7 +373,7 @@ export async function createRuntime(options: {
     securityAudit,
     buildContext: (input) => contextEngine.build(input),
     routeMessage: (input) => router.route(input),
-    createSession: (input) => taskStore.createSession(input),
+    createSession: (input: Parameters<TaskStore["createSession"]>[0] = {}) => taskStore.createSession(input),
     clearSession: (sessionId, input = {}) => {
       const current = taskStore.getSession(sessionId);
       const hidden = current?.status === "active"
@@ -415,7 +415,7 @@ export async function createRuntime(options: {
       await providerRegistry.write(dataDir);
       return provider;
     },
-    addRole: (input) => roleManager.addRole(input),
+    addRole: (input: Parameters<RoleManager["addRole"]>[0]) => roleManager.addRole(input),
     updateRoleProvider: (name, input) => roleManager.updateRoleProvider(name, input),
     initializeDefaultRoles: (input) => roleManager.initializeDefaultRoles(input),
     buildSkillCandidates: (input = {}) => skillBuilder.buildSkillCandidates(input),
@@ -609,7 +609,6 @@ export async function createRuntime(options: {
     exportSession,
     previewSessionCompaction,
     sessionUsage,
-    executeTool,
     listCommands() {
       return commandRegistry.list();
     },

@@ -1,4 +1,5 @@
 import type { MemoryRecord } from "../types.ts";
+import { readJsonResponse, readResponseText } from "../llm/HttpResponse.ts";
 import type { CompressedVector } from "../experience/VectorCompressor.ts";
 
 export type VectorStoreKind = "file" | "chroma" | "qdrant" | "milvus" | "pgvector";
@@ -164,8 +165,8 @@ class HttpVectorStoreAdapter implements VectorStoreAdapter {
         signal: controller.signal,
       });
       if (!response.ok && !(options.allow404 && response.status === 404)) {
-        const text = await response.text().catch(() => "");
-        throw new Error(`${this.kind} vector store HTTP ${response.status}: ${text.slice(0, 300)}`);
+        const detail = await readResponseText(response, 64000).catch(() => ({ text: "", bytes: 0, truncated: false }));
+        throw new Error(`${this.kind} vector store HTTP ${response.status}: ${detail.text.slice(0, 300)}`);
       }
       return response;
     } finally {
@@ -203,7 +204,10 @@ export class QdrantVectorStoreAdapter extends HttpVectorStoreAdapter {
         must: [{ key: "scope", match: { value: input.scope } }],
       },
     });
-    const json = await response.json().catch(() => ({})) as { result?: Array<{ score?: number; payload?: Record<string, unknown> }> };
+    const json = await readJsonResponse<{ result?: Array<{ score?: number; payload?: Record<string, unknown> }> }>(response, {
+      label: "qdrant vector search",
+      fallback: {},
+    });
     return (json.result || []).map((item) => recordFromPayload(item.payload || {}, item.score || 0)).filter(isSearchResult);
   }
 }
@@ -233,7 +237,10 @@ export class ChromaVectorStoreAdapter extends HttpVectorStoreAdapter {
       n_results: input.limit,
       where: { scope: input.scope },
     });
-    const json = await response.json().catch(() => ({})) as { metadatas?: Record<string, unknown>[][]; distances?: number[][] };
+    const json = await readJsonResponse<{ metadatas?: Record<string, unknown>[][]; distances?: number[][] }>(response, {
+      label: "chroma vector search",
+      fallback: {},
+    });
     const metadata = json.metadatas?.[0] || [];
     const distances = json.distances?.[0] || [];
     return metadata.map((item, index) => recordFromPayload(item, distanceToScore(distances[index]))).filter(isSearchResult);
@@ -269,7 +276,10 @@ export class MilvusVectorStoreAdapter extends HttpVectorStoreAdapter {
       filter: `scope == "${escapeFilterValue(input.scope)}"`,
       outputFields: ["record"],
     });
-    const json = await response.json().catch(() => ({})) as { data?: Array<{ distance?: number; record?: unknown }> };
+    const json = await readJsonResponse<{ data?: Array<{ distance?: number; record?: unknown }> }>(response, {
+      label: "milvus vector search",
+      fallback: {},
+    });
     return (json.data || []).map((item) => recordFromPayload({ record: item.record }, distanceToScore(item.distance))).filter(isSearchResult);
   }
 }

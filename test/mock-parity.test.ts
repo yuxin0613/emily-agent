@@ -25,7 +25,7 @@ try {
   });
   assert.equal(tool.ok, true);
   assert.equal((tool.result as { ok?: boolean }).ok, true);
-  assert.match(String((tool.result as { output?: { content?: string } }).output?.content || ""), /emily-agent/);
+  assert.match(String((tool.result as { output?: { content?: string } }).output?.content || ""), /Emily AgentOS/);
   assertHasEvent(harness.runtime.taskStore.getLatestEvents({ limit: 50 }), "tool.execution.completed");
 
   const run = await harness.chat("POC 实现一个可扩展 agent 应用", "mock-parity");

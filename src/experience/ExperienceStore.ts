@@ -230,6 +230,9 @@ export class ExperienceStore {
         }),
       };
     }
+    if (action !== "replace" && action !== "merge") {
+      throw new Error(`Unsupported automatic experience update action: ${action}`);
+    }
 
     return {
       action,
@@ -259,7 +262,7 @@ export class ExperienceStore {
           AND v.status = 'active'
           AND (? IS NULL OR e.scope = ?)
       `)
-      .all(scope ?? null, scope ?? null) as Array<ExperienceRow & ExperienceVectorRow>;
+      .all(scope ?? null, scope ?? null) as unknown as Array<ExperienceRow & ExperienceVectorRow>;
 
     return rows
       .map((row) => {
@@ -376,28 +379,28 @@ export class ExperienceStore {
   getFeedback(experienceId: string): ExperienceFeedback[] {
     const rows = this.db
       .prepare("SELECT * FROM experience_feedback WHERE experience_id = ? ORDER BY created_at DESC")
-      .all(experienceId) as ExperienceFeedbackRow[];
+      .all(experienceId) as unknown as ExperienceFeedbackRow[];
     return rows.map(parseFeedback);
   }
 
   getActiveByTopicKey(topicKey: string): Experience | null {
     const row = this.db
       .prepare("SELECT * FROM experiences WHERE topic_key = ? AND status = 'active'")
-      .get(topicKey) as ExperienceRow | undefined;
+      .get(topicKey) as unknown as ExperienceRow | undefined;
     return row ? parseExperience(row) : null;
   }
 
   getRevisions(experienceId: string): ExperienceRevision[] {
     const rows = this.db
       .prepare("SELECT * FROM experience_revisions WHERE experience_id = ? ORDER BY revision DESC")
-      .all(experienceId) as ExperienceRevisionRow[];
+      .all(experienceId) as unknown as ExperienceRevisionRow[];
     return rows.map(parseRevision);
   }
 
   listActive(): Experience[] {
     const rows = this.db
       .prepare("SELECT * FROM experiences WHERE status = 'active' ORDER BY importance DESC, updated_at DESC")
-      .all() as ExperienceRow[];
+      .all() as unknown as ExperienceRow[];
     return rows.map(parseExperience);
   }
 
@@ -665,8 +668,8 @@ function parseExperience(row: ExperienceRow): Experience {
     solutionPattern: row.solution_pattern,
     applicability: row.applicability || "",
     contraindications: parseStringArray(row.contraindications),
-    evidenceTaskIds: JSON.parse(row.evidence_task_ids || "[]") as string[],
-    evidenceEventIds: JSON.parse(row.evidence_event_ids || "[]") as number[],
+    evidenceTaskIds: JSON.parse(row.evidence_task_ids || "[]") as unknown as string[],
+    evidenceEventIds: JSON.parse(row.evidence_event_ids || "[]") as unknown as number[],
     confidence: row.confidence,
     importance: row.importance,
     reuseCount: row.reuse_count,
@@ -688,8 +691,8 @@ function parseRevision(row: ExperienceRevisionRow): ExperienceRevision {
     contraindications: parseStringArray(row.contraindications),
     confidence: row.confidence,
     importance: row.importance,
-    evidenceTaskIds: JSON.parse(row.evidence_task_ids || "[]") as string[],
-    evidenceEventIds: JSON.parse(row.evidence_event_ids || "[]") as number[],
+    evidenceTaskIds: JSON.parse(row.evidence_task_ids || "[]") as unknown as string[],
+    evidenceEventIds: JSON.parse(row.evidence_event_ids || "[]") as unknown as number[],
     changeReason: row.change_reason,
     createdAt: row.created_at,
   };

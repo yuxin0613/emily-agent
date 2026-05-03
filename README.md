@@ -1,792 +1,420 @@
-# emily-agent
+# Emily AgentOS
 
-一个 Node.js / TypeScript 多 agent 运行时骨架：主 agent 负责沟通、任务编排和恢复监督，subagent 作为独立进程执行具体工作。系统使用 SQLite 作为事实来源，IPC 只做实时通知；记忆系统采用原始记忆、长期索引和可更新经验三层结构。
+Emily AgentOS is a local-first Node.js multi-agent runtime for building agent applications. It gives you a main agent for conversation and orchestration, isolated role subagents for execution, SQLite-backed task state, adaptive task graphs, provider routing, tools, skills, sessions, memory, and a WebSocket control plane for other applications.
 
-> 当前 TypeScript 直接使用 Node 22 的原生 type stripping 运行，不引入构建链。SQLite 使用 `node:sqlite`，运行时会出现 experimental warning。
+The current codebase is prepared for a 1.0 baseline: source typecheck, full test suite, dependency audit, runtime doctor, and security audit all pass in the default local setup.
 
-## 架构
+> Runtime note: the project runs TypeScript directly on Node.js 22.18+ using native type stripping. `node:sqlite` is still experimental in Node, so SQLite warnings are expected during tests and local runs.
 
-```mermaid
-flowchart LR
-  UI["WebUI / TUI / WebSocket Apps"] --> Gateway["Gateway Protocol: typed WebSocket + REST"]
-  Gateway --> Main["MainAgent: 沟通 + 编排 + 汇总"]
-  Main --> Store["SQLite TaskStore"]
-  Store --> Queue["role_queues: 持久化 inbox"]
-  Queue --> Manager["RoleAgentManager"]
-  Manager --> Planner["Process: planner"]
-  Manager --> Developer["Process: developer"]
-  Manager --> Researcher["Process: researcher"]
-  Manager --> Reviewer["Process: reviewer"]
-  Manager --> Inspector["Process: inspector"]
-  Main --> Providers["ProviderRegistry: echo / openai / ollama"]
-  Manager --> Providers
-  Planner -. "IPC task.changed" .-> Manager
-  Developer -. "IPC task.finished" .-> Manager
-  Inspector -. "IPC recovery result" .-> Manager
-  Manager --> Events["SSE /events"]
-  Main <--> Memory["MemorySystem + MemoryCurator"]
-  Main <--> Context["ContextEngine: active/deep context budget"]
-  Main <--> Router["AgentRouter: deterministic routing"]
-  Main <--> Experience["ExperienceStore: active best practices"]
-  Experience --> Revisions["experience_revisions: archived versions"]
-  Experience --> Compressed["experience_vectors: compressed active index"]
-  Main <--> SkillCandidates["SkillCandidateStore: proposed skills"]
-  SkillCandidates --> SkillFiles["skills/<skill>/skill.md"]
-  Memory --> RAM["短期内存"]
-  Memory --> File["文件记忆: .emily/memory/events.jsonl"]
-  Memory --> Vector["长期语义索引: .emily/memory/vector-index.json"]
-  Manager --> Profile["AgentProfile: role/workspace/state/memory/tool/skill isolation"]
+## Why This Exists
+
+Most agent applications need the same hard parts before they can become product code:
+
+- durable task execution rather than in-memory plans;
+- subagent isolation without losing a single coherent user conversation;
+- long-running task graphs that can expand while work is happening;
+- memory that becomes reusable experience instead of unlimited logs;
+- provider, tool, skill, and permission boundaries that can be audited;
+- Web/TUI/WebSocket surfaces that reuse one runtime instead of forking behavior.
+
+Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime for other agent products.
+
+## Highlights
+
+- **Main agent + role subagents**: main agent handles the user, planning, delegation, recovery, and final summaries; subagents run as independent worker processes.
+- **Adaptive task graph**: `PlanSpec` creates the initial DAG, `GraphPatchSpec` adds dynamic tasks as work completes, and the executor tracks dependencies, waves, retries, and exit criteria.
+- **Long task support**: result-oriented requests can require a delivery level such as `poc`, `uat`, or `production` before execution starts.
+- **SQLite as source of truth**: tasks, runs, sessions, events, memory candidates, provider usage, skill candidates, and experience revisions are persisted.
+- **Lease token safety**: worker heartbeat, finish, fail, and cancel paths require the current lease token, so stale workers cannot overwrite a retried task.
+- **Provider registry**: main agent and each role can choose separate providers/models; subagents fall back to the main provider when role-specific provider selection cannot be used.
+- **Memory and experience**: short-term memory, file memory, vector memory, daily experience extraction, update-over-duplicate semantics, and compressed recall.
+- **Tools and skills**: declarative tools with hard permission filtering; builtin skills for planning, coding, research, web search, GitHub, review, recovery, and memory curation.
+- **Control plane**: TUI, WebUI, REST endpoints, SSE events, and typed WebSocket gateway share the same runtime commands.
+- **Security defaults**: token-protected Web/API, origin checks for unsafe methods, bounded HTTP bodies, tool approvals, SSRF denylist, provider secret validation, and runtime security audit.
+
+## Quick Start
+
+Requirements:
+
+- Node.js `>=22.18`
+- npm
+- optional: `gh` for GitHub tool actions
+- optional: external model API key, Ollama, or OpenAI-compatible gateway
+
+Install dependencies:
+
+```bash
+npm install
 ```
 
-## 已实现的 10 个可靠性优化
+Run the terminal UI:
 
-1. **严格 Task 状态机**
-   状态流转集中在 `TaskStore.transitionTask()`，非法跳转会抛错。当前状态包括 `pending`、`queued`、`running`、`blocked`、`needs_inspection`、`done`、`failed`、`dead_letter`。
+```bash
+npm run tui
+```
 
-2. **lease token + heartbeat**
-   worker 领取任务时写入 `lease_owner`、`lease_token`、`lease_expires_at`、`heartbeat_at`。后续 heartbeat / finish / fail / cancel 都必须带本次领取的 `lease_token`，避免旧 worker 的晚到写入覆盖重试后的新执行。
+Run the WebUI and Gateway:
 
-3. **崩溃窗口恢复**
-   IPC 只发送 `taskId/eventId`。主进程收到通知后回 SQLite 查询最终状态。worker 异常退出、通知丢失、lease 过期都会进入恢复流程。
+```bash
+EMILY_WEB_TOKEN=change-me npm run web
+```
 
-4. **持久化 role inbox**
-   每个角色的任务队列存入 SQLite `role_queues` 表。主进程重启后可以继续 drain 队列，而不是依赖内存队列。
+Open:
 
-5. **结构化 `agent.md`**
-   `agents/<role>/agent.md` 支持 frontmatter，定义 `role`、`provider`、`model`、`singleton`、`allowed_tools`、`forbidden_tools`、`max_concurrent_tasks`、`capabilities` 和 `skills`。
+```text
+http://127.0.0.1:3000/?token=change-me
+```
 
-6. **硬权限 ToolGateway**
-   subagent 不直接假定自己能用工具，必须经过 `ToolGateway.assertAllowed()`。`ToolRegistry` 负责工具定义、别名和副作用说明；task 的 tool hints 会被解析、过滤并写入审计事件。
+Run the launch checks:
 
-7. **事件订阅**
-   Web adapter 提供 `GET /events` SSE。TUI/WebUI 可以订阅 `task.changed`、`task.finished`、`agent.heartbeat` 等运行事件。
+```bash
+npm run check
+npm audit --audit-level=moderate
+node src/index.ts --doctor --deep
+node src/index.ts --security-audit
+```
 
-8. **Memory Curator**
-   `MemoryCurator` 决定哪些记录进入长期语义索引。subagent 结果先进入 `memory_candidates`，由 main agent 或 maintenance 审批后才写入 MemorySystem，避免被拒绝的结果绕过审批直接污染长期记忆。
+## Configuration
 
-9. **retry / dead-letter**
-   task 记录 `retry_count` 和 `max_retries`。超过重试上限会进入 `dead_letter`，并记录 `deadLetterReason`。
+Runtime state lives under `.emily/` by default:
 
-10. **TypeScript 迁移**
-    源码和测试已迁移到 `.ts`，核心类型在 `src/types.ts`。
+```text
+.emily/
+  emily.sqlite
+  providers.json
+  memory/
+    events.jsonl
+    vector-index.json
+```
 
-## 运行内核
+Useful environment variables:
 
-每次用户请求都会创建一个 `run`，并把 task、event、memory candidate 和最终 response 串起来，便于复盘。
+| Variable | Purpose |
+| --- | --- |
+| `PORT` | Web server port. Default: `3000`. |
+| `EMILY_WEB_TOKEN` | Fixed Web/API/Gateway token. If omitted, a random token is printed at startup. |
+| `EMILY_ROLE_DIR` | Override `agents/` role definition directory. |
+| `EMILY_SKILL_DIR` | Override `skills/` skill directory. |
+| `EMILY_HTTP_EGRESS_ALLOWLIST` | Comma-separated HTTP egress allowlist for private/local destinations. |
+| `EMILY_HTTP_ALLOW_PRIVATE` | Set to `true` only for local development that must access private hosts. |
+| `EMILY_WEB_SEARCH_PROVIDER` | `duckduckgo`, `endpoint`, or `ollama`. |
+| `EMILY_WEB_SEARCH_ENDPOINT` | Custom web search endpoint for `provider=endpoint`. |
+| `EMILY_VECTOR_STORE` | `file`, `chroma`, `qdrant`, `milvus`, or `pgvector`. |
+| `OPENAI_API_KEY` | Default key used by OpenAI-compatible provider examples. |
 
-已实现的核心能力：
+## Providers
 
-- `runs`: 一次用户请求的结构化运行记录。
-- `runs.status`: 支持 `running`、`reviewing`、`recovering`、`partially_done`、`waiting_user`、`done`、`failed`、`blocked`、`cancelled`，用于区分执行、验收、恢复、等待用户输入和主动取消。
-- `TaskResult`: worker 结果使用结构化 JSON，包含 `status`、`summary`、`artifacts`、`memoryCandidates` 和 `nextActions`。
-- `task_graphs`: 为一次 run 的 DAG 提供 graph id，task metadata 会带上 `graphId`，便于跨 task 追踪。
-- `task_dependencies`: task graph / DAG 依赖，依赖满足后才会进入 `queued`。
-- `PlanSpec`: planner 输出或 fallback 生成结构化计划，包含 `deliveryLevel`、`exitCriteria`、`planningMode`、task DAG、每个 task 的 `acceptanceCriteria`。
-- `GraphPatchSpec`: rolling 图运行时的增量拆解协议，planner 会基于已完成节点结果追加下一层 task；解析或校验失败时降级到 fallback patch。
-- 长任务准出标准：检测到结果导向长任务但没有说明 `POC` / `UAT` / `production` 时，run 会进入 `waiting_user`，先要求用户确认准出等级。
-- `TaskGraphExecutor`: 自动执行 PlanSpec DAG，按依赖推进 queued / pending task，支持并行 ready task、role singleton 约束、失败后阻断依赖任务，以及 rolling 模式下的运行时图扩展。
-- `reviewer`: 正常流程里的结果验收 agent，区别于异常恢复用的 `inspector`；reviewer 优先输出 JSON verdict，再降级解析文本，并影响 run 状态。
-- `memory_candidates`: subagent 输出先成为候选记忆，统一由 `MemoryCandidatePolicy` approve / reject 后才写入 MemorySystem。
-- `doctor({ deep, repair })`: 聚合 health、diagnostics、provider health、security audit、pending memory/skill candidates、session trash 状态和 Gateway 协议元信息；默认只读，`repair=true` 才会调用已有修复路径。
-- `getTimeline({ runId })`: 返回一次 run 的 run、tasks、events。
-- `getTaskTrace(taskId)`: 返回单个 task 的事件轨迹。
-- `diagnostics({ repair })`: 检查 queued task、running lease、terminal queue、task graph 和 run 状态不变量，可选择修复。
-- `renderTimeline(runId)`: 把结构化 timeline 渲染成人类可读 replay 文本。
-- `health()`: 返回 pending/running task、过期 lease、未 ack 终态 task、待处理记忆候选和 active experience 数量。
-- `maintenance()`: 执行 reconcile、刷新 task graph、收敛孤儿 run、处理遗留 memory candidates、生成每日经验和 skill candidates，并返回维护后的健康状态。
-- 状态机更新使用 `WHERE id = ? AND status = ?` 做乐观并发防护，晚到的写入会失败。
-- 状态机错误分成 `IllegalTaskTransitionError` 和 `TaskTransitionConflictError`。
-- runtime event payload 统一通过 `RuntimeEventFactory` 生成，避免事件结构散落在各处。
-- worker 异常退出统一走 `RecoveryPolicy`，可按任务状态选择 finish、retry、dead-letter 或 inspector 复核。
-- `RoleAgentManager` 会从 `role_queues` 动态发现角色，不要求所有角色预先写死在主进程。
-- memory candidate 审批使用 `WHERE status = 'pending'` 条件更新，避免 main agent 和 maintenance 并发重复写入长期记忆。
-- 普通记忆的长期向量索引用文件锁和临时文件原子替换保存；多进程 subagent 同时写入时会先 reload / merge 再落盘。
-- 向量记忆支持 `file`、`chroma`、`qdrant`、`milvus`、`pgvector` adapter 配置；外部 adapter 不可用时默认保留文件索引作为离线 fallback。
-- `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
-- `PermissionMode`: task/run 可携带 `read_only`、`workspace_write` 或 `danger_full_access`，最终工具权限始终是 `role.allowed_tools ∩ permissionMode - role.forbidden_tools`。
-- `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
-- `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`web_search`、`http_fetch`、`browser`、`github`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
-- `SkillRegistry`: 内置 planning、coding、research、web-search、github、review、recovery、memory-curation，也可从 `skills/<skill>/skill.md` 加载技能 prompt；task 的 `skillHints` 和 role 的 `skills` 会合并后注入 subagent prompt。
-- `SkillCandidateStore` / `SkillBuilder`: 从重复成功 workflow 中生成 `proposed` skill candidate；默认不会自动启用，审批后才写入 skill 文件，已有相似 skill 优先走 update。
-- `resumeLatestSession()` / `exportSession()` / `previewSessionCompaction()` / `sessionUsage()`: 基于现有 session/run/message/usage 数据提供 session 运维能力，不改变 `/new`、`/clear`、trash/restore 生命周期。
-- `CommandRegistry`: 统一注册 doctor、session 运维、provider/role/skill/session 写命令、tool execution 和主要查询命令，供 TUI/Web/Gateway 复用；adapter 只负责 IO 和渲染，不替换 runtime 执行路径。
-- `ToolExecutor`: 在 `ToolRegistry` / `ToolGateway` 权限过滤之后执行真实工具，当前内置 workspace 文件读写、受限测试执行、task inspection、create_task、web search、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作；approval-sensitive 工具必须带精确 approval template，结果会写入 `tool.execution.*` 事件。
-- `tool.hints.resolved` / `skill.hints.resolved`: 每个 worker 会记录工具/技能解析结果；未知或被拒绝的 hints 会额外记录 `runtime.anomaly`。
+Provider config is stored in `.emily/providers.json`. The runtime stores `apiKeyEnv`, never raw API keys.
 
-## 第二轮核心优化
-
-这轮补齐的是主/子 agent 内核的“可运行质量”：
-
-1. reviewer 使用结构化 JSON verdict，并保留文本 fallback。
-2. 记忆候选进入 `MemoryCandidatePolicy`，避免把模板回声、短流水账写入长期记忆。
-3. run 状态扩展到验收、恢复、部分完成和等待用户输入。
-4. task graph 有独立 `graphId`，不再只靠 runId 和 parentTaskId 推断。
-5. runtime event payload 集中在 `RuntimeEventFactory`。
-6. worker 退出恢复集中在 `RecoveryPolicy`。
-7. experience 增加 `applicability` 和 `contraindications`，召回时知道什么时候该用、什么时候别用。
-8. memory candidate 生命周期事件统一为 created / approved / rejected。
-9. runtime 暴露 `health()`，Web 端 `GET /health` 返回详细健康状态。
-10. runtime 暴露 `maintenance()`，Web 端 `POST /maintenance` 可手动触发 reconcile、候选记忆审批和每日经验提炼。
-
-## 当前健壮性加固
-
-继续加固后的运行保障：
-
-- `RoleAgentManager.start()` 幂等，周期性 reconcile 不会重入。
-- `drainAllRoles()` 会合并默认角色、已启动角色和 SQLite 队列里的动态角色。
-- `claimNextQueuedTask()` 会清理 stale queue item，先确认 task 仍可 claim，再把 queue item 标记为 running。
-- IPC 发送失败会走 `RecoveryPolicy`，不会把 task 留在已领取但无人执行的状态。
-- worker 晚到的 `task.finished` 不会误清当前 role 的 active task。
-- `refreshTaskGraphStatuses()` 会把 graph 从 pending/running 收敛到 done/failed。
-- `recoverStaleRuns()` 会把 task 已经终态但 run 仍处于 running/reviewing/recovering 的孤儿 run 收敛到最终状态。
-- `health()` 现在包含 active run、queued role 和 open task graph 指标。
-
-## 第三轮核心完善
-
-这一轮把核心从“抗故障”补到“可控、可诊断、可维护”：
-
-1. task/run 支持 `cancelled` 状态，并提供取消 API。
-2. worker 输出统一为 `TaskResult` 结构化 JSON，主 agent/reviewer 使用 summary 视图。
-3. 主 agent 常规流程通过 `TaskGraph` 创建 planner/role DAG，reviewer 也归入同一 graph。
-4. task metadata 支持 `timeoutMs`、`maxResultChars` 和 `maxMemoryCandidates`，worker 会超时失败并限制结果/候选记忆数量。
-5. diagnostics 检查 runtime invariant，并发出 `runtime.anomaly` 事件。
-6. planner 仍是路由入口，但 role graph 已统一，为后续结构化 plan 输出留好接口。
-7. experience 召回进入主 agent 前会用 `applicability/contraindications` 做二次过滤。
-8. maintenance 增加 WAL checkpoint、optimize、vacuum、event retention 和 memory candidate retention。
-9. Web API 增加 diagnostics、cancel-task、cancel-run 控制入口。
-10. 增加 core hardening / chaos 类测试，覆盖取消、worker 超时、graph metadata、diagnostics 和 maintenance。
-
-## 结构化 Planner 和长任务执行
-
-新的 planner 路径不再固定为 `planner -> developer -> reviewer`。主 agent 会先让 planner 产出 `PlanSpec` JSON；如果 LLM 返回非 JSON 或结构不合格，会记录 `runtime.anomaly` 并使用保守 fallback plan。
-
-`PlanSpec` 的核心字段：
-
-- `deliveryLevel`: `poc`、`uat` 或 `production`，决定准出标准。
-- `exitCriteria`: 本次 run 的结果验收标准。
-- `planningMode`: `single_wave` 或 `rolling`；长任务默认使用 rolling，任务图可以先粗后细地逐步展开。
-- `tasks`: DAG task 列表，包含 `key`、`role`、`parentKey`、`dependsOn`、`acceptanceCriteria`、`timeoutMs`、`maxRetries`。
-- `permissionMode`: task 级权限模式，可省略并继承 run/session 模式。
-- `expandable`: rolling 模式下可展开节点的标记；节点完成后 executor 会先创建 planner 扩展任务，让 planner 根据 `expansionGoal`、父节点结果和当前图状态返回 `GraphPatchSpec`。
-- `review`: 最终验收要求，reviewer 会根据 exit criteria 做质量门。
-
-执行语义：
-
-- 没有准出等级的长任务先返回确认问题，不启动大量子任务。
-- 有准出等级后，`TaskGraphExecutor` 会自动执行当前 DAG：依赖满足即入队，多个 ready task 可以并行等待，单个 role 仍保持 singleton worker。
-- rolling 图不是一次性冻结的 DAG。粗粒度节点可以带 `expandable=true`，完成后会向同一个 graph 追加更细的实现、验证或后续拆分 task，并记录 `task_graph.expansion_planned` 和 `task_graph.expanded` 事件。
-- 自适应拆解优先走 planner 生成的 `GraphPatchSpec` 严格 JSON；如果模型输出不是 JSON、依赖非法、task key 冲突或超出上限，会记录 `runtime.anomaly` 并使用保守 fallback patch。
-- Planner 执行带预算护栏：`TaskGraphExecutor` 会限制并行 ready task、动态追加 task 总量和重规划次数；预算耗尽会记录 `task_graph.budget_exhausted`，失败/blocked 增多时会记录 `task_graph.budget_adjusted` 并降低并发。
-- 每个 graph 结束时会记录 `task_graph.quality`，包含 score、active/recovered 失败数、blocked 数、动态 task 数、失败聚类、失败风险、预算状态和调参建议；已被 replan recovery 覆盖的旧失败会保留审计但降低质量扣分。
-- 当 `PlanSpec.failureStrategy` 为 `replan` 时，失败 task 会触发内部 replan planner task，仍要求返回 `GraphPatchSpec`，不会替换现有协议；replan 会记录 `task_graph.failure_clustered` 和 `task_graph.replan_quality`，用于判断是 timeout、provider、permission/policy、dependency、resource_budget、verification、data_quality、research_quality 还是需要用户输入，并据此调节 recovery task 预算。
-- 如果 `PlanSpec` 或 `GraphPatchSpec` 要求用户补充信息，run 会进入 `waiting_user`，记录 `task_graph.waiting_user`，并把问题交还给主 agent 而不是继续执行。
-- 动态追加的 task 会带上 `expandedFromTaskId`、`parentKey`、`expansionDepth` 和原 graph 的准出标准，timeline 可以复盘任务图是如何从粗到细长出来的。
-- 如果上游 success dependency 失败，下游 task 会被标记为 `blocked`，不会一直等待到超时。
-- 每个 task 的 `acceptanceCriteria` 写入 metadata，timeline / task trace 可以复盘为什么这个 task 存在、验收标准是什么。
-
-## 多模型 Provider
-
-provider 配置保存在 `.emily/providers.json`，默认会写入一个本地 `echo` provider。配置只保存 `apiKeyEnv`，不要保存真实 API key；Web API 也会拒绝 `apiKey`、`authorization`、`token`、`secret` 这类字段。当前内置三类：
-
-- `echo`: 离线假模型，用于测试和架构跑通。
-- `openai`: OpenAI-compatible chat completions provider，通过 `apiKeyEnv` 读取 API key。
-- `ollama`: 本地 Ollama `/api/generate` provider。
-
-示例：
+Example OpenAI-compatible provider:
 
 ```json
 {
-  "defaultProviderId": "main-echo",
+  "defaultProviderId": "openai-main",
+  "fallbackMode": "fallback",
   "providers": [
     {
-      "id": "main-echo",
-      "type": "echo",
-      "model": "echo-main"
-    },
-    {
-      "id": "developer-openai",
+      "id": "openai-main",
       "type": "openai",
       "model": "gpt-4.1-mini",
       "config": {
+        "baseUrl": "https://api.openai.com/v1",
         "apiKeyEnv": "OPENAI_API_KEY",
-        "temperature": 0.2,
-        "timeoutMs": 60000,
-        "maxRetries": 1,
-        "retryBaseMs": 200,
-        "retryMaxMs": 5000,
-        "circuitBreakerFailureThreshold": 5,
-        "circuitBreakerCooldownMs": 60000,
         "strictJson": true,
-        "costPer1KInputTokens": 0.00015,
-        "costPer1KOutputTokens": 0.0006,
-        "maxCallsPerMinute": 60,
-        "maxCallsPerDay": 5000,
-        "maxTokensPerDay": 2000000,
-        "maxCostUsdPerDay": 25
-      }
-    },
-    {
-      "id": "researcher-ollama",
-      "type": "ollama",
-      "model": "qwen2.5",
-      "config": {
-        "baseUrl": "http://127.0.0.1:11434"
+        "maxRetries": 2
       }
     }
   ]
 }
 ```
 
-`agent.md` 可以绑定 role 默认 provider/model；如果省略 `provider` / `model`，subagent 会使用 main agent 的 provider/model，适合内置默认角色和生产 fallback：
+Provider safeguards:
 
-```yaml
----
-role: "Solve implementation tasks and produce technical next actions."
-provider: "developer-openai"
-model: "gpt-4.1-mini"
-temperature: 0.2
-allowed_tools:
-  - read_file
-  - write_file
-capabilities:
-  - coding
-skills:
-  - coding
-output_contract: "Return summary, implementation notes, risks, and verification steps."
----
+- OpenAI providers must specify `config.apiKeyEnv`.
+- Raw `apiKey`, `authorization`, `token`, and `secret` config keys are rejected.
+- Base URLs must be `http` or `https` and cannot include credentials.
+- Provider usage, cost estimates, quotas, latency, and failures are tracked in SQLite.
+- Circuit breaker and retry/backoff are handled by `ProviderRuntime`.
+
+## Roles And Subagents
+
+Role definitions live at:
+
+```text
+agents/<role>/agent.md
 ```
 
-## Tools / Skills
+Each role can define:
 
-Tools 和 skills 是两层不同的能力描述：
+- provider/model/temperature;
+- singleton behavior;
+- allowed and forbidden tools;
+- max concurrent tasks;
+- capabilities;
+- skills;
+- output contract;
+- operating instructions.
 
-- `ToolRegistry`: 声明工具名、别名、类别、副作用、是否需要 approval 和使用说明。当前是权限与提示词层，不让模型绕过 `ToolGateway`。
-- `ToolGateway`: 按 role 的 `allowed_tools` / `forbidden_tools` 做硬过滤；task 的 `toolHints` 和 skill 自带 `tool_hints` 只会影响提示词，不会自动授予权限。
-- `ToolExecutor`: 在 `ToolGateway.assertAllowed()` 后执行真实工具。当前内置：
-  - `read_file`: 只能读取 workspace 内文件，可限制 `maxBytes`。
-  - `write_file`: 只能写 workspace 内文件。
-  - `run_tests`: 只允许 `npm test`、`npm run check/test` 或 `node test/*.test.ts`，不走 shell。
-  - `inspect_task`: 返回 task trace。
-  - `create_task`: 创建 follow-up task。
-  - `web_search`: 受限 Web 搜索，默认支持 `duckduckgo`，也可通过 `EMILY_WEB_SEARCH_ENDPOINT` 接外部 provider，或用 `provider: "ollama"` 调 Ollama experimental web search；需要 `network_read` approval，结果标记为 untrusted external content。
-  - `http_fetch`: 受限 HTTP/HTTPS fetch，限制方法、header 和响应大小；GET/HEAD 需要 `network_read` approval，POST 需要 `network_write` approval。
-  - `browser`: 轻量浏览器式交互，支持 `snapshot`、`links`、`forms`、`text`、`assert_text`、`follow_link` 和最多 10 步 `sequence`，需要 `browser_interaction` approval。
-  - `github`: 支持结构化 `pr.get`、`pr.list`、`issue.get`、`issue.list`、`pr.comment`、`issue.comment`，也保留受限 `gh` allowlist；读动作需要 `github_read` approval，写动作需要 `github_write` approval。
-  - `delete_file` / `git_reset` / `shell` / `network` 仍是高风险或宽泛能力；`delete_file` 需要 role 显式允许且带 approval，`git_reset` / `shell` / `network` 内置 executor 继续拒绝。
-- task metadata 可带 `toolRequests: [{ tool, args, approval }]`，worker 会在模型调用前执行允许的工具，把结果注入 prompt，并记录 `tool.execution.started/completed/failed/approval_required`；`tool.execution.started` 会写入最终要求的 approval template，便于外部应用做确认 UI。
-- `SkillRegistry`: 内置常用技能，也会加载 `skills/<name>/skill.md`。skill 是可复用工作流 prompt，可以声明 `capabilities`、`aliases` 和需要的 `tool_hints`；其中 `web-search` 负责当前信息发现，`github` 负责 PR/issue/CI/仓库元数据工作流。
-- worker 执行前会合并 `agent.md` 的 `skills` 与 task metadata 的 `skillHints`，解析后注入 `Skill context`；工具解析结果注入 `Tool context`。
-- Skill 采用渐进披露：`SkillRegistry.resolveForTask()` 会先看 role/task hints，再根据 trigger/capability 自动少量命中；`renderSkillContext(..., { mode: "progressive" })` 只注入命中的 skill 元数据和流程，避免把所有技能 prompt 塞进上下文。
-- role 可以通过 `skill_allowlist` 收紧技能边界；未配置时保持兼容，允许 task hints 临时请求其它已注册 skill。
-- 每次解析都会写入 `tool.hints.resolved` 和 `skill.hints.resolved` 事件；被拒绝或未知的 hint 会写入 `runtime.anomaly`。
-- 命中的 skill 会记录 `skill.used`，用于后续 skill decay、merge 和候选更新判断。
-- `SkillBuilder`: 在 maintenance 或手动触发时扫描近 1-2 天 terminal task，按 workflow key 聚类，只把高频、成功率高、流程相似、有验证步骤的操作提议为 skill。
-- `SkillCandidateStore`: skill 先进入 `proposed`，审批后才写入 `skills/<name>/skill.md`；如果已有 file skill 相似度高，候选会标记为 `update` 并合并到旧 skill。
+Builtin role presets:
 
-skill candidate 评分会鼓励：
+| Role | Purpose |
+| --- | --- |
+| `planner` | Break requests into plans and graph tasks. |
+| `developer` | Implement code and run verification. |
+| `researcher` | Gather context from memory/files/current inputs. |
+| `reviewer` | Validate outputs against acceptance criteria. |
+| `inspector` | Inspect incomplete or suspicious tasks after failure. |
+| `memory-curator` | Promote valuable work into reusable experience. |
 
-- 重复次数足够。
-- 成功率高。
-- workflow 相似。
-- 有明确验证步骤。
-- 能减少重复操作成本。
+Subagents are long-lived by role. If a role process already exists, new work is queued to that role instead of spawning duplicate role workers.
 
-同时会惩罚：
+## Planning And Task Graphs
 
-- 临时或一次性任务。
-- 与已有 skill 高度重叠却没有更新价值。
-- 过度项目私有的细节。
+The runtime supports both small tasks and long-running result-oriented work.
 
-skill 文件格式：
+Core concepts:
 
-```yaml
----
-name: "coding"
-title: "Coding"
-description: "Implement scoped code changes with verification notes."
-capabilities:
-  - coding
-  - implementation
-tool_hints:
-  - read_file
-  - write_file
-  - run_tests
-aliases:
-  - developer
-triggers:
-  - implement scoped code changes
-anti_triggers:
-  - purely conceptual discussion
----
+- `run`: one user request.
+- `task`: one role-owned unit of work.
+- `task_graph`: DAG for a run.
+- `task_dependencies`: dependency edges between tasks.
+- `PlanSpec`: initial structured plan.
+- `GraphPatchSpec`: dynamic graph update emitted while the graph is running.
+- `TaskGraphExecutor`: executes ready tasks, expands rolling graph nodes, replans failed branches, and finalizes run state.
 
-Inspect existing patterns, keep edits scoped, and return verification notes.
+Delivery levels:
+
+- `poc`: prove the idea works.
+- `uat`: complete enough for user acceptance testing.
+- `production`: include stronger verification, hardening, and operational readiness.
+
+If a request looks like a long task but does not specify a delivery level, the run can enter `waiting_user` and ask for clarification before work starts.
+
+## Memory, Experience, And Skills
+
+Memory has three layers:
+
+- short-term in-memory recall;
+- file-backed JSONL memory;
+- vector memory with file fallback or external adapters.
+
+External vector adapters:
+
+- Chroma;
+- Qdrant;
+- Milvus;
+- pgvector, either host-injected driver or driver-backed integration.
+
+Experience is higher-value memory:
+
+- daily builder keeps only a few important lessons;
+- matching prefers updating existing experience over creating duplicates;
+- active experiences keep compressed vectors for recall;
+- old revisions are archived rather than lost.
+
+Skills are reusable workflows:
+
+- builtin skills: `planning`, `coding`, `research`, `web-search`, `github`, `review`, `recovery`, `memory-curation`;
+- file skills: `skills/<skill>/skill.md`;
+- skill candidates are proposed from repeated successful work and require approval before becoming active files.
+
+## Tools And Permission Modes
+
+Tools are declared in `ToolRegistry` and enforced by `ToolGateway`.
+
+Builtin tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `read_file` | Read workspace files. |
+| `write_file` | Write workspace files. |
+| `run_tests` | Run approved test commands. |
+| `create_task` | Create follow-up tasks. |
+| `inspect_task` | Inspect task state and trace. |
+| `web_search` | Bounded web search via DuckDuckGo, custom endpoint, or Ollama. |
+| `http_fetch` | Bounded HTTP/HTTPS fetch. |
+| `browser` | Lightweight browser-style page actions. |
+| `github` | Structured GitHub PR/issue actions and restricted `gh` allowlist. |
+| `delete_file` | Destructive workspace delete with approval. |
+| `git_reset` | Declared high-risk capability; not executed by builtin executor. |
+| `shell` | Declared broad capability; not executed by builtin executor. |
+| `network` | Declared broad capability; use narrower network tools instead. |
+
+Permission mode is an additional guard:
+
+| Mode | Allowed by mode |
+| --- | --- |
+| `read_only` | `read_file`, `inspect_task` |
+| `workspace_write` | `read_file`, `write_file`, `run_tests`, `create_task`, `inspect_task` |
+| `danger_full_access` | role-defined tools, still constrained by forbidden tools and approvals |
+
+Final permission is always:
+
+```text
+role.allowed_tools ∩ permissionMode.allowed_tools - role.forbidden_tools
 ```
 
-runtime API：
+Approval-sensitive tools require exact templates such as `network_read`, `browser_interaction`, `github_read`, `github_write`, or `destructive_workspace`.
 
-```ts
-runtime.listTools()
-runtime.listSkills()
-runtime.buildSkillCandidates({ minOccurrences: 3 })
-runtime.listSkillCandidates({ status: "proposed" })
-await runtime.approveSkillCandidate("candidate-id")
-runtime.rejectSkillCandidate("candidate-id", "too narrow")
-await runtime.executeTool({
-  tool: "read_file",
-  role: "developer",
-  args: { path: "README.md", maxBytes: 4000 },
-  permissionMode: "read_only"
-})
+## Web, REST, And Gateway
+
+Start the server:
+
+```bash
+EMILY_WEB_TOKEN=change-me npm run web
 ```
 
-## 平台层能力
+Common HTTP endpoints:
 
-这轮把 AgentOS 从“一个多 agent 应用”推进成可被其它 agent 应用复用的底座：
+```bash
+TOKEN=change-me
+curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/doctor?deep=true' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/commands' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/tools' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/skills' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/providers' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
+```
 
-- `ContextEngine`: 构建有预算的上下文包。默认 `active` 模式只带短期内存和长期语义印象；需要追溯时用 `deep` 模式再搜索文件记忆和 session 历史，避免每轮把长历史全塞给模型。
-- `Gateway Protocol`: Web adapter 提供 `/gateway` WebSocket。消息是严格 typed request/response/event，适合其它业务应用接入，而不是只依赖 WebUI。
-- `CommandRegistry` 是 Gateway/TUI/Web 的控制面复用层。Gateway 除 chat 外已经暴露 provider、role、session、skill candidate、experience、tool execution、diagnostics、maintenance、cancel 等结构化写类方法；TUI 优先使用 command text renderer 输出，adapter 只保留输入读取和少量状态展示。
-- `AgentRouter`: 主 agent 的初始路由使用确定性规则，返回 selected roles、命中规则和 fallback role，planner 仍负责后续结构化任务图。
-- `AgentProfile`: 每个 worker 运行前生成 profile，记录 role、workspace、stateDir、sessionScope、memoryScope、provider fallback、tool policy 和 skill allowlist，并写入 `agent.profile.created` 事件。
-- `LifecycleHooks`: runtime 暴露 `addLifecycleHook()`，可订阅 `beforeRun`、`afterRun`、`beforeTaskRun`、`afterTaskRun`、`beforeMemoryCommit`、`afterMemoryCommit`、`beforeContextBuild`、`afterContextBuild`。
-- `securityAudit()`: 检查 role 高危工具、approval-sensitive 工具、provider secret-like config、未知 skill 和 runtime critical diagnostics；CLI 可用 `node src/index.ts --security-audit`。
-- Skills 渐进披露与 telemetry: skill frontmatter 支持 `triggers` / `anti_triggers`，worker 会记录 `skill.used` 和 blocked/autoSelected 信息。
-- WebSocket events: Gateway 客户端会收到 `gateway.ready` 和 runtime event 转发；业务应用可以用同一个连接发指令并监听任务状态。
+WebSocket gateway:
 
-Gateway request 示例：
+```text
+ws://127.0.0.1:3000/gateway?token=change-me
+```
+
+Request shape:
 
 ```json
 {
   "type": "request",
-  "id": "chat-1",
+  "id": "client-generated-id",
   "method": "chat.send",
   "params": {
-    "sessionId": "demo",
-    "message": "POC 实现一个订单审核 agent 应用"
+    "message": "Build a small app to production readiness",
+    "sessionId": "default",
+    "permissionMode": "workspace_write"
   }
 }
 ```
 
-常用 method：
+Gateway methods include chat, sessions, provider management, roles, tools, skills, experiences, timeline, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
 
-- `chat.send`
-- `sessions.list` / `sessions.create` / `sessions.clear` / `sessions.restore`
-- `tasks.cancel` / `runs.cancel`
-- `providers.list` / `providers.health` / `providers.usage`
-- `roles.list` / `roles.add`
-- `tools.list` / `skills.list` / `skills.candidates.list`
-- `doctor.run`
-- `sessions.resume_latest` / `sessions.export` / `sessions.compact_preview` / `sessions.usage`
-- `commands.list` / `commands.run`
-- `experiences.recall`
-- `timeline.get`
-- `diagnostics.run` / `maintenance.run` / `security.audit`
-- `context.build`
-- `router.route`
+## Sessions
 
-provider / role 护栏：
+Sessions isolate conversation context.
 
-- provider id 和 role name 只能包含字母、数字、`.`、`_`、`-`。
-- `openai` provider 必须显式配置 `config.apiKeyEnv`。
-- `baseUrl` 只允许 `http/https`，不能携带用户名密码；未知 config key 会被拒绝。
-- `temperature` 必须在 `0..2`，`timeoutMs` 不能超过 10 分钟；retry 和 circuit breaker 参数有上限校验。
-- provider 调用会返回结构化元数据：`content`、`usage`、`latencyMs`、`finishReason`、`rawProvider`、`attempts`、`costUsd`、`usageRecordId`。
-- `strictJson` 默认开启，会要求 LLM 只返回 JSON；如果返回散文本，会自动提取 JSON 或包装成 `{ "content": "...", "metadata": { "fallback": true } }` 兜底。
-- provider 错误会归类为 `auth_error`、`timeout`、`rate_limited`、`server_error`、`bad_request`、`empty_response`、`network_error`、`circuit_open`、`quota_exceeded` 等。
-- `costPer1KInputTokens` / `costPer1KOutputTokens` 用于估算成本；`maxCallsPerMinute`、`maxCallsPerDay`、`maxTokensPerDay`、`maxCostUsdPerDay` 用于限额控制。
-- `enabled: false` 可禁用 provider；禁用/删除 default provider 或仍被 role 引用的 provider 会失败。
-- role 的 `allowed_tools` 和 `forbidden_tools` 不能冲突。
-- `runtime.updateRoleProvider()` 是部分更新，未传字段会保留原值。
-- `providerFallbackMode` 默认为 `strict`；设置为 `fallback` 时，缺失 provider 会回退到 main agent 的 provider，并记录 `runtime.anomaly`。
-- 注入自定义 main model 时必须显式指定匹配的 `mainProviderId/defaultProviderId`，避免 subagent fallback 指向不可复用的内存对象。
-- `runtime.checkProviders({ deep })` 可检查 provider 健康；`deep: true` 时会 ping Ollama `/api/tags`，OpenAI-compatible provider 会检查 `/models`。
+TUI commands:
 
-runtime API：
+- `/new`: create a new session;
+- `/clear`: create a new session and hide the old one;
+- `:resume latest`: resume the latest visible session;
+- `:export-session <id>`: export a session;
+- `:compact-preview <id>`: preview compaction;
+- `:session-usage <id>`: inspect usage.
 
-```ts
-runtime.listProviders()
-runtime.listTools()
-runtime.listSkills()
-runtime.buildSkillCandidates({ minOccurrences: 3 })
-runtime.listSkillCandidates({ status: "proposed" })
-await runtime.approveSkillCandidate("candidate-id", { reason: "repeated workflow" })
-runtime.rejectSkillCandidate("candidate-id", "too narrow")
-await runtime.checkProviders()
-runtime.providerUsage()
-await runtime.addProvider({ id: "reviewer-fast", type: "echo", model: "echo-review" })
-await runtime.disableProvider("reviewer-fast")
-await runtime.enableProvider("reviewer-fast")
-await runtime.removeProvider("reviewer-fast")
-await runtime.addRole({
-  name: "qa",
-  role: "Check runtime behavior and return concise quality notes.",
-  provider: "reviewer-fast",
-  model: "echo-review",
-  allowedTools: ["read_file"],
-  capabilities: ["quality", "verification"],
-  skills: ["review"],
-  instructions: "Review the assigned task and return a concise QA result."
-})
-await runtime.updateRoleProvider("qa", { provider: "reviewer-fast", model: "echo-review-v2" })
-await runtime.initializeDefaultRoles()
-await runtime.doctor({ deep: true })
-runtime.resumeLatestSession({ includeHidden: true })
-runtime.exportSession("session-id", { format: "markdown" })
-runtime.previewSessionCompaction("session-id", { maxMessages: 20 })
-runtime.sessionUsage("session-id")
-runtime.listCommands()
-await runtime.runCommand("doctor", { args: ["--deep"], format: "json" })
-await runtime.runCommand("provider.add", {
-  input: { id: "qa-echo", type: "echo", model: "qa-model" }
-})
-await runtime.runCommand("tool.execute", {
-  input: { tool: "read_file", role: "developer", args: { path: "README.md" } }
-})
-```
+Hidden or trashed sessions are not implicitly reactivated. Restores are explicit. Trash lifecycle supports delayed deletion.
 
-Web API：
+## Security Model
 
-除 `/health` 外，下面的 API 都需要 `-H "x-emily-token: $TOKEN"`；`/providers/dashboard` 可用 `?token=$TOKEN` 直接打开。
+Default protections:
+
+- Web/API/Gateway routes require token auth except `/` and `/health`.
+- Unsafe HTTP methods check origin.
+- WebUI and provider dashboard do not embed the server token.
+- HTTP request bodies and list limits are bounded.
+- HTTP tools reject loopback, private networks, link-local, and cloud metadata addresses by default.
+- Workspace file tools resolve real paths and reject symlink escapes.
+- GitHub raw API calls are classified conservatively; mutating calls require write approval.
+- Planner metadata is allowlisted, and task permission modes are clamped to inherited mode.
+- Subagent tool requests do not self-approve approvals from planner/model metadata.
+- Provider config rejects raw secrets.
+
+Before exposing the server beyond loopback:
+
+1. Set a strong `EMILY_WEB_TOKEN`.
+2. Put the service behind TLS and network ACLs.
+3. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
+4. Configure a real provider and run `node src/index.ts --security-audit`.
+5. Run `npm run check`.
+6. Review roles that allow network, browser, GitHub, or destructive tools.
+
+## Development
+
+Run all local checks:
 
 ```bash
-TOKEN='启动日志里打印的 token 或 EMILY_WEB_TOKEN'
-curl 'http://127.0.0.1:3000/health'
-curl 'http://127.0.0.1:3000/tools' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/skills' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/skill-candidates?status=proposed' -H "x-emily-token: $TOKEN"
-curl -X POST http://127.0.0.1:3000/skill-candidates/build \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"lookbackDays":2,"minOccurrences":3,"minScore":0.68}'
-curl -X POST http://127.0.0.1:3000/skill-candidates/approve \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"candidateId":"...","reason":"重复成功 workflow"}'
-curl -X POST http://127.0.0.1:3000/skill-candidates/reject \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"candidateId":"...","reason":"太窄，保留为 memory/experience"}'
-curl 'http://127.0.0.1:3000/providers' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/providers/health?deep=false' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/providers/usage' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/providers/dashboard?token='"$TOKEN"
-curl 'http://127.0.0.1:3000/roles' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/doctor?deep=true' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/commands' -H "x-emily-token: $TOKEN"
-curl -X POST http://127.0.0.1:3000/commands/run \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"name":"doctor","args":["--deep"]}'
-curl -X POST http://127.0.0.1:3000/commands/run \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"name":"tool.execute","input":{"tool":"read_file","role":"developer","args":{"path":"README.md","maxBytes":1000}}}'
-curl 'http://127.0.0.1:3000/sessions/resume-latest?includeHidden=true' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/sessions/export?sessionId=demo&format=markdown' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/sessions/compact-preview?sessionId=demo&maxMessages=20' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/sessions/usage?sessionId=demo' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/timeline?runId=...' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/timeline?runId=...&format=text' -H "x-emily-token: $TOKEN"
-curl 'http://127.0.0.1:3000/task-trace?taskId=...' -H "x-emily-token: $TOKEN"
-curl -X POST http://127.0.0.1:3000/diagnostics/repair \
-  -H "x-emily-token: $TOKEN"
-
-curl -X POST http://127.0.0.1:3000/maintenance \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"day":"2026-05-03","staleRunMs":300000,"maxEvents":10000}'
-
-curl -X POST http://127.0.0.1:3000/cancel-run \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"runId":"...","reason":"用户取消"}'
-
-curl -X POST http://127.0.0.1:3000/providers \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"id":"qa-echo","type":"echo","model":"qa-model"}'
-
-curl -X POST http://127.0.0.1:3000/providers/disable \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"id":"qa-echo"}'
-
-curl -X POST http://127.0.0.1:3000/providers/enable \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"id":"qa-echo"}'
-
-curl -X DELETE 'http://127.0.0.1:3000/providers?id=qa-echo' \
-  -H "x-emily-token: $TOKEN"
-
-curl -X POST http://127.0.0.1:3000/roles \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"name":"qa","role":"Quality agent","provider":"qa-echo","model":"qa-model","allowedTools":["read_file"],"capabilities":["quality"],"instructions":"Review the task result."}'
-
-curl -X POST http://127.0.0.1:3000/roles/defaults \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"overwrite":false}'
-```
-
-## 经验记忆
-
-普通 memory 是历史，experience memory 是从历史里提炼出来的可复用经验。
-
-核心规则：
-
-- 每天整理时最多产出或更新 3 条高质量经验。
-- 同一类经验使用稳定 `topicKey`，只保留一个 `active` 当前最佳实践；如果 `topicKey` 不完全一致，会再用 scope/type、向量相似度和关键词重合做相似匹配。
-- 旧版本进入 `experience_revisions`，用于审计、回滚和解释，不参与默认召回。
-- 经验向量只索引 active 当前版本，避免新旧经验同时命中。
-- 普通 memory 的长期向量层使用压缩向量索引，并按内容 hash 去重；maintenance 会压缩文件层和向量层，避免流水账无限膨胀。
-- 经验索引会在每日构建和 runtime maintenance 时自动重建缺失/过期/算法变化的 active vector，并归档 stale vector。
-- 召回排序会混合压缩向量相似度、关键词重合、适用条件、重要性、置信度、reuse count 和用户反馈。
-- 每条经验记录适用条件 `applicability` 和禁用条件 `contraindications`，避免相似但场景不同的经验被误用。
-- `conflict` / `split` 更新会创建新的 active topic，`deprecated` 会归档旧版本并从默认召回移除。
-- 召回流程是“先有印象，再查细节”：先命中压缩经验向量，再读取 active experience 和 evidence task。
-
-当前经验表：
-
-- `experiences`: 当前 active best practice。
-- `experience_revisions`: 旧版本归档。
-- `experience_vectors`: 压缩后的 active 经验索引。
-- `experience_feedback`: 用户或主 agent 对经验的反馈，例如 `useful`、`wrong`、`outdated`、`duplicate`。
-
-当前压缩接口在 `src/experience/VectorCompressor.ts`：
-
-- `NoopCompressor`: 不压缩，便于调试。
-- `ScalarQuantCompressor`: int8 标量量化。
-- `TurboQuantPlaceholderCompressor`: 为后续 TurboQuant/PolarQuant/QJL 类算法预留同一接口。
-
-长期记忆向量层通过 `src/memory/VectorStoreAdapter.ts` 支持外部 adapter：
-
-- 默认 `EMILY_VECTOR_STORE=file`，使用 `.emily/memory/vector-index.json`。
-- `EMILY_VECTOR_STORE=chroma|qdrant|milvus|pgvector` 可选择外部 adapter。
-- `EMILY_VECTOR_URL` 配置 HTTP 向量库地址，`EMILY_VECTOR_COLLECTION` 配置 collection 名。
-- `EMILY_VECTOR_FALLBACK=false` 可关闭文件 fallback；默认开启，因此外部向量库不可用时仍能离线召回。
-- `pgvector` 不捆绑数据库驱动，但 `VectorStoreConfig.pgDriver` 支持宿主应用注入 `query(sql, params)` 兼容的 pool/client，内置 adapter 会创建表、upsert、search 和 compact。
-- `test/fixtures/vector/docker-compose.yml` 提供 Qdrant、Chroma、Postgres+pgvector 的可选集成测试环境；默认测试会跳过真实外部服务，设置 `EMILY_VECTOR_INTEGRATION=true` 后才执行。
-
-每日经验生成入口：
-
-```ts
-runtime.buildDailyExperiences({ day: new Date() })
-await runtime.maintenance({
-  maxFileMemoryRecords: 1000,
-  maxVectorMemoryRecords: 500,
-  pruneArchivedExperienceVectorDays: 90,
-  skillLookbackDays: 2,
-  skillMinOccurrences: 3
-})
-```
-
-Web API：
-
-```bash
-curl -X POST http://127.0.0.1:3000/experiences/build-daily \
-  -H 'content-type: application/json' \
-  -d '{"day":"2026-05-03"}'
-
-curl 'http://127.0.0.1:3000/experiences?q=sqlite%20ipc%20recovery'
-
-curl -X POST http://127.0.0.1:3000/experiences/feedback \
-  -H 'content-type: application/json' \
-  -d '{"experienceId":"...","rating":"useful","comment":"命中正确"}'
-```
-
-## 运行
-
-要求 Node.js `>=22.18`。
-
-启动 TUI：
-
-```bash
-npm start
-```
-
-TUI 支持 `:health`、`:doctor`、`:providers`、`:roles`、`:commands`、`:sessions`、`:resume latest`、`:export-session`、`:compact-preview`、`:session-usage`、`:messages`、`:tools`、`:skills`、`:candidates`、`:timeline`、`:diagnostics`、`:maintenance` 和直接聊天。会话命令中，`/new` 会创建一个新的可见 session，`/clear` 会隐藏当前 session 并创建新 session；隐藏 session 可通过 `:sessions all` 查看，并用 `:restore-session <id>` 恢复。聊天窗口和消息历史只读取当前 session 内的上下文。
-
-只跑诊断：
-
-```bash
-node src/index.ts --doctor --deep
-node src/index.ts --doctor --repair
-node src/index.ts --security-audit
-```
-
-启动 Web 适配器：
-
-```bash
-npm run web
-```
-
-WebUI 地址：
-
-```bash
-http://127.0.0.1:3000/
-```
-
-Web/API 默认启用本地 token 防护。启动时会打印一次性 token，也可以用 `EMILY_WEB_TOKEN=... npm run web` 固定 token。除 `/` 和 `/health` 外，请求需要带 `x-emily-token` 或 `Authorization: Bearer ...`；浏览器 WebUI 不会从服务端内嵌管理 token，首次打开可输入 token，或用 `http://127.0.0.1:3000/?token=$TOKEN` 初始化到本地浏览器存储。
-
-HTTP/browser 工具默认拒绝 loopback、内网、link-local 和云 metadata 等私有地址，避免把 agent 变成 SSRF 通道。开发测试如确实要访问本地服务，可临时设置 `EMILY_HTTP_ALLOW_PRIVATE=true`，或用 `EMILY_HTTP_EGRESS_ALLOWLIST=example.com,https://api.example.com` 做精确放行。
-
-其它 agent 应用建议优先走 WebSocket：
-
-```text
-ws://127.0.0.1:3000/gateway?token=$TOKEN
-```
-
-REST 也新增了平台层调试入口：
-
-```bash
-curl 'http://127.0.0.1:3000/context?q=websocket%20gateway&sessionId=demo&mode=deep' \
-  -H "x-emily-token: $TOKEN"
-
-curl 'http://127.0.0.1:3000/route?q=开发一个API' \
-  -H "x-emily-token: $TOKEN"
-
-curl 'http://127.0.0.1:3000/security/audit' \
-  -H "x-emily-token: $TOKEN"
-```
-
-WebUI 采用 Wiki.js 风格的信息架构：左侧分组导航、顶部搜索、内容工作区和管理面板，覆盖 chat、sessions、timeline、providers、roles、tools、skills、skill candidates、experiences 和 diagnostics。Chat 页底部是发送区，顶部使用 session 下拉框切换会话，并提供 New / Clear / Restore 管理入口；切换 session 会重新加载该 session 的消息历史和 last run。
-
-请求示例：
-
-```bash
-curl -X POST http://127.0.0.1:3000/chat \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"sessionId":"demo","message":"帮我设计一个 Node 多 agent 架构","permissionMode":"workspace_write"}'
-
-curl http://127.0.0.1:3000/sessions \
-  -H "x-emily-token: $TOKEN"
-
-curl 'http://127.0.0.1:3000/sessions/messages?sessionId=demo' \
-  -H "x-emily-token: $TOKEN"
-
-curl -X POST http://127.0.0.1:3000/sessions/clear \
-  -H 'content-type: application/json' \
-  -H "x-emily-token: $TOKEN" \
-  -d '{"sessionId":"demo","reason":"用户清空上下文"}'
-```
-
-订阅事件流：
-
-```bash
-curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
-```
-
-## 模块边界
-
-- `src/agents/MainAgent.ts`: 主 agent，负责用户沟通、记忆召回、角色路由、任务派发和结果汇总。
-- `src/context/ContextEngine.ts`: active/deep 上下文构建，整合短期记忆、长期召回、session 历史、经验和图状态。
-- `src/gateway/GatewayProtocol.ts`: typed WebSocket request/response/event 协议和 dispatch。
-- `src/routing/AgentRouter.ts`: 确定性 role 路由规则。
-- `src/runtime/LifecycleHooks.ts`: runtime 生命周期 hook 注册和触发。
-- `src/runtime/Doctor.ts`: 聚合 health、diagnostics、provider health、security audit、session 和候选项状态的 runtime doctor 报告。
-- `src/runtime/SessionOps.ts`: resume latest、session export、compaction preview 和 per-session usage 汇总。
-- `src/commands/CommandRegistry.ts`: 统一注册可复用 runtime command，覆盖 doctor、health、provider/role/tool/skill/session/experience/timeline/context/router 查询、provider/role/skill/session/experience 写命令、maintenance/cancel 和 tool execution，并带 input schema、权限声明和文本 renderer。
-- `src/security/SecurityAudit.ts`: 底座安全审计报告。
-- `src/agents/AgentProfile.ts`: subagent profile 隔离描述和 prompt 渲染。
-- `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
-- `src/agents/RoleWorkProduct.ts`: developer / researcher / reviewer 的本地工作产物增强层，补充代码库上下文、研究结构和 JSON review verdict。
-- `src/tasks/TaskStore.ts`: SQLite task、session、agent、event、role queue、状态机、lease、retry/dead-letter。
-- `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
-- `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛、rolling 图扩展、replan quality 评分、生产/研究/数据类失败聚类和预算自适应。
-- `src/tasks/TaskResult.ts`: 结构化 task result 序列化、解析和 summary 提取。
-- `src/planning/PlanSpec.ts`: PlanSpec / GraphPatchSpec 类型、解析、fallback 计划、准出标准识别和 validator。
-- `src/tasks/errors.ts`: 状态机错误类型。
-- `src/events/RuntimeEventFactory.ts`: 统一生成 runtime event payload。
-- `src/recovery/RecoveryPolicy.ts`: worker exit / 异常恢复决策。
-- `src/review/ReviewerVerdict.ts`: reviewer 结构化 verdict parser。
-- `src/timeline/renderTimeline.ts`: timeline 文本 replay 渲染。
-- `src/tasks/RoleAgentManager.ts`: 每个角色最多一个独立 worker 进程，负责持久队列 drain、IPC、heartbeat、reconcile 和崩溃恢复。
-- `src/workers/subagentWorker.ts`: subagent 独立进程入口，使用 `try/catch/finally` 兜底标记最终状态。
-- `src/roles/RoleDefinitionLoader.ts`: 解析 `agents/<role>/agent.md` frontmatter。
-- `src/roles/RoleManager.ts`: 列出、创建和更新 role 定义。
-- `src/llm/ProviderRegistry.ts`: provider 注册、持久化和 role-specific model selection。
-- `src/llm/ProviderRuntime.ts`: provider 结构化返回、JSON 兜底、retry/backoff 和 circuit breaker。
-- `src/llm/ProviderUsageStore.ts`: provider 调用记录、成本估算、限额检查和 usage summary。
-- `src/llm/ProviderJson.ts`: LLM JSON 返回提取、解析和散文本兜底包装。
-- `src/llm/EchoModelProvider.ts`: 本地假模型 provider，用于离线跑通架构。
-- `src/llm/OpenAIModelProvider.ts`: OpenAI-compatible provider。
-- `src/llm/OllamaModelProvider.ts`: Ollama provider。
-- `src/tools/ToolRegistry.ts`: 工具声明注册表，包含别名、副作用、approval 和提示词说明。
-- `src/tools/ToolGateway.ts`: 工具权限校验入口，解析 tool hints 并过滤 role 不允许的工具。
-- `src/tools/PermissionMode.ts`: task/run 级额外权限护栏，和 role policy 求交集。
-- `src/tools/ToolExecutor.ts`: 真实工具执行器，当前支持 workspace 文件读写、受限测试执行、task inspection、create_task、web search、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作，并写入审计事件。
-- `src/skills/SkillRegistry.ts`: 技能注册表，加载内置技能和 `skills/<skill>/skill.md`。
-- `src/skills/SkillCandidateStore.ts`: skill candidate SQLite 存储、审批、拒绝和 skill 文件写入。
-- `src/skills/SkillBuilder.ts`: 从重复 task workflow 生成 proposed skill candidate，优先更新已有 skill。
-- `src/experience/ExperienceStore.ts`: active experience、版本归档和压缩索引。
-- `src/experience/ExperienceBuilder.ts`: 每日经验提炼，最多保留 3 条高价值更新。
-- `src/experience/ExperienceMatcher.ts`: 稳定 topicKey、相似经验匹配和合并判断。
-- `src/experience/VectorCompressor.ts`: 向量压缩接口和当前 int8 实现。
-- `src/memory/MemorySystem.ts`: 三层记忆统一入口，长期向量层使用压缩索引和自动 compact。
-- `src/memory/VectorStoreAdapter.ts`: file/chroma/qdrant/milvus/pgvector vector adapter contract 和外部 adapter factory。
-- `src/storage/SchemaMigrator.ts`: SQLite schema migration 版本记录。
-- `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
-- `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
-- `src/adapters/tui.ts`: 命令行交互入口，提供 chat 和 command renderer 驱动的 health、provider、tool、skill、timeline、diagnostics、maintenance 等命令。
-- `src/adapters/web.ts`: Web/API/Gateway 入口，提供 `GET /` WebUI、`GET /health`、`GET /doctor`、session ops、commands、`POST /tools/execute`、`GET /events`、`POST /chat` 和 `/gateway` WebSocket。
-- `src/adapters/webUi.ts`: Wiki.js 风格 WebUI HTML/CSS/JS。
-- `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
-- `skills/<skill>/skill.md`: 技能定义，描述可复用工作流、aliases、capabilities 和 tool hints。
-
-## 任务与通知
-
-SQLite 是事实来源，IPC 只负责实时通知：
-
-1. main agent 创建 task，写入 SQLite，并生成 `.emily/tasks/task-xxx.md`。
-2. `task_dependencies` 表描述 task graph，依赖未满足时 task 会保持等待。
-3. `TaskStore.enqueueTask()` 把可运行 task 写入 `role_queues`。
-4. `RoleAgentManager` 每个角色最多启动一个 worker。
-5. worker 领取任务后标记 `running`，写入 lease 并定期 heartbeat。
-6. worker 完成后写入结构化 `TaskResult`，标记 `done` / `failed` / `cancelled` / `dead_letter`，再通过 IPC 发 `task.finished`。
-7. main agent 收到通知后回 SQLite 查询最终状态，不信任 IPC payload。
-8. worker 异常退出或 lease 过期时，manager 先走 `RecoveryPolicy`；能确认已有结果则 finish，可重试则 retry，超过上限则 dead-letter，否则转为 `needs_inspection` 并派发 `inspector`。
-
-## 验证
-
-```bash
-npm test
 npm run check
 ```
 
-当前测试覆盖：
+The check command runs source typecheck and the full test suite:
 
-- 正常主 agent 到 subagent 的任务派发和三层记忆写入。
-- worker 崩溃后 inspector 自动检查并落最终状态。
-- runtime 重启后继续 drain 已持久化 queued task，包括动态角色。
-- Task 状态机、非法跳转、retry 和 dead-letter。
-- task/run 取消、worker 超时、结构化 TaskResult。
-- 多 provider registry、配置校验、fallback、health check、role-specific provider/model、动态新增 role。
-- tools/skills registry、role skill frontmatter、tool hint 权限过滤、worker 注入和审计事件。
-- developer/researcher/reviewer role work product 增强和 reviewer verdict 解析。
-- skill candidate 生成、评分、审批写入、已有 skill 更新、拒绝和 schema migration。
-- session 生命周期和消息隔离：new、clear/hide、restore、trash、session 内消息历史和 30 天后删除。
-- TUI/WebUI 静态渲染入口和 WebUI 基础结构。
-- WebSocket Gateway、ContextEngine active/deep 召回、确定性路由、LifecycleHooks、security audit 和结构化写类控制入口。
-- doctor、CommandRegistry、session 运维 API、permission mode、command text renderer 和 TUI/Web/Gateway command 复用。
-- 外部向量库 adapter factory、pgvector host-injected driver、ToolExecutor 审计链、精细 approval template、轻量浏览器交互、GitHub PR/issue 结构化动作、planner graph quality/replan/budget/failure-cluster 校准和 mock parity harness。
-- run/timeline、reviewer flow、memory candidates。
-- reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
-- task graph 状态刷新和孤儿 run 收敛。
-- diagnostics invariant 和 database retention maintenance。
-- memory 压缩向量索引、内容去重、compact 和混合召回。
-- 经验创建、同类经验更新、旧版本归档、active-only 召回。
-- 经验相似匹配、applicability/contraindications、feedback/reuse、索引重建和 schema migration 记录。
-- mock parity 覆盖 provider/doctor、command registry、真实工具执行、动态 task、worker crash、cancel、gateway、memory candidate 审批和多轮 replan 长链路基准；planner calibration 额外使用生产、研究、数据处理长任务样本校验失败聚类、风险权重和预算参数，外部 provider/vector parity 可通过环境变量启用。
+- smoke/recovery/restart/state machine;
+- provider and usage;
+- tools and skills;
+- sessions and WebUI hardening;
+- gateway context;
+- command registry;
+- role work product;
+- planner graph and calibration;
+- dynamic tasks;
+- mock parity;
+- vector adapters;
+- memory optimization;
+- experience;
+- policy;
+- migration.
 
-## 下一阶段建议
+Integration tests are opt-in:
 
-这部分只列真正还没有封装完成的扩展点；已完成的 ProviderRegistry、ToolGateway 权限层、AgentRouter、doctor、session ops、CommandRegistry、外部向量 adapter、pgvector host-injected 实现、ToolExecutor 专用 executor 和 mock parity harness 已在上文归入当前能力。
+```bash
+EMILY_VECTOR_INTEGRATION=true npm run check
+EMILY_PROVIDER_INTEGRATION=true npm run check
+```
 
-- Provider：补原生 Anthropic、Gemini provider；OpenAI-compatible 私有网关可先通过 `openai` provider 的兼容配置承载，再按需要沉淀专用 adapter。
-- Memory：继续补真实 Milvus/Chroma/Qdrant collection bootstrap 和 pgvector driver 包装示例，方便宿主应用少写样板。
-- Tools：继续把真实浏览器驱动、GitHub GraphQL thread 操作和宿主应用确认弹窗接入为可选 executor，而不是扩大默认权限。
-- Planner：继续沉淀安全审计、迁移、跨仓库重构和数据回填类长任务样本，校准 replan patch quality 的领域规则。
-- CommandRegistry：继续补更多命令的专用 text renderer 和审计字段，让 adapter 中的手写展示逻辑继续减少。
+## Project Layout
+
+```text
+src/
+  adapters/      TUI, WebUI, REST, SSE, WebSocket gateway
+  agents/        main/subagent support and role work product shaping
+  commands/      CommandRegistry shared by adapters
+  context/       context budget and recall assembly
+  experience/    active experience, revisions, compressed vectors
+  gateway/       WebSocket protocol
+  llm/           providers, JSON normalization, usage, retries
+  memory/        memory layers and vector store adapters
+  planning/      PlanSpec and GraphPatchSpec parsing/validation
+  recovery/      worker crash and stale task recovery
+  roles/         agent.md loader and role manager
+  security/      runtime security audit
+  skills/        skill registry and candidate builder
+  tasks/         SQLite task store, graph executor, role process manager
+  tools/         tool registry, gateway, executor, permission modes
+  workers/       subagent worker process
+test/
+  harness/       deterministic mock parity harness
+agents/
+  <role>/agent.md
+skills/
+  <skill>/skill.md
+```
+
+## 1.0 Readiness Checklist
+
+Current local baseline:
+
+- `npm run check`: passing.
+- `npm audit --audit-level=moderate`: passing.
+- `node src/index.ts --doctor --deep`: passing.
+- `node src/index.ts --security-audit`: passing with only `provider.default_echo` info finding.
+
+To deploy a real 1.0 environment, replace the default `echo` provider with a production provider and rerun the checklist above.
+
+## User Guide
+
+See [user-guide.md](./user-guide.md) for day-to-day usage, provider setup, sessions, long tasks, tools, skills, memory, and operations.
+
+## License
+
+GPL-3.0-only. See [LICENSE](./LICENSE).

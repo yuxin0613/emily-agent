@@ -1,5 +1,6 @@
 import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderConfig } from "./ModelProvider.ts";
 import { ProviderCallError } from "./ModelProvider.ts";
+import { readJsonResponse, readResponseText } from "./HttpResponse.ts";
 import { classifyHttpStatus } from "./ProviderRuntime.ts";
 
 export class OpenAIModelProvider implements ModelProvider {
@@ -60,22 +61,23 @@ export class OpenAIModelProvider implements ModelProvider {
 
       if (!response.ok) {
         const classification = classifyHttpStatus(response.status);
+        const detail = await readResponseText(response, 64000);
         throw new ProviderCallError({
           providerId: this.id,
           code: classification.code,
           status: response.status,
           retryable: classification.retryable,
-          message: `OpenAI provider ${this.id} failed: ${response.status} ${await response.text()}`,
+          message: `OpenAI provider ${this.id} failed: ${response.status} ${detail.text}`,
         });
       }
-      const body = await response.json() as {
+      const body = await readJsonResponse<{
         choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
         usage?: {
           prompt_tokens?: number;
           completion_tokens?: number;
           total_tokens?: number;
         };
-      };
+      }>(response, { label: `OpenAI provider ${this.id}` });
       return {
         content: body.choices?.[0]?.message?.content || "",
         finishReason: body.choices?.[0]?.finish_reason,

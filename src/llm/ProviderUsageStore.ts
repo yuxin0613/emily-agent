@@ -331,7 +331,7 @@ export class ProviderUsageStore {
     const placeholders = ids.map(() => "?").join(", ");
     const rows = this.db
       .prepare(`SELECT * FROM provider_usage WHERE run_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`)
-      .all(...ids, limit) as ProviderUsageRow[];
+      .all(...ids, limit) as unknown as ProviderUsageRow[];
     return rows.map(parseProviderUsage);
   }
 
@@ -340,10 +340,10 @@ export class ProviderUsageStore {
     const rows = providerId
       ? this.db
         .prepare("SELECT * FROM provider_usage WHERE created_at >= ? AND created_at <= ? AND provider_id = ? ORDER BY created_at DESC LIMIT ?")
-        .all(start.toISOString(), until.toISOString(), providerId, limit) as ProviderUsageRow[]
+        .all(start.toISOString(), until.toISOString(), providerId, limit) as unknown as ProviderUsageRow[]
       : this.db
         .prepare("SELECT * FROM provider_usage WHERE created_at >= ? AND created_at <= ? ORDER BY created_at DESC LIMIT ?")
-        .all(start.toISOString(), until.toISOString(), limit) as ProviderUsageRow[];
+        .all(start.toISOString(), until.toISOString(), limit) as unknown as ProviderUsageRow[];
     return rows.map(parseProviderUsage);
   }
 

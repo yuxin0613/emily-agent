@@ -39,11 +39,14 @@ const candidates = runtime.taskStore.getMemoryCandidatesForRun(response.runId);
 assert.ok(candidates.length > 0);
 assert.ok(candidates.some((candidate) => candidate.status === "approved"));
 
-const reviewer = response.subResults?.find((result) => result.role === "reviewer");
+const reviewer = response.subResults?.filter((result) => result.role === "reviewer").at(-1);
 assert.ok(reviewer);
+const reviewerTask = runtime.taskStore.getTask(reviewer.taskId);
+assert.equal(reviewerTask?.status, "done");
 const trace = runtime.getTaskTrace(reviewer.taskId);
-assert.ok(trace.events.some((event) => event.type === "task.done"));
+assert.ok(trace.tasks.some((task) => task.id === reviewer.taskId && task.status === "done"));
 const timeline = runtime.getTimeline({ runId: response.runId });
+assert.equal(timeline.run?.status, "done");
 assert.ok(timeline.tasks.length >= 3);
 assert.ok(timeline.events.some((event) => event.type === "run.started"));
 assert.ok(runtime.renderTimeline(response.runId).includes("run done"));

@@ -1,7 +1,21 @@
 import { normalizeModelCompleteResult } from "../llm/ProviderRuntime.ts";
+import type { ModelProvider } from "../llm/ModelProvider.ts";
+import type { MemoryRecallResult } from "../types.ts";
 
 export class SubAgent {
-  constructor({ name, role, capabilities, model, memory }) {
+  name: string;
+  role: string;
+  capabilities: string[];
+  model: ModelProvider;
+  memory: unknown;
+
+  constructor({ name, role, capabilities, model, memory }: {
+    name: string;
+    role: string;
+    capabilities: string[];
+    model: ModelProvider;
+    memory: unknown;
+  }) {
     this.name = name;
     this.role = role;
     this.capabilities = capabilities;
@@ -9,7 +23,32 @@ export class SubAgent {
     this.memory = memory;
   }
 
-  async run({ input, sessionId, relevantMemory, taskId, runId, source }) {
+  async run({ input, sessionId, relevantMemory, taskId, runId, source }: {
+    input: string;
+    sessionId?: string;
+    relevantMemory: MemoryRecallResult;
+    taskId?: string;
+    runId?: string;
+    source?: string;
+  }): Promise<{
+    agent: string;
+    role: string;
+    content: string;
+    provider: {
+      id: string;
+      model: string;
+      latencyMs: number;
+      attempts?: number;
+      finishReason?: string;
+      rawProvider?: string;
+      usage?: unknown;
+      costUsd?: number;
+      usageRecordId?: string;
+      jsonFormat?: string;
+      jsonWarnings?: string[];
+    };
+  }> {
+    void sessionId;
     const prompt = [
       "# System",
       `You are ${this.name}.`,
@@ -61,7 +100,7 @@ export class SubAgent {
   }
 }
 
-function formatMemory(memory) {
+function formatMemory(memory: MemoryRecallResult): string[] {
   const records = [
     ...memory.shortTerm.map((item) => `[short] ${item.content}`),
     ...memory.files.map((item) => `[file] ${item.content}`),

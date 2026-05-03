@@ -131,6 +131,28 @@ assert.equal(verdict.verdict, "pass");
 assert.equal(verdict.retrySuggested, false);
 assert.ok(verdict.confidence >= 0.8);
 
+const noBlockerReview = buildRoleWorkProduct({
+  role: "reviewer",
+  task: {
+    ...baseTask,
+    role: "reviewer",
+    input: [
+      "Review sub-results:",
+      "# Developer Work Product",
+      "## Risks And Blockers",
+      "- No blocking risk detected.",
+      "## Verification Plan",
+      "- Run `npm run check`.",
+    ].join("\n"),
+  },
+  providerContent: "Looks complete.",
+  relevantMemory: memory,
+  toolResolution: { requested: [], allowed: [], denied: [], unknown: [] },
+  skillResolution: { requested: [], matched: [], unknown: [] },
+});
+
+assert.equal(parseReviewerVerdict(noBlockerReview).verdict, "pass");
+
 const failedReview = buildRoleWorkProduct({
   role: "reviewer",
   task: {

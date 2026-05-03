@@ -14,7 +14,7 @@ import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
 import { ToolGateway } from "../tools/ToolGateway.ts";
 import { ToolExecutor, type ToolExecutionResult } from "../tools/ToolExecutor.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
-import type { SkillHintResolution, Task, TaskResult, ToolHintResolution } from "../types.ts";
+import type { JsonValue, Metadata, SkillHintResolution, Task, TaskResult, ToolHintResolution } from "../types.ts";
 
 interface StartMessage {
   type: "task.start";
@@ -207,7 +207,6 @@ async function runRoleTask({
     toolExecutionResults.push(await toolExecutor.execute({
       tool: request.tool,
       args: request.args,
-      approval: request.approval,
       roleDefinition: definition,
       permissionMode,
       task,
@@ -289,7 +288,7 @@ async function runRoleTask({
     artifacts: [{
       type: "provider-call",
       title: `${response.provider.id}/${response.provider.model}`,
-      metadata: {
+      metadata: toMetadata({
         providerId: response.provider.id,
         model: response.provider.model,
         latencyMs: response.provider.latencyMs,
@@ -326,7 +325,7 @@ async function runRoleTask({
           autoSelected: skillResolution.autoSelected || [],
         },
         profile,
-      },
+      }),
     }],
     memoryCandidates: [{
       scope: String(task.metadata.sessionId || "default"),
@@ -485,6 +484,10 @@ function readToolRequests(value: unknown): Array<{
       args: item.args && typeof item.args === "object" && !Array.isArray(item.args) ? item.args as Record<string, unknown> : {},
     }))
     .filter((item) => item.tool.trim());
+}
+
+function toMetadata(input: Record<string, unknown>): Metadata {
+  return JSON.parse(JSON.stringify(input)) as Metadata;
 }
 
 function renderToolExecutionResults(results: ToolExecutionResult[]): string[] {

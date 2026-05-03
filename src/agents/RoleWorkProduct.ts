@@ -130,10 +130,10 @@ function buildReviewerWorkProduct({ task, providerContent }: Pick<RoleWorkProduc
   if (/(?:verdict|status)\s*[:=]\s*needs_user_input|needs user input from the user|需要用户|需要补充|clarification required/.test(lower)) {
     reasons.push("The reviewed output asks for user input before the graph can continue.");
   }
-  if (/\bfailed\b|\bfail\b|dead_letter|没有完成|任务执行失败|error:|exception|traceback/.test(lower)) {
+  if (hasExecutionFailureSignal(reviewedEvidence)) {
     reasons.push("A reviewed task reports failure or an execution error.");
   }
-  if (/missing|缺少|未覆盖|blocker|blocked|阻塞/.test(lower)) {
+  if (hasCoverageBlockerSignal(reviewedEvidence)) {
     reasons.push("The reviewed output mentions missing coverage or blockers.");
   }
   if (!/sub-results?:|subagent|developer|researcher|planner|review/i.test(input)) {
@@ -168,6 +168,36 @@ function extractReviewedEvidence(input: string): string {
   return input
     .replace(/pass\/fail\/needs_user_input/gi, "")
     .replace(/verdict.*needs_user_input/gi, "");
+}
+
+function hasExecutionFailureSignal(text: string): boolean {
+  return signalLines(text).some((line) => {
+    if (isNegatedSignalLine(line)) return false;
+    return /\bfailed\b|\bfail\b|dead_letter|没有完成|任务执行失败|error:|exception|traceback/.test(line);
+  });
+}
+
+function hasCoverageBlockerSignal(text: string): boolean {
+  return signalLines(text).some((line) => {
+    if (isNegatedSignalLine(line) || /^#+\s*risks?\s+and\s+blockers?\b/.test(line)) return false;
+    if (/missing|缺少|未覆盖|blocked|阻塞/.test(line)) return true;
+    return /\bblockers?\b/.test(line);
+  });
+}
+
+function signalLines(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isNegatedSignalLine(line: string): boolean {
+  return (
+    /\b(no|not|without|none)\b.{0,48}\b(blocking|blocker|blockers|blocked|missing|failed|failure|error|exception)\b/.test(line) ||
+    /\b(no|not|without|none)\b.{0,48}\brisk\b/.test(line) ||
+    /(?:没有|无|未发现|无需).{0,24}(阻塞|缺少|失败|错误|异常|风险)/.test(line)
+  );
 }
 
 function discoverRelevantFiles(input: string, workspaceDir: string, limit: number): FileContext[] {

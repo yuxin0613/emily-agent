@@ -1,4 +1,5 @@
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
+import type { Metadata, ToolPermission } from "../types.ts";
 
 export interface GatewayRequest {
   type: "request";
@@ -400,7 +401,7 @@ function parseLimit(value: unknown, fallback: number, max: number): number {
 export interface GatewayRuntime {
   handleUserMessage: (message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown }) => Promise<unknown>;
   listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
-  createSession: (options?: { title?: string; source?: string; metadata?: Record<string, unknown> }) => unknown;
+  createSession: (options?: { title?: string; source?: string; metadata?: Metadata }) => unknown;
   clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
   restoreSession: (sessionId: string) => unknown;
   cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
@@ -415,8 +416,8 @@ export interface GatewayRuntime {
     provider?: string;
     model?: string;
     temperature?: number;
-    allowedTools?: string[];
-    forbiddenTools?: string[];
+    allowedTools?: ToolPermission[];
+    forbiddenTools?: ToolPermission[];
     capabilities?: string[];
     skills?: string[];
     skillAllowlist?: string[];
