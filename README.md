@@ -223,7 +223,7 @@ provider 配置保存在 `.emily/providers.json`，默认会写入一个本地 `
 }
 ```
 
-`agent.md` 可以绑定 role 默认 provider/model：
+`agent.md` 可以绑定 role 默认 provider/model；如果省略 `provider` / `model`，subagent 会使用 main agent 的 provider/model，适合内置默认角色和生产 fallback：
 
 ```yaml
 ---
@@ -349,58 +349,73 @@ await runtime.initializeDefaultRoles()
 
 Web API：
 
+除 `/health` 外，下面的 API 都需要 `-H "x-emily-token: $TOKEN"`；`/providers/dashboard` 可用 `?token=$TOKEN` 直接打开。
+
 ```bash
+TOKEN='启动日志里打印的 token 或 EMILY_WEB_TOKEN'
 curl 'http://127.0.0.1:3000/health'
-curl 'http://127.0.0.1:3000/tools'
-curl 'http://127.0.0.1:3000/skills'
-curl 'http://127.0.0.1:3000/skill-candidates?status=proposed'
+curl 'http://127.0.0.1:3000/tools' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/skills' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/skill-candidates?status=proposed' -H "x-emily-token: $TOKEN"
 curl -X POST http://127.0.0.1:3000/skill-candidates/build \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"lookbackDays":2,"minOccurrences":3,"minScore":0.68}'
 curl -X POST http://127.0.0.1:3000/skill-candidates/approve \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"candidateId":"...","reason":"重复成功 workflow"}'
 curl -X POST http://127.0.0.1:3000/skill-candidates/reject \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"candidateId":"...","reason":"太窄，保留为 memory/experience"}'
-curl 'http://127.0.0.1:3000/providers'
-curl 'http://127.0.0.1:3000/providers/health?deep=false'
-curl 'http://127.0.0.1:3000/providers/usage'
-curl 'http://127.0.0.1:3000/providers/dashboard'
-curl 'http://127.0.0.1:3000/roles'
-curl 'http://127.0.0.1:3000/timeline?runId=...'
-curl 'http://127.0.0.1:3000/timeline?runId=...&format=text'
-curl 'http://127.0.0.1:3000/task-trace?taskId=...'
-curl 'http://127.0.0.1:3000/diagnostics?repair=true'
+curl 'http://127.0.0.1:3000/providers' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/providers/health?deep=false' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/providers/usage' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/providers/dashboard?token='"$TOKEN"
+curl 'http://127.0.0.1:3000/roles' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/timeline?runId=...' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/timeline?runId=...&format=text' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/task-trace?taskId=...' -H "x-emily-token: $TOKEN"
+curl -X POST http://127.0.0.1:3000/diagnostics/repair \
+  -H "x-emily-token: $TOKEN"
 
 curl -X POST http://127.0.0.1:3000/maintenance \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"day":"2026-05-03","staleRunMs":300000,"maxEvents":10000}'
 
 curl -X POST http://127.0.0.1:3000/cancel-run \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"runId":"...","reason":"用户取消"}'
 
 curl -X POST http://127.0.0.1:3000/providers \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"id":"qa-echo","type":"echo","model":"qa-model"}'
 
 curl -X POST http://127.0.0.1:3000/providers/disable \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"id":"qa-echo"}'
 
 curl -X POST http://127.0.0.1:3000/providers/enable \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"id":"qa-echo"}'
 
-curl -X DELETE 'http://127.0.0.1:3000/providers?id=qa-echo'
+curl -X DELETE 'http://127.0.0.1:3000/providers?id=qa-echo' \
+  -H "x-emily-token: $TOKEN"
 
 curl -X POST http://127.0.0.1:3000/roles \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"name":"qa","role":"Quality agent","provider":"qa-echo","model":"qa-model","allowedTools":["read_file"],"capabilities":["quality"],"instructions":"Review the task result."}'
 
 curl -X POST http://127.0.0.1:3000/roles/defaults \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"overwrite":false}'
 ```
 
@@ -485,6 +500,8 @@ WebUI 地址：
 http://127.0.0.1:3000/
 ```
 
+Web/API 默认启用本地 token 防护。启动时会打印一次性 token，也可以用 `EMILY_WEB_TOKEN=... npm run web` 固定 token。除 `/` 和 `/health` 外，请求需要带 `x-emily-token` 或 `Authorization: Bearer ...`；浏览器 WebUI 会自动携带。
+
 WebUI 采用 Wiki.js 风格的信息架构：左侧分组导航、顶部搜索、内容工作区和管理面板，覆盖 chat、sessions、timeline、providers、roles、tools、skills、skill candidates、experiences 和 diagnostics。Chat 页底部是发送区，顶部使用 session 下拉框切换会话，并提供 New / Clear / Restore 管理入口；切换 session 会重新加载该 session 的消息历史和 last run。
 
 请求示例：
@@ -492,21 +509,25 @@ WebUI 采用 Wiki.js 风格的信息架构：左侧分组导航、顶部搜索�
 ```bash
 curl -X POST http://127.0.0.1:3000/chat \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"sessionId":"demo","message":"帮我设计一个 Node 多 agent 架构"}'
 
-curl http://127.0.0.1:3000/sessions
+curl http://127.0.0.1:3000/sessions \
+  -H "x-emily-token: $TOKEN"
 
-curl 'http://127.0.0.1:3000/sessions/messages?sessionId=demo'
+curl 'http://127.0.0.1:3000/sessions/messages?sessionId=demo' \
+  -H "x-emily-token: $TOKEN"
 
 curl -X POST http://127.0.0.1:3000/sessions/clear \
   -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
   -d '{"sessionId":"demo","reason":"用户清空上下文"}'
 ```
 
 订阅事件流：
 
 ```bash
-curl http://127.0.0.1:3000/events
+curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 ```
 
 ## 模块边界

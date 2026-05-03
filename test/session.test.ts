@@ -58,6 +58,16 @@ assert.equal(hidden.status, "hidden");
 assert.ok(hidden.archiveSummary?.includes("Runs: 1"));
 assert.equal(taskStore.listSessions().some((item) => item.id === session.id), false);
 assert.equal(taskStore.listSessions({ status: "hidden" })[0].id, session.id);
+assert.throws(() => taskStore.createRun({
+  sessionId: session.id,
+  source: "stale-window",
+  userInput: "旧窗口不应该复活 hidden session",
+}), /restore it before touch/);
+assert.throws(() => taskStore.addSessionMessage({
+  sessionId: session.id,
+  role: "user",
+  content: "hidden session should reject new messages",
+}), /restore it before add message/);
 
 const restored = taskStore.restoreSession(session.id);
 assert.equal(restored.status, "active");
@@ -68,6 +78,12 @@ const trashed = taskStore.trashSession(session.id, {
 });
 assert.equal(trashed.status, "trashed");
 assert.ok(trashed.deleteAfter);
+assert.throws(() => taskStore.createRun({
+  sessionId: session.id,
+  source: "stale-window",
+  userInput: "旧窗口不应该复活 trashed session",
+}), /restore it before touch/);
+assert.throws(() => taskStore.hideSession(session.id), /must be active before hide/);
 
 taskStore.db
   .prepare("UPDATE sessions SET delete_after = ? WHERE id = ?")

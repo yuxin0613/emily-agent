@@ -101,12 +101,20 @@ const plannerFailRuntime = await createRuntime({
   dataDir: plannerFailDataDir,
   roleDir: plannerFailRoleDir,
 });
-const plannerFailResponse = await plannerFailRuntime.handleUserMessage("实现一个 planner 失败时不等待依赖任务的 POC 测试", {
-  sessionId: "planner-fail",
-  source: "test",
+const plannerNoReadTask = plannerFailRuntime.taskStore.createTask({
+  role: "planner",
+  title: "planner without read_file",
+  input: "Return a concise plan without reading local files.",
+  metadata: {
+    sessionId: "planner-fail",
+    maxMemoryCandidates: 0,
+  },
 });
-assert.ok(plannerFailResponse.subResults?.some((result) => result.role === "planner" && result.status !== "done"));
-assert.ok(!plannerFailResponse.subResults?.some((result) => result.role === "developer"));
+const plannerNoReadFinished = await plannerFailRuntime.roleAgentManager.runTask(plannerNoReadTask, {
+  timeoutMs: 10000,
+});
+assert.equal(plannerNoReadFinished.status, "done");
+assert.match(plannerNoReadFinished.result || "", /Provider/);
 await plannerFailRuntime.shutdown();
 
 console.log("core hardening test passed");

@@ -10,6 +10,7 @@ export interface RoleWorkProductInput {
   toolResolution: ToolHintResolution;
   skillResolution: SkillHintResolution;
   workspaceDir?: string;
+  canReadFiles?: boolean;
 }
 
 export function buildRoleWorkProduct({
@@ -20,12 +21,13 @@ export function buildRoleWorkProduct({
   toolResolution,
   skillResolution,
   workspaceDir = process.cwd(),
+  canReadFiles = true,
 }: RoleWorkProductInput): string {
   if (role === "developer") {
-    return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir });
+    return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
   }
   if (role === "researcher") {
-    return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir });
+    return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
   }
   if (role === "reviewer") {
     return buildReviewerWorkProduct({ task, providerContent });
@@ -40,10 +42,11 @@ function buildDeveloperWorkProduct({
   toolResolution,
   skillResolution,
   workspaceDir,
+  canReadFiles,
 }: Omit<RoleWorkProductInput, "role">): string {
   const acceptanceCriteria = readStringArray(task.metadata.acceptanceCriteria);
-  const fileRefs = discoverRelevantFiles(task.input, workspaceDir, 8);
-  const packageInfo = readPackageInfo(workspaceDir);
+  const fileRefs = canReadFiles ? discoverRelevantFiles(task.input, workspaceDir, 8) : [];
+  const packageInfo = canReadFiles ? readPackageInfo(workspaceDir) : null;
   const allowedTools = toolResolution.allowed.map((tool) => tool.name);
   const memoryHighlights = summarizeMemory(relevantMemory, 5);
 
@@ -60,7 +63,7 @@ function buildDeveloperWorkProduct({
     ...(acceptanceCriteria.length ? acceptanceCriteria.map((item) => `- ${item}`) : ["- Produce a concrete implementation result or an actionable implementation plan."]),
     "",
     "## Codebase Context",
-    ...formatPackageInfo(packageInfo),
+    ...formatPackageInfo(packageInfo, canReadFiles),
     ...formatFileContexts(fileRefs),
     "",
     "## Implementation Strategy",
@@ -87,10 +90,11 @@ function buildResearcherWorkProduct({
   toolResolution,
   skillResolution,
   workspaceDir,
+  canReadFiles,
 }: Omit<RoleWorkProductInput, "role">): string {
-  const fileRefs = discoverRelevantFiles(task.input, workspaceDir, 6);
+  const fileRefs = canReadFiles ? discoverRelevantFiles(task.input, workspaceDir, 6) : [];
   const memoryHighlights = summarizeMemory(relevantMemory, 8);
-  const packageInfo = readPackageInfo(workspaceDir);
+  const packageInfo = canReadFiles ? readPackageInfo(workspaceDir) : null;
 
   return [
     "# Research Work Product",
@@ -99,7 +103,7 @@ function buildResearcherWorkProduct({
     `- ${firstMeaningfulLine(task.input)}`,
     "",
     "## Facts",
-    ...researchFacts({ task, fileRefs, packageInfo, toolResolution, skillResolution }),
+    ...researchFacts({ task, fileRefs, packageInfo, toolResolution, skillResolution, canReadFiles }),
     "",
     "## Assumptions",
     ...researchAssumptions(task.input),
@@ -254,7 +258,13 @@ function readFileContext(workspaceDir: string, resolved: string, ref: string): F
   };
 }
 
-function readPackageInfo(workspaceDir: string): { exists: boolean; scripts: string[]; dependencies: string[] } {
+interface PackageInfo {
+  exists: boolean;
+  scripts: string[];
+  dependencies: string[];
+}
+
+function readPackageInfo(workspaceDir: string): PackageInfo {
   const packagePath = path.join(workspaceDir, "package.json");
   if (!existsSync(packagePath)) return { exists: false, scripts: [], dependencies: [] };
   try {
@@ -276,7 +286,9 @@ function readPackageInfo(workspaceDir: string): { exists: boolean; scripts: stri
   }
 }
 
-function formatPackageInfo(info: { exists: boolean; scripts: string[]; dependencies: string[] }): string[] {
+function formatPackageInfo(info: PackageInfo | null, canReadFiles = true): string[] {
+  if (!canReadFiles) return ["- File/package context not read because role lacks read_file permission."];
+  if (!info) return ["- package.json: not read"];
   if (!info.exists) return ["- package.json: not found"];
   return [
     `- package.json scripts: ${info.scripts.length ? info.scripts.join(", ") : "(none)"}`,
@@ -311,11 +323,11 @@ function implementationStrategy(input: string, fileRefs: FileContext[]): string[
   return steps;
 }
 
-function verificationPlan(info: { exists: boolean; scripts: string[] }, metadata: Metadata): string[] {
+function verificationPlan(info: PackageInfo | null, metadata: Metadata): string[] {
   const explicit = readStringArray(metadata.verificationSteps);
   if (explicit.length) return explicit.map((item) => `- ${item}`);
-  if (info.scripts.includes("check")) return ["- Run `npm run check`."];
-  if (info.scripts.includes("test")) return ["- Run `npm test`."];
+  if (info?.scripts.includes("check")) return ["- Run `npm run check`."];
+  if (info?.scripts.includes("test")) return ["- Run `npm test`."];
   return ["- Run the narrowest available test command for the touched module.", "- Manually inspect any UI or API behavior changed by the task."];
 }
 
@@ -342,18 +354,22 @@ function researchFacts({
   packageInfo,
   toolResolution,
   skillResolution,
+  canReadFiles,
 }: {
   task: Task;
   fileRefs: FileContext[];
-  packageInfo: { exists: boolean; scripts: string[]; dependencies: string[] };
+  packageInfo: PackageInfo | null;
   toolResolution: ToolHintResolution;
   skillResolution: SkillHintResolution;
+  canReadFiles: boolean | undefined;
 }): string[] {
   return [
     `- Task role: ${task.role}; status at execution: ${task.status}.`,
     `- Allowed research tools: ${toolResolution.allowed.map((tool) => tool.name).join(", ") || "(none)"}.`,
     `- Matched skills: ${skillResolution.matched.map((skill) => skill.name).join(", ") || "(none)"}.`,
-    `- package.json ${packageInfo.exists ? `has scripts: ${packageInfo.scripts.join(", ") || "(none)"}` : "was not found"}.`,
+    canReadFiles
+      ? `- package.json ${packageInfo?.exists ? `has scripts: ${packageInfo.scripts.join(", ") || "(none)"}` : "was not found"}.`
+      : "- File/package context was not read because role lacks read_file permission.",
     `- Referenced local files found: ${fileRefs.filter((file) => file.exists).length}/${fileRefs.length}.`,
   ];
 }

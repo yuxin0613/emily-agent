@@ -1,10 +1,19 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { webAppHtml } from "./webUi.ts";
+
+export interface WebServerHandle {
+  server: http.Server;
+  authToken: string;
+  url: string;
+  close: () => Promise<void>;
+}
 
 export async function startWebServer({
   runtime,
   port,
   host = "127.0.0.1",
+  authToken = process.env.EMILY_WEB_TOKEN || randomUUID(),
 }: {
   runtime: {
     handleUserMessage: (message: string, context: { sessionId?: string; source?: string }) => Promise<unknown>;
@@ -76,23 +85,32 @@ export async function startWebServer({
   };
   port: number;
   host?: string;
-}): Promise<void> {
+  authToken?: string;
+}): Promise<WebServerHandle> {
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
 
       if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) {
-        return sendHtml(response, 200, webAppHtml());
+        return sendHtml(response, 200, webAppHtml({ authToken }));
       }
 
       if (request.method === "GET" && url.pathname === "/health") {
         return sendJson(response, 200, { ok: true, runtime: runtime.health() });
       }
 
+      if (!isAuthorized(request, url, authToken)) {
+        return sendJson(response, 401, { error: "Unauthorized" });
+      }
+
+      if (isUnsafeMethod(request.method) && !isAllowedOrigin(request, url)) {
+        return sendJson(response, 403, { error: "Forbidden origin" });
+      }
+
       if (request.method === "GET" && url.pathname === "/events-snapshot") {
         return sendJson(response, 200, runtime.taskStore.getLatestEvents({
           afterId: Number(url.searchParams.get("afterId") || 0),
-          limit: Number(url.searchParams.get("limit") || 50),
+          limit: parseLimit(url.searchParams.get("limit"), 50, 500),
         }));
       }
 
@@ -115,12 +133,12 @@ export async function startWebServer({
           since: parseDateParam(url.searchParams.get("since")),
           until: parseDateParam(url.searchParams.get("until")),
           providerId: url.searchParams.get("providerId") || undefined,
-          limit: Number(url.searchParams.get("limit") || 20),
+          limit: parseLimit(url.searchParams.get("limit"), 20, 500),
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/providers/dashboard") {
-        return sendHtml(response, 200, providerDashboardHtml());
+        return sendHtml(response, 200, providerDashboardHtml(authToken));
       }
 
       if (request.method === "POST" && url.pathname === "/providers") {
@@ -159,7 +177,7 @@ export async function startWebServer({
       if (request.method === "GET" && url.pathname === "/skill-candidates") {
         return sendJson(response, 200, runtime.listSkillCandidates({
           status: parseSkillCandidateStatus(url.searchParams.get("status")),
-          limit: Number(url.searchParams.get("limit") || 50),
+          limit: parseLimit(url.searchParams.get("limit"), 50, 500),
         }));
       }
 
@@ -220,14 +238,14 @@ export async function startWebServer({
           includeHidden: url.searchParams.get("includeHidden") === "true",
           includeTrashed: url.searchParams.get("includeTrashed") === "true",
           includeDeleted: url.searchParams.get("includeDeleted") === "true",
-          limit: Number(url.searchParams.get("limit") || 50),
+          limit: parseLimit(url.searchParams.get("limit"), 50, 500),
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/messages") {
         return sendJson(response, 200, runtime.listSessionMessages({
           sessionId: String(url.searchParams.get("sessionId") || ""),
-          limit: Number(url.searchParams.get("limit") || 100),
+          limit: parseLimit(url.searchParams.get("limit"), 100, 500),
         }));
       }
 
@@ -274,7 +292,7 @@ export async function startWebServer({
       if (request.method === "GET" && url.pathname === "/experiences") {
         const query = url.searchParams.get("q");
         const result = query
-          ? runtime.experienceStore.recall(query, { scope: "project", limit: Number(url.searchParams.get("limit") || 5) })
+          ? runtime.experienceStore.recall(query, { scope: "project", limit: parseLimit(url.searchParams.get("limit"), 5, 100) })
           : runtime.experienceStore.listActive();
         return sendJson(response, 200, result);
       }
@@ -297,8 +315,12 @@ export async function startWebServer({
 
       if (request.method === "GET" && url.pathname === "/diagnostics") {
         return sendJson(response, 200, runtime.diagnostics({
-          repair: url.searchParams.get("repair") === "true",
+          repair: false,
         }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/diagnostics/repair") {
+        return sendJson(response, 200, runtime.diagnostics({ repair: true }));
       }
 
       if (request.method === "POST" && url.pathname === "/experiences/build-daily") {
@@ -359,10 +381,11 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
-      sendJson(response, 500, {
+      const statusCode = error instanceof HttpError ? error.statusCode : 500;
+      sendJson(response, statusCode, {
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -372,12 +395,60 @@ export async function startWebServer({
     server.once("error", reject);
     server.listen(port, host, resolve);
   });
-  console.log(`Emily Agent web adapter listening on http://${host}:${port}`);
+  const address = server.address();
+  const resolvedPort = typeof address === "object" && address ? address.port : port;
+  const url = `http://${host}:${resolvedPort}`;
+  console.log(`Emily Agent web adapter listening on ${url}`);
+  console.log(`Emily Agent web token: ${authToken}`);
+  return {
+    server,
+    authToken,
+    url,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+  };
 }
 
 function parseFeedbackRating(value: unknown): "useful" | "wrong" | "outdated" | "duplicate" {
   if (value === "useful" || value === "wrong" || value === "outdated" || value === "duplicate") return value;
   throw new Error("Invalid feedback rating");
+}
+
+function parseLimit(value: string | null, fallback: number, max: number): number {
+  const number = Number(value ?? fallback);
+  if (!Number.isInteger(number) || number < 1) return fallback;
+  return Math.min(number, max);
+}
+
+function isUnsafeMethod(method: string | undefined): boolean {
+  return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+}
+
+function isAuthorized(request: IncomingMessage, url: URL, authToken: string): boolean {
+  const presented = authTokenFromRequest(request, url);
+  return Boolean(presented && safeTokenEquals(presented, authToken));
+}
+
+function authTokenFromRequest(request: IncomingMessage, url: URL): string {
+  const headerToken = request.headers["x-emily-token"];
+  if (typeof headerToken === "string") return headerToken;
+  const authorization = request.headers.authorization || "";
+  const bearer = authorization.match(/^Bearer\s+(.+)$/i);
+  if (bearer?.[1]) return bearer[1];
+  return url.searchParams.get("token") || "";
+}
+
+function safeTokenEquals(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isAllowedOrigin(request: IncomingMessage, url: URL): boolean {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  return origin === url.origin;
 }
 
 function parseProviderType(value: unknown): "echo" | "openai" | "ollama" {
@@ -462,17 +533,45 @@ function sendHtml(response: ServerResponse, statusCode: number, payload: string)
   response.end(payload);
 }
 
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
+class HttpError extends Error {
+  statusCode: number;
+
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+async function readJson(request: IncomingMessage, { maxBytes = 1024 * 1024 }: { maxBytes?: number } = {}): Promise<Record<string, unknown>> {
+  const contentLength = Number(request.headers["content-length"] || 0);
+  if (contentLength > maxBytes) {
+    throw new HttpError(413, `Request body exceeds ${maxBytes} bytes.`);
+  }
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) {
+      throw new HttpError(413, `Request body exceeds ${maxBytes} bytes.`);
+    }
+    chunks.push(buffer);
   }
 
   const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) as Record<string, unknown> : {};
+  try {
+    const parsed = raw ? JSON.parse(raw) as unknown : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new HttpError(400, "JSON body must be an object.");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(400, `Invalid JSON body: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
-function providerDashboardHtml(): string {
+function providerDashboardHtml(authToken: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -507,7 +606,7 @@ function providerDashboardHtml(): string {
 </main>
 <script>
 async function load() {
-  const data = await fetch('/providers/usage').then((res) => res.json());
+  const data = await fetch('/providers/usage', { headers: { 'x-emily-token': ${JSON.stringify(authToken)} } }).then((res) => res.json());
   const metrics = [
     ['Calls', data.totals.calls],
     ['Success', data.totals.success],

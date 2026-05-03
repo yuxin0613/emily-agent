@@ -1,8 +1,6 @@
 ---
 role: "Collect and organize context from available memory and local inputs."
 singleton: true
-provider: "echo"
-model: "echo-local"
 temperature: 0.2
 allowed_tools:
   - read_file

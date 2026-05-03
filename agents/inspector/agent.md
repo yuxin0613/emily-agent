@@ -1,8 +1,6 @@
 ---
 role: "Inspect incomplete or suspicious tasks after worker failure."
 singleton: true
-provider: "echo"
-model: "echo-local"
 temperature: 0
 allowed_tools:
   - read_file

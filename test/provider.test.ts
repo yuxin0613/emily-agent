@@ -299,7 +299,25 @@ assert.equal(failingProvider.calls, 1);
 const roles = await runtime.listRoles();
 assert.ok(roles.some((item) => item.name === "qa"));
 const defaults = await runtime.initializeDefaultRoles();
-assert.ok(defaults.some((item) => item.name === "planner"));
+const plannerDefault = defaults.find((item) => item.name === "planner");
+assert.ok(plannerDefault);
+assert.equal(plannerDefault.provider, undefined);
+assert.equal(plannerDefault.model, undefined);
+const defaultPlannerTask = runtime.taskStore.createTask({
+  role: "planner",
+  title: "default provider fallback",
+  input: "Verify default planner uses main provider.",
+  metadata: {
+    sessionId: "provider-test",
+    maxMemoryCandidates: 0,
+  },
+});
+const defaultPlannerFinished = await runtime.roleAgentManager.runTask(defaultPlannerTask, {
+  timeoutMs: 10000,
+});
+const defaultPlannerResult = parseTaskResult(defaultPlannerFinished.result);
+assert.equal(defaultPlannerFinished.status, "done");
+assert.equal(defaultPlannerResult?.artifacts[0]?.metadata?.providerId, "main-echo");
 
 await runtime.shutdown();
 

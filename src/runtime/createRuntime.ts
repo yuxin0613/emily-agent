@@ -211,9 +211,10 @@ export async function createRuntime(options: {
       return taskStore.createSession(options);
     },
     clearSession(sessionId: string, options: { source?: string; reason?: string; nextTitle?: string } = {}) {
-      const hidden = taskStore.getSession(sessionId)
+      const current = taskStore.getSession(sessionId);
+      const hidden = current?.status === "active"
         ? taskStore.hideSession(sessionId, options.reason || "cleared by user")
-        : null;
+        : current;
       const next = taskStore.createSession({
         title: options.nextTitle || "New session",
         source: options.source || "runtime",

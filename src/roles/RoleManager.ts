@@ -144,7 +144,7 @@ export class RoleManager {
 
   private withDefaultProvider(input: Parameters<RoleManager["addRole"]>[0]): Parameters<RoleManager["addRole"]>[0] {
     if (!this.providerRegistry) return input;
-    if (!input.provider || !this.providerRegistry.list().some((provider) => provider.id === input.provider)) {
+    if (input.provider && !this.providerRegistry.list().some((provider) => provider.id === input.provider)) {
       return {
         ...input,
         provider: this.providerRegistry.defaultProviderId,
@@ -158,8 +158,6 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
   {
     name: "planner",
     role: "Break user goals into concrete execution steps.",
-    provider: "echo",
-    model: "echo-local",
     temperature: 0.1,
     allowedTools: ["read_file"],
     forbiddenTools: ["write_file", "shell", "network"],
@@ -180,8 +178,6 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
   {
     name: "developer",
     role: "Solve implementation tasks and produce technical next actions.",
-    provider: "echo",
-    model: "echo-local",
     temperature: 0.2,
     allowedTools: ["read_file", "write_file", "run_tests"],
     forbiddenTools: ["git_reset", "delete_file"],
@@ -192,8 +188,6 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
   {
     name: "researcher",
     role: "Collect and organize context from available memory and local inputs.",
-    provider: "echo",
-    model: "echo-local",
     temperature: 0.2,
     allowedTools: ["read_file"],
     forbiddenTools: ["write_file", "shell"],
@@ -204,8 +198,6 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
   {
     name: "reviewer",
     role: "Review subagent outputs before the main agent summarizes them.",
-    provider: "echo",
-    model: "echo-local",
     temperature: 0,
     allowedTools: ["read_file"],
     forbiddenTools: ["write_file", "shell", "network"],
@@ -216,8 +208,6 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
   {
     name: "inspector",
     role: "Inspect incomplete or suspicious tasks after worker failure.",
-    provider: "echo",
-    model: "echo-local",
     temperature: 0,
     allowedTools: ["read_file", "inspect_task"],
     forbiddenTools: ["write_file", "shell", "network"],
@@ -228,8 +218,6 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
   {
     name: "memory-curator",
     role: "Promote valuable daily work into concise reusable experience.",
-    provider: "echo",
-    model: "echo-local",
     temperature: 0.1,
     allowedTools: ["read_file", "inspect_task"],
     forbiddenTools: ["write_file", "shell", "network"],

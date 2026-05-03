@@ -423,6 +423,7 @@ export class TaskStore {
       title: titleFromUserInput(userInput),
       source,
     });
+    this.assertActiveSession(existing, "touch");
     const now = new Date().toISOString();
     const nextTitle = shouldReplaceSessionTitle(existing.title)
       ? titleFromUserInput(userInput, existing.title)
@@ -431,14 +432,10 @@ export class TaskStore {
       .prepare(`
         UPDATE sessions
         SET title = ?,
-            status = CASE WHEN status IN ('hidden', 'trashed', 'deleted') THEN 'active' ELSE status END,
             source = CASE WHEN source = 'runtime' THEN ? ELSE source END,
             run_count = run_count + 1,
             updated_at = ?,
-            last_active_at = ?,
-            hidden_at = NULL,
-            trashed_at = NULL,
-            delete_after = NULL
+            last_active_at = ?
         WHERE id = ?
       `)
       .run(nextTitle, source, now, now, sessionId);
@@ -494,6 +491,9 @@ export class TaskStore {
     const session = this.getSession(sessionId);
     if (!session) throw new Error(`Session not found: ${sessionId}`);
     if (session.status === "deleted") throw new Error(`Session has been deleted: ${sessionId}`);
+    if (session.status !== "active") {
+      throw new Error(`Session must be active before hide: ${sessionId} is ${session.status}`);
+    }
     const now = new Date().toISOString();
     const summary = this.buildSessionArchiveSummary(sessionId);
     this.db
@@ -627,11 +627,12 @@ export class TaskStore {
     delegatedTo = [],
     metadata = {},
   }: AddSessionMessageInput): SessionMessage {
-    this.ensureSession({
+    const session = this.ensureSession({
       id: sessionId,
       title: role === "user" ? titleFromUserInput(content) : "New session",
       source: typeof metadata.source === "string" ? metadata.source : "runtime",
     });
+    this.assertActiveSession(session, "add message");
     const now = new Date().toISOString();
     const message: SessionMessage = {
       id: randomUUID(),
@@ -704,6 +705,12 @@ export class TaskStore {
       .run(run.id, run.sessionId, run.source, run.userInput, run.status, run.startedAt, run.completedAt);
     this.addEvent(RuntimeEventFactory.runStarted(run));
     return run;
+  }
+
+  private assertActiveSession(session: Session, operation: string): void {
+    if (session.status === "active") return;
+    if (session.status === "deleted") throw new Error(`Session has been deleted: ${session.id}`);
+    throw new Error(`Session is ${session.status}; restore it before ${operation}: ${session.id}`);
   }
 
   completeRun(runId: string, status: Run["status"] = "done"): number {

@@ -109,42 +109,82 @@ class InMemoryLayer {
 
 class FileMemoryLayer {
   filePath: string;
+  lockPath: string;
 
   constructor({ filePath }: { filePath: string }) {
     this.filePath = filePath;
+    this.lockPath = `${filePath}.lock`;
   }
 
   async add(record: MemoryRecord): Promise<void> {
-    await appendFile(this.filePath, `${JSON.stringify(record)}\n`, "utf8");
+    await withFileLock(this.lockPath, async () => {
+      await appendFile(this.filePath, `${JSON.stringify(record)}\n`, "utf8");
+    });
   }
 
   async search(query: string, { scope, limit }: { scope: string; limit: number }): Promise<Array<MemoryRecord & { score: number }>> {
-    const content = await readTextIfExists(this.filePath);
-    const records = content
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-
-    return scoreTextRecords(records, query, scope).slice(0, limit);
+    return withFileLock(this.lockPath, async () => {
+      const records = await this.readRecordsUnlocked({ quarantine: true });
+      return scoreTextRecords(records, query, scope).slice(0, limit);
+    });
   }
 
   async compact({ maxRecords }: { maxRecords: number }): Promise<{ before: number; after: number; removed: number }> {
+    return withFileLock(this.lockPath, async () => {
+      const records = await this.readRecordsUnlocked({ quarantine: true });
+      const before = records.length;
+      const deduped = dedupeRecords(records)
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+        .slice(0, maxRecords)
+        .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      await this.saveUnlocked(deduped);
+      return {
+        before,
+        after: deduped.length,
+        removed: before - deduped.length,
+      };
+    });
+  }
+
+  private async readRecordsUnlocked({ quarantine }: { quarantine: boolean }): Promise<MemoryRecord[]> {
     const content = await readTextIfExists(this.filePath);
-    const records = content
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as MemoryRecord);
-    const before = records.length;
-    const deduped = dedupeRecords(records)
-      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
-      .slice(0, maxRecords)
-      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-    await writeFile(this.filePath, deduped.map((record) => JSON.stringify(record)).join("\n") + (deduped.length ? "\n" : ""), "utf8");
-    return {
-      before,
-      after: deduped.length,
-      removed: before - deduped.length,
-    };
+    const records: MemoryRecord[] = [];
+    const corrupt: Array<{ line: string; lineNumber: number; error: string; quarantinedAt: string }> = [];
+    const lines = content.split("\n");
+    for (const [index, line] of lines.entries()) {
+      if (!line.trim()) continue;
+      try {
+        records.push(JSON.parse(line) as MemoryRecord);
+      } catch (error) {
+        corrupt.push({
+          line,
+          lineNumber: index + 1,
+          error: error instanceof Error ? error.message : String(error),
+          quarantinedAt: new Date().toISOString(),
+        });
+      }
+    }
+    if (quarantine && corrupt.length) {
+      await this.quarantineUnlocked(corrupt);
+      await this.saveUnlocked(records);
+    }
+    return records;
+  }
+
+  private async quarantineUnlocked(corrupt: Array<{ line: string; lineNumber: number; error: string; quarantinedAt: string }>): Promise<void> {
+    const quarantinePath = `${this.filePath}.corrupt.jsonl`;
+    await appendFile(quarantinePath, corrupt.map((item) => JSON.stringify(item)).join("\n") + "\n", "utf8");
+  }
+
+  private async saveUnlocked(records: MemoryRecord[]): Promise<void> {
+    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(tmpPath, records.map((record) => JSON.stringify(record)).join("\n") + (records.length ? "\n" : ""), "utf8");
+      await rename(tmpPath, this.filePath);
+    } catch (error) {
+      await unlink(tmpPath).catch(() => undefined);
+      throw error;
+    }
   }
 }
 

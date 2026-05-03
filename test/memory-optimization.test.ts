@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { MemorySystem } from "../src/memory/MemorySystem.ts";
@@ -83,5 +83,24 @@ const concurrentRecall = await memoryC.recall("concurrent vector write memory", 
 });
 assert.ok(concurrentRecall.semantic.some((item) => item.content.includes("alpha")));
 assert.ok(concurrentRecall.semantic.some((item) => item.content.includes("beta")));
+assert.ok(concurrentRecall.files.some((item) => item.content.includes("alpha")));
+assert.ok(concurrentRecall.files.some((item) => item.content.includes("beta")));
+
+const corruptDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-memory-corrupt-"));
+const corruptMemory = await MemorySystem.create({ dataDir: corruptDir });
+await corruptMemory.remember({
+  scope: "project",
+  kind: "decision",
+  content: "Clean file memory survives corrupt jsonl lines during recall.",
+});
+const eventsPath = path.join(corruptDir, "memory", "events.jsonl");
+await appendFile(eventsPath, "{not json}\n", "utf8");
+const corruptRecall = await corruptMemory.recall("clean corrupt jsonl recall", {
+  scope: "project",
+  limit: 5,
+});
+assert.ok(corruptRecall.files.some((item) => item.content.includes("Clean file memory")));
+assert.doesNotMatch(await readFile(eventsPath, "utf8"), /not json/);
+assert.match(await readFile(`${eventsPath}.corrupt.jsonl`, "utf8"), /not json/);
 
 console.log("memory optimization test passed");

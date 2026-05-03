@@ -76,6 +76,24 @@ assert.match(developer, /src\/workers\/subagentWorker\.ts/);
 assert.match(developer, /npm run check|npm test|Verification Plan/);
 assert.match(developer, /Provider says implement/);
 
+const noReadDeveloper = buildRoleWorkProduct({
+  role: "developer",
+  task: baseTask,
+  providerContent: "Provider says plan without file access.",
+  relevantMemory: memory,
+  toolResolution: {
+    requested: ["write_file"],
+    allowed: [writeFile].filter(Boolean),
+    denied: ["read_file"],
+    unknown: [],
+  },
+  skillResolution: skills,
+  canReadFiles: false,
+});
+
+assert.match(noReadDeveloper, /lacks read_file permission/);
+assert.doesNotMatch(noReadDeveloper, /src\/workers\/subagentWorker\.ts: \d+ lines/);
+
 const researcher = buildRoleWorkProduct({
   role: "researcher",
   task: { ...baseTask, role: "researcher", input: "Research current session behavior in README.md" },

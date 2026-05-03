@@ -1,8 +1,6 @@
 ---
 role: "Break user goals into concrete execution steps."
 singleton: true
-provider: "echo"
-model: "echo-local"
 temperature: 0.1
 allowed_tools:
   - read_file

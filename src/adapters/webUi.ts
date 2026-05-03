@@ -1,4 +1,4 @@
-export function webAppHtml(): string {
+export function webAppHtml({ authToken = "" }: { authToken?: string } = {}): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -167,10 +167,11 @@ const state = {
   events: [],
   sessions: []
 };
+const AUTH_TOKEN = ${JSON.stringify(authToken)};
 const qs = (selector) => document.querySelector(selector);
 const api = {
   get: async (url) => request(url),
-  post: async (url, body) => request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) })
+  post: async (url, body) => request(url, { method: 'POST', headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(body || {}) })
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -199,7 +200,7 @@ window.addEventListener('hashchange', () => {
 });
 
 async function request(url, options) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, withAuth(options || {}));
   const text = await response.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
@@ -208,6 +209,14 @@ async function request(url, options) {
     throw new Error(message);
   }
   return data;
+}
+
+function authHeaders(headers) {
+  return Object.assign({}, headers || {}, AUTH_TOKEN ? { 'x-emily-token': AUTH_TOKEN } : {});
+}
+
+function withAuth(options) {
+  return Object.assign({}, options, { headers: authHeaders(options.headers) });
 }
 
 function renderNav() {
@@ -700,7 +709,7 @@ async function renderDiagnostics(content) {
       metric('Candidates', state.health.proposedSkillCandidates || 0, 'amber')
     ),
     section('Diagnostics', [button('Repair', 'primary', async () => {
-      const result = await api.get('/diagnostics?repair=true');
+      const result = await api.post('/diagnostics/repair', {});
       notifyJson(result);
       await renderDiagnostics(content);
     }), button('Maintenance', '', async () => {
@@ -713,7 +722,7 @@ async function renderDiagnostics(content) {
 
 function startEventStream() {
   if (!window.EventSource) return;
-  const source = new EventSource('/events');
+  const source = new EventSource(AUTH_TOKEN ? '/events?token=' + encodeURIComponent(AUTH_TOKEN) : '/events');
   source.onopen = () => {
     qs('#connection-pill').textContent = 'online';
     qs('#connection-pill').className = 'pill ok';

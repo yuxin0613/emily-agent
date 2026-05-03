@@ -165,7 +165,6 @@ async function runRoleTask({
     toolResolution,
     skillResolution,
   });
-  toolGateway.assertAllowed("read_file");
   if (typeof task.metadata.forceDelayMs === "number") {
     await sleep(task.metadata.forceDelayMs);
   }
@@ -214,6 +213,7 @@ async function runRoleTask({
     relevantMemory,
     toolResolution,
     skillResolution,
+    canReadFiles: toolGateway.canUse("read_file"),
   });
   const memoryContent = workProduct;
   if (readNonNegativeNumber(task.metadata.maxMemoryCandidates, 1) > 0) {
