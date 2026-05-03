@@ -513,6 +513,7 @@ curl http://127.0.0.1:3000/events
 
 - `src/agents/MainAgent.ts`: 主 agent，负责用户沟通、记忆召回、角色路由、任务派发和结果汇总。
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
+- `src/agents/RoleWorkProduct.ts`: developer / researcher / reviewer 的本地工作产物增强层，补充代码库上下文、研究结构和 JSON review verdict。
 - `src/tasks/TaskStore.ts`: SQLite task、session、agent、event、role queue、状态机、lease、retry/dead-letter。
 - `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
 - `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛和 rolling 图扩展。
@@ -582,6 +583,7 @@ npm run check
 - task/run 取消、worker 超时、结构化 TaskResult。
 - 多 provider registry、配置校验、fallback、health check、role-specific provider/model、动态新增 role。
 - tools/skills registry、role skill frontmatter、tool hint 权限过滤、worker 注入和审计事件。
+- developer/researcher/reviewer role work product 增强和 reviewer verdict 解析。
 - skill candidate 生成、评分、审批写入、已有 skill 更新、拒绝和 schema migration。
 - session 生命周期和消息隔离：new、clear/hide、restore、trash、session 内消息历史和 30 天后删除。
 - TUI/WebUI 静态渲染入口和 WebUI 基础结构。

@@ -1,4 +1,5 @@
 import { SubAgent } from "../agents/SubAgent.ts";
+import { buildRoleWorkProduct } from "../agents/RoleWorkProduct.ts";
 import type { ModelProvider } from "../llm/ModelProvider.ts";
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
@@ -206,7 +207,15 @@ async function runRoleTask({
   });
   throwIfCancelled(task.id);
 
-  const memoryContent = response.content;
+  const workProduct = buildRoleWorkProduct({
+    role,
+    task,
+    providerContent: response.content,
+    relevantMemory,
+    toolResolution,
+    skillResolution,
+  });
+  const memoryContent = workProduct;
   if (readNonNegativeNumber(task.metadata.maxMemoryCandidates, 1) > 0) {
     taskStore.createMemoryCandidate({
       runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
@@ -220,7 +229,7 @@ async function runRoleTask({
 
   return createTaskResult({
     status: "success",
-    summary: response.content,
+    summary: workProduct,
     artifacts: [{
       type: "provider-call",
       title: `${response.provider.id}/${response.provider.model}`,
@@ -236,6 +245,10 @@ async function runRoleTask({
         usageRecordId: response.provider.usageRecordId,
         jsonFormat: response.provider.jsonFormat,
         jsonWarnings: response.provider.jsonWarnings,
+        roleWorkProduct: {
+          enhanced: workProduct !== response.content,
+          role,
+        },
         tools: {
           requested: toolResolution.requested,
           allowed: toolResolution.allowed.map((tool) => tool.name),

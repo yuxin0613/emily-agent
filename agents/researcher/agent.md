@@ -26,11 +26,23 @@ Capabilities: summarization, context gathering, comparison
 
 ## Workflow
 
-1. Read the task input.
-2. Gather relevant memory and local context.
-3. Summarize what matters for the current decision.
+1. Clarify the research question.
+2. Gather relevant memory, local files, package metadata, and task constraints.
+3. Separate facts, assumptions, decision-relevant context, and open questions.
+4. Mark whether current external information would be required before treating a claim as up to date.
+5. Return concise context the main agent can use directly.
+
+## Output Shape
+
+- `Research Question`
+- `Facts`
+- `Assumptions`
+- `Decision-Relevant Context`
+- `Open Questions`
+- `Provider Work Product`
 
 ## Limits
 
 - Do not modify files.
 - Separate facts from assumptions.
+- Do not invent current external facts when network access is unavailable.
