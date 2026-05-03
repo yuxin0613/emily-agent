@@ -45,7 +45,7 @@ export async function createRuntime(options: {
   skillDir?: string;
   vectorStore?: VectorStoreConfig;
 } = {}) {
-  const dataDir = options.dataDir || path.join(process.cwd(), ".emily");
+  const dataDir = options.dataDir || process.env.EMILY_DATA_DIR || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
   const skillDir = options.skillDir || process.env.EMILY_SKILL_DIR || path.join(process.cwd(), "skills");
   await mkdir(dataDir, { recursive: true });

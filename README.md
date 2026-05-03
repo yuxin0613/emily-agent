@@ -41,6 +41,31 @@ Requirements:
 - optional: `gh` for GitHub tool actions
 - optional: external model API key, Ollama, or OpenAI-compatible gateway
 
+One-command install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+```
+
+If you host AgentOS in another Git repository, override the clone URL:
+
+```bash
+EMILY_REPO_URL=https://github.com/your-org/emily-agent.git \
+  curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+```
+
+The installer clones or updates the repo under `~/.emily/emily-agent`, installs Node dependencies, and creates `~/.local/bin/emily`.
+
+Run after install:
+
+```bash
+emily --doctor --deep
+emily
+EMILY_WEB_TOKEN=change-me emily --web
+```
+
+Manual install:
+
 Install dependencies:
 
 ```bash
@@ -92,6 +117,7 @@ Useful environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `PORT` | Web server port. Default: `3000`. |
+| `EMILY_DATA_DIR` | Runtime state directory. Installer launcher defaults this to `~/.emily/data`. |
 | `EMILY_WEB_TOKEN` | Fixed Web/API/Gateway token. If omitted, a random token is printed at startup. |
 | `EMILY_ROLE_DIR` | Override `agents/` role definition directory. |
 | `EMILY_SKILL_DIR` | Override `skills/` skill directory. |

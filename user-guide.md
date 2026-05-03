@@ -4,11 +4,29 @@ This guide explains how to use Emily AgentOS as a local multi-agent runtime and 
 
 ## 1. Install And Check
 
-Install dependencies:
+One-command install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+```
+
+If the public GitHub URL is different, set `EMILY_REPO_URL` before running the installer.
+
+After installation:
+
+```bash
+emily --doctor --deep
+emily
+EMILY_WEB_TOKEN=change-me emily --web
+```
+
+Manual source checkout:
 
 ```bash
 npm install
 ```
+
+The installer command stores runtime data in `~/.emily/data` through `EMILY_DATA_DIR`. A manual checkout stores runtime data in the current repo's `.emily/` directory unless you set `EMILY_DATA_DIR` yourself.
 
 Run the readiness check:
 
