@@ -129,9 +129,11 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/doctor") {
-        return sendJson(response, 200, await runtime.doctor({
-          deep: url.searchParams.get("deep") === "true",
-          repair: url.searchParams.get("repair") === "true",
+        return sendJson(response, 200, await runtime.runCommand("doctor", {
+          input: {
+            deep: url.searchParams.get("deep") === "true",
+            repair: url.searchParams.get("repair") === "true",
+          },
         }));
       }
 
@@ -140,21 +142,23 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/providers") {
-        return sendJson(response, 200, runtime.listProviders());
+        return sendJson(response, 200, await runtime.runCommand("providers"));
       }
 
       if (request.method === "GET" && url.pathname === "/providers/health") {
-        return sendJson(response, 200, await runtime.checkProviders({
-          deep: url.searchParams.get("deep") === "true",
+        return sendJson(response, 200, await runtime.runCommand("provider.health", {
+          input: { deep: url.searchParams.get("deep") === "true" },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/providers/usage") {
-        return sendJson(response, 200, runtime.providerUsage({
-          since: parseDateParam(url.searchParams.get("since")),
-          until: parseDateParam(url.searchParams.get("until")),
-          providerId: url.searchParams.get("providerId") || undefined,
-          limit: parseLimit(url.searchParams.get("limit"), 20, 500),
+        return sendJson(response, 200, await runtime.runCommand("provider.usage", {
+          input: {
+            since: url.searchParams.get("since") || undefined,
+            until: url.searchParams.get("until") || undefined,
+            providerId: url.searchParams.get("providerId") || undefined,
+            limit: parseLimit(url.searchParams.get("limit"), 20, 500),
+          },
         }));
       }
 
@@ -188,11 +192,11 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/tools") {
-        return sendJson(response, 200, runtime.listTools());
+        return sendJson(response, 200, await runtime.runCommand("tools"));
       }
 
       if (request.method === "GET" && url.pathname === "/skills") {
-        return sendJson(response, 200, runtime.listSkills());
+        return sendJson(response, 200, await runtime.runCommand("skills"));
       }
 
       if (request.method === "GET" && url.pathname === "/commands") {
@@ -212,9 +216,11 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/skill-candidates") {
-        return sendJson(response, 200, runtime.listSkillCandidates({
-          status: parseSkillCandidateStatus(url.searchParams.get("status")),
-          limit: parseLimit(url.searchParams.get("limit"), 50, 500),
+        return sendJson(response, 200, await runtime.runCommand("skills.candidates.list", {
+          input: {
+            status: url.searchParams.get("status") || undefined,
+            limit: parseLimit(url.searchParams.get("limit"), 50, 500),
+          },
         }));
       }
 
@@ -244,7 +250,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/roles") {
-        return sendJson(response, 200, await runtime.listRoles());
+        return sendJson(response, 200, await runtime.runCommand("roles"));
       }
 
       if (request.method === "POST" && url.pathname === "/roles") {
@@ -266,44 +272,56 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/sessions") {
-        return sendJson(response, 200, runtime.listSessions({
-          status: parseSessionStatus(url.searchParams.get("status")),
-          includeHidden: url.searchParams.get("includeHidden") === "true",
-          includeTrashed: url.searchParams.get("includeTrashed") === "true",
-          includeDeleted: url.searchParams.get("includeDeleted") === "true",
-          limit: parseLimit(url.searchParams.get("limit"), 50, 500),
+        return sendJson(response, 200, await runtime.runCommand("session.list", {
+          input: {
+            status: url.searchParams.get("status") || undefined,
+            includeHidden: url.searchParams.get("includeHidden") === "true",
+            includeTrashed: url.searchParams.get("includeTrashed") === "true",
+            includeDeleted: url.searchParams.get("includeDeleted") === "true",
+            limit: parseLimit(url.searchParams.get("limit"), 50, 500),
+          },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/messages") {
-        return sendJson(response, 200, runtime.listSessionMessages({
-          sessionId: String(url.searchParams.get("sessionId") || ""),
-          limit: parseLimit(url.searchParams.get("limit"), 100, 500),
+        return sendJson(response, 200, await runtime.runCommand("session.messages", {
+          input: {
+            sessionId: String(url.searchParams.get("sessionId") || ""),
+            limit: parseLimit(url.searchParams.get("limit"), 100, 500),
+          },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/resume-latest") {
-        return sendJson(response, 200, runtime.resumeLatestSession({
-          includeHidden: url.searchParams.get("includeHidden") === "true",
+        return sendJson(response, 200, await runtime.runCommand("session.resume_latest", {
+          input: { includeHidden: url.searchParams.get("includeHidden") === "true" },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/export") {
         const format = url.searchParams.get("format") === "markdown" ? "markdown" : "json";
-        const result = runtime.exportSession(String(url.searchParams.get("sessionId") || ""), { format });
+        const result = await runtime.runCommand("session.export", {
+          input: { sessionId: String(url.searchParams.get("sessionId") || ""), format },
+          format: format === "markdown" ? "text" : "json",
+        });
         return format === "markdown"
           ? sendText(response, 200, String(result), "text/markdown; charset=utf-8")
           : sendJson(response, 200, result);
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/compact-preview") {
-        return sendJson(response, 200, runtime.previewSessionCompaction(String(url.searchParams.get("sessionId") || ""), {
-          maxMessages: parseLimit(url.searchParams.get("maxMessages"), 20, 200),
+        return sendJson(response, 200, await runtime.runCommand("session.compact_preview", {
+          input: {
+            sessionId: String(url.searchParams.get("sessionId") || ""),
+            maxMessages: parseLimit(url.searchParams.get("maxMessages"), 20, 200),
+          },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/usage") {
-        return sendJson(response, 200, runtime.sessionUsage(String(url.searchParams.get("sessionId") || "")));
+        return sendJson(response, 200, await runtime.runCommand("session.usage", {
+          input: { sessionId: String(url.searchParams.get("sessionId") || "") },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/new") {
@@ -360,51 +378,57 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/experiences") {
-        const query = url.searchParams.get("q");
-        const result = query
-          ? runtime.experienceStore.recall(query, { scope: "project", limit: parseLimit(url.searchParams.get("limit"), 5, 100) })
-          : runtime.experienceStore.listActive();
-        return sendJson(response, 200, result);
+        return sendJson(response, 200, await runtime.runCommand("experiences.recall", {
+          input: {
+            q: url.searchParams.get("q") || undefined,
+            limit: parseLimit(url.searchParams.get("limit"), 5, 100),
+          },
+        }));
       }
 
       if (request.method === "GET" && url.pathname === "/timeline") {
         const runId = String(url.searchParams.get("runId") || "");
         if (url.searchParams.get("format") === "text") {
-          response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-          response.end(runtime.renderTimeline(runId));
-          return;
+          return sendText(response, 200, String(await runtime.runCommand("timeline.get", {
+            input: { runId },
+            format: "text",
+          })), "text/plain; charset=utf-8");
         }
-        return sendJson(response, 200, runtime.getTimeline({
-          runId,
+        return sendJson(response, 200, await runtime.runCommand("timeline.get", {
+          input: { runId },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/task-trace") {
-        return sendJson(response, 200, runtime.getTaskTrace(String(url.searchParams.get("taskId") || "")));
-      }
-
-      if (request.method === "GET" && url.pathname === "/diagnostics") {
-        return sendJson(response, 200, runtime.diagnostics({
-          repair: false,
+        return sendJson(response, 200, await runtime.runCommand("task.trace", {
+          input: { taskId: String(url.searchParams.get("taskId") || "") },
         }));
       }
 
+      if (request.method === "GET" && url.pathname === "/diagnostics") {
+        return sendJson(response, 200, await runtime.runCommand("diagnostics.run"));
+      }
+
       if (request.method === "GET" && url.pathname === "/security/audit") {
-        return sendJson(response, 200, await runtime.securityAudit());
+        return sendJson(response, 200, await runtime.runCommand("security.audit"));
       }
 
       if (request.method === "GET" && url.pathname === "/context") {
-        return sendJson(response, 200, await runtime.buildContext({
-          query: String(url.searchParams.get("q") || url.searchParams.get("query") || ""),
-          sessionId: String(url.searchParams.get("sessionId") || "web"),
-          runId: url.searchParams.get("runId"),
-          role: String(url.searchParams.get("role") || "web"),
-          mode: url.searchParams.get("mode") === "deep" ? "deep" : "active",
+        return sendJson(response, 200, await runtime.runCommand("context.build", {
+          input: {
+            query: String(url.searchParams.get("q") || url.searchParams.get("query") || ""),
+            sessionId: String(url.searchParams.get("sessionId") || "web"),
+            runId: url.searchParams.get("runId") || undefined,
+            role: String(url.searchParams.get("role") || "web"),
+            mode: url.searchParams.get("mode") === "deep" ? "deep" : "active",
+          },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/route") {
-        return sendJson(response, 200, runtime.routeMessage(String(url.searchParams.get("q") || url.searchParams.get("input") || "")));
+        return sendJson(response, 200, await runtime.runCommand("router.route", {
+          input: { input: String(url.searchParams.get("q") || url.searchParams.get("input") || "") },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/diagnostics/repair") {
@@ -413,10 +437,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/experiences/build-daily") {
         const body = await readJson(request);
-        const result = runtime.buildDailyExperiences({
-          day: typeof body.day === "string" ? new Date(body.day) : new Date(),
-        });
-        return sendJson(response, 200, result);
+        return sendJson(response, 200, await runtime.runCommand("experiences.build_daily", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/maintenance") {
@@ -427,12 +448,13 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/experiences/feedback") {
         const body = await readJson(request);
-        const result = runtime.experienceStore.addFeedback({
-          experienceId: String(body.experienceId || ""),
-          rating: parseFeedbackRating(body.rating),
-          comment: String(body.comment || ""),
-        });
-        return sendJson(response, 200, result);
+        return sendJson(response, 200, await runtime.runCommand("experiences.feedback", {
+          input: {
+            experienceId: String(body.experienceId || ""),
+            rating: String(body.rating || ""),
+            comment: String(body.comment || ""),
+          },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/cancel-task") {
@@ -513,11 +535,6 @@ export async function startWebServer({
   };
 }
 
-function parseFeedbackRating(value: unknown): "useful" | "wrong" | "outdated" | "duplicate" {
-  if (value === "useful" || value === "wrong" || value === "outdated" || value === "duplicate") return value;
-  throw new Error("Invalid feedback rating");
-}
-
 function parseLimit(value: string | null, fallback: number, max: number): number {
   const number = Number(value ?? fallback);
   if (!Number.isInteger(number) || number < 1) return fallback;
@@ -552,30 +569,6 @@ function isAllowedOrigin(request: IncomingMessage, url: URL): boolean {
   const origin = request.headers.origin;
   if (!origin) return true;
   return origin === url.origin;
-}
-
-function parseProviderType(value: unknown): "echo" | "openai" | "ollama" {
-  if (value === "echo" || value === "openai" || value === "ollama") return value;
-  throw new Error("Invalid provider type");
-}
-
-function parseSkillCandidateStatus(value: string | null): "proposed" | "approved" | "merged" | "rejected" | undefined {
-  if (!value) return undefined;
-  if (value === "proposed" || value === "approved" || value === "merged" || value === "rejected") return value;
-  throw new Error("Invalid skill candidate status");
-}
-
-function parseSessionStatus(value: string | null): "active" | "hidden" | "trashed" | "deleted" | undefined {
-  if (!value) return undefined;
-  if (value === "active" || value === "hidden" || value === "trashed" || value === "deleted") return value;
-  throw new Error("Invalid session status");
-}
-
-function parseDateParam(value: string | null): Date | undefined {
-  if (!value) return undefined;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) throw new Error(`Invalid date: ${value}`);
-  return date;
 }
 
 function streamEvents({

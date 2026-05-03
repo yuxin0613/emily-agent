@@ -93,45 +93,49 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       printHelp();
       return;
     case "health":
-      printHealth(runtime.health());
+      printHealth(await runtime.runCommand("health"));
       return;
     case "doctor":
       printJson(await runtime.runCommand("doctor", { args }));
       return;
     case "providers":
-      printProviders(runtime.listProviders());
+      printProviders(await runtime.runCommand("providers"));
       return;
     case "roles":
-      printRoles(await runtime.listRoles());
+      printRoles(await runtime.runCommand("roles"));
       return;
     case "commands":
       printCommands(runtime.listCommands());
       return;
     case "sessions":
-      printSessions(runtime.listSessions(sessionListOptions(args[0])));
+      printSessions(await runtime.runCommand("session.list", { input: sessionListOptions(args[0]) }));
       return;
     case "resume":
-      resumeLatest(runtime, state, args);
+      await resumeLatest(runtime, state, args);
       return;
     case "export-session":
-      exportSession(runtime, args);
+      await exportSession(runtime, args);
       return;
     case "compact-preview":
-      printJson(runtime.previewSessionCompaction(requiredArg(args[0], "session id"), {
-        maxMessages: numberArg(args[1], 20),
+      printJson(await runtime.runCommand("session.compact_preview", {
+        input: { sessionId: requiredArg(args[0], "session id"), maxMessages: numberArg(args[1], 20) },
       }));
       return;
     case "session-usage":
-      printJson(runtime.sessionUsage(requiredArg(args[0], "session id")));
+      printJson(await runtime.runCommand("session.usage", {
+        input: { sessionId: requiredArg(args[0], "session id") },
+      }));
       return;
     case "tools":
-      printTools(runtime.listTools());
+      printTools(await runtime.runCommand("tools"));
       return;
     case "skills":
-      printSkills(runtime.listSkills());
+      printSkills(await runtime.runCommand("skills"));
       return;
     case "candidates":
-      printCandidates(runtime.listSkillCandidates({ status: parseStatus(args[0]), limit: 50 }));
+      printCandidates(await runtime.runCommand("skills.candidates.list", {
+        input: { status: args[0] || undefined, limit: 50 },
+      }));
       return;
     case "build-skills":
       printJson(await runtime.runCommand("skills.candidates.build", {
@@ -145,18 +149,18 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       await rejectSkill(runtime, args);
       return;
     case "experiences":
-      printExperiences(searchExperiences(runtime, args.join(" ")));
+      printExperiences(await searchExperiences(runtime, args.join(" ")));
       return;
     case "timeline":
       await printTimeline(runtime, state, args[0]);
       return;
     case "trace":
-      printTrace(runtime, args[0]);
+      await printTrace(runtime, args[0]);
       return;
     case "diagnostics":
       printJson(args[0] === "repair" || args[0] === "true"
         ? await runtime.runCommand("diagnostics.repair")
-        : runtime.diagnostics({ repair: false }));
+        : await runtime.runCommand("diagnostics.run"));
       return;
     case "maintenance":
       printJson(await runtime.runCommand("maintenance.run"));
@@ -176,7 +180,9 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       output.write(`\nSession: ${state.sessionId}\n\n`);
       return;
     case "messages":
-      printSessionMessages(runtime.listSessionMessages({ sessionId: state.sessionId, limit: numberArg(args[0], 40) }));
+      printSessionMessages(await runtime.runCommand("session.messages", {
+        input: { sessionId: state.sessionId, limit: numberArg(args[0], 40) },
+      }));
       return;
     case "clear":
       if (prefix === "/") {
@@ -283,23 +289,26 @@ async function startNewSession(runtime, state, args: string[] = []): Promise<voi
   output.write(`\nNew session: ${session.id}\n\n`);
 }
 
-function resumeLatest(runtime, state, args: string[]): void {
+async function resumeLatest(runtime, state, args: string[]): Promise<void> {
   if (args[0] && args[0] !== "latest") throw new Error("usage: :resume latest [hidden]");
-  const session = runtime.resumeLatestSession({
-    includeHidden: args.includes("hidden") || args.includes("--hidden"),
+  const session = await runtime.runCommand("session.resume_latest", {
+    input: { includeHidden: args.includes("hidden") || args.includes("--hidden") },
   });
   if (!session) {
     output.write("\nNo session to resume.\n\n");
     return;
   }
-  selectSession(runtime, state, session.id);
+  await selectSession(runtime, state, session.id);
   output.write(`\nResumed session: ${session.id}\n\n`);
 }
 
-function exportSession(runtime, args: string[]): void {
+async function exportSession(runtime, args: string[]): Promise<void> {
   const sessionId = requiredArg(args[0], "session id");
   const format = args.includes("md") || args.includes("markdown") || args.includes("--markdown") ? "markdown" : "json";
-  const exported = runtime.exportSession(sessionId, { format });
+  const exported = await runtime.runCommand("session.export", {
+    input: { sessionId, format },
+    format: format === "markdown" ? "text" : "json",
+  });
   if (format === "markdown") {
     output.write(`\n${exported}\n`);
     return;
@@ -307,9 +316,11 @@ function exportSession(runtime, args: string[]): void {
   printJson(exported);
 }
 
-function selectSession(runtime, state, sessionId: string): void {
+async function selectSession(runtime, state, sessionId: string): Promise<void> {
   state.sessionId = sessionId;
-  const messages = runtime.listSessionMessages({ sessionId, limit: 40 });
+  const messages = await runtime.runCommand("session.messages", {
+    input: { sessionId, limit: 40 },
+  });
   const latest = [...messages].reverse().find((message) => message.runId);
   state.lastRunId = latest?.runId || "";
 }
@@ -344,7 +355,7 @@ async function restoreSession(runtime, state, args: string[]): Promise<void> {
   const session = await runtime.runCommand("session.restore", {
     input: { sessionId: args[0] },
   });
-  state.sessionId = session.id;
+  await selectSession(runtime, state, session.id);
   output.write(`\nRestored session: ${session.id}\n\n`);
 }
 
@@ -409,11 +420,10 @@ async function rejectSkill(runtime, args: string[]): Promise<void> {
   }));
 }
 
-function searchExperiences(runtime, query: string): unknown[] {
-  if (query.trim()) {
-    return runtime.experienceStore.recall(query, { scope: "project", limit: 8 });
-  }
-  return runtime.experienceStore.listActive();
+async function searchExperiences(runtime, query: string): Promise<unknown[]> {
+  return await runtime.runCommand("experiences.recall", {
+    input: { q: query.trim() || undefined, limit: 8 },
+  });
 }
 
 function printExperiences(experiences): void {
@@ -434,7 +444,9 @@ async function printTimeline(runtime, state, runId?: string): Promise<void> {
   const targetRunId = runId || state.lastRunId;
   if (!targetRunId) throw new Error("run id is required");
   state.lastRunId = targetRunId;
-  const timeline = runtime.getTimeline({ runId: targetRunId });
+  const timeline = await runtime.runCommand("timeline.get", {
+    input: { runId: targetRunId },
+  });
   output.write(`\nTimeline ${targetRunId}\n`);
   if (timeline.run) printJson(timeline.run);
   printTable([
@@ -449,9 +461,11 @@ async function printTimeline(runtime, state, runId?: string): Promise<void> {
   output.write("\n");
 }
 
-function printTrace(runtime, taskId?: string): void {
+async function printTrace(runtime, taskId?: string): Promise<void> {
   if (!taskId) throw new Error("task id is required");
-  const trace = runtime.getTaskTrace(taskId);
+  const trace = await runtime.runCommand("task.trace", {
+    input: { taskId },
+  });
   output.write(`\nTask Trace ${taskId}\n`);
   printJson(trace);
 }
@@ -475,12 +489,6 @@ function printTable(rows: string[][]): void {
 
 function splitArgs(message: string): string[] {
   return message.match(/"[^"]*"|'[^']*'|\S+/g)?.map((item) => item.replace(/^["']|["']$/g, "")) || [];
-}
-
-function parseStatus(value?: string): "proposed" | "approved" | "merged" | "rejected" | undefined {
-  if (!value) return "proposed";
-  if (value === "proposed" || value === "approved" || value === "merged" || value === "rejected") return value;
-  throw new Error(`invalid candidate status: ${value}`);
 }
 
 function sessionListOptions(value?: string): {

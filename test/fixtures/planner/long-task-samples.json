@@ -1,0 +1,47 @@
+[
+  {
+    "name": "production-app-timeout",
+    "status": "failed",
+    "error": "Task timed out while running full production verification after 120000ms.",
+    "deliveryLevel": "production",
+    "expectedCluster": "timeout",
+    "expectedBudgetMin": 3,
+    "expectedBudgetMax": 4
+  },
+  {
+    "name": "uat-regression-verification",
+    "status": "failed",
+    "error": "npm run check failed: assertion failed in dynamic task graph replan test.",
+    "deliveryLevel": "uat",
+    "expectedCluster": "verification",
+    "expectedBudgetMin": 4,
+    "expectedBudgetMax": 4
+  },
+  {
+    "name": "approval-template-blocker",
+    "status": "blocked",
+    "error": "Tool github requires explicit approval using approval template github_write.",
+    "deliveryLevel": "poc",
+    "expectedCluster": "permission_or_policy",
+    "expectedBudgetMin": 2,
+    "expectedBudgetMax": 2
+  },
+  {
+    "name": "dynamic-budget-exhausted",
+    "status": "failed",
+    "error": "task graph budget exhausted: max dynamic tasks reached before downstream modules completed.",
+    "deliveryLevel": "production",
+    "expectedCluster": "resource_budget",
+    "expectedBudgetMin": 2,
+    "expectedBudgetMax": 3
+  },
+  {
+    "name": "upstream-dependency-failed",
+    "status": "blocked",
+    "error": "Dependency api-contract finished with status failed, downstream tests are blocked.",
+    "deliveryLevel": "uat",
+    "expectedCluster": "dependency",
+    "expectedBudgetMin": 3,
+    "expectedBudgetMax": 3
+  }
+]

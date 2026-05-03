@@ -21,7 +21,7 @@ import { SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
-import { ToolExecutor } from "../tools/ToolExecutor.ts";
+import { ToolExecutor, type ToolApproval } from "../tools/ToolExecutor.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { renderTimeline } from "../timeline/renderTimeline.ts";
 import { buildDoctorReport } from "./Doctor.ts";
@@ -246,7 +246,7 @@ export async function createRuntime(options: {
   async function executeTool(input: {
     tool: string;
     args?: Record<string, unknown>;
-    approval?: { approved?: boolean; reason?: string; approvedBy?: string };
+    approval?: ToolApproval;
     role?: string;
     permissionMode?: unknown;
     taskId?: string;
@@ -347,15 +347,32 @@ export async function createRuntime(options: {
   }
 
   const commandRegistry = createCommandRegistry({
+    health,
     doctor,
     listTools: () => toolRegistry.list(),
     listSkills: () => skillRegistry.list(),
+    listSkillCandidates: (input = {}) => skillCandidateStore.listCandidates(input),
     listProviders: () => providerRegistry.list(),
+    checkProviders: (input = {}) => providerRegistry.health(input),
+    providerUsage: (input = {}) => providerUsageStore.summary(input),
     listRoles: () => roleManager.listRoles(),
+    listSessions: (input = {}) => taskStore.listSessions(input),
+    listSessionMessages: (input) => taskStore.listSessionMessages(input),
     resumeLatestSession,
     exportSession,
     previewSessionCompaction,
     sessionUsage,
+    recallExperiences: (query = "", input = {}) => query.trim()
+      ? experienceStore.recall(query, { scope: "project", limit: input.limit })
+      : experienceStore.listActive(),
+    addExperienceFeedback: (input) => experienceStore.addFeedback(input),
+    buildDailyExperiences: (input = {}) => experienceBuilder.buildDailyExperiences(input),
+    getTimeline: (input) => taskStore.getTimeline(input),
+    renderTimeline: (runId) => renderTimeline(taskStore.getTimeline({ runId })),
+    getTaskTrace: (taskId) => taskStore.getTaskTrace(taskId),
+    securityAudit,
+    buildContext: (input) => contextEngine.build(input),
+    routeMessage: (input) => router.route(input),
     createSession: (input) => taskStore.createSession(input),
     clearSession: (sessionId, input = {}) => {
       const current = taskStore.getSession(sessionId);

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { mkdtemp } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { ToolExecutor } from "../src/tools/ToolExecutor.ts";
@@ -55,7 +57,66 @@ const approvalRequired = await executor.execute({
   sessionId: "tool-executor",
 });
 assert.equal(approvalRequired.ok, false);
-assert.match(String(approvalRequired.error || ""), /requires explicit approval/);
+assert.match(String(approvalRequired.error || ""), /network_read/);
+
+const wrongTemplate = await executor.execute({
+  tool: "http_fetch",
+  args: { url: "https://example.com" },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  approval: { approved: true, template: "network_write", reason: "wrong template" },
+  sessionId: "tool-executor",
+});
+assert.equal(wrongTemplate.ok, false);
+assert.match(String(wrongTemplate.error || ""), /network_read/);
+
+const githubReadApproval = await executor.execute({
+  tool: "github",
+  args: { action: "pr.get", number: "1" },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(githubReadApproval.ok, false);
+assert.match(String(githubReadApproval.error || ""), /github_read/);
+
+const githubWriteApproval = await executor.execute({
+  tool: "github",
+  args: { action: "issue.comment", number: "1", body: "Looks good from test." },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(githubWriteApproval.ok, false);
+assert.match(String(githubWriteApproval.error || ""), /github_write/);
+
+const browserServer = http.createServer((request, response) => {
+  if (request.url === "/next") {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end("<html><head><title>Next page</title></head><body><h1>Arrived</h1><p>Second page text.</p></body></html>");
+    return;
+  }
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  response.end('<html><head><title>Home</title></head><body><h1>Home</h1><a href="/next">Next</a><form action="/search"><input name="q" /></form></body></html>');
+});
+await new Promise<void>((resolve) => browserServer.listen(0, "127.0.0.1", resolve));
+const address = browserServer.address() as AddressInfo;
+try {
+  const browser = await executor.execute({
+    tool: "browser",
+    args: { url: `http://127.0.0.1:${address.port}/`, action: "follow_link", text: "Next" },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "browser_interaction", reason: "local test browser" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(browser.ok, true);
+  const output = browser.output as { snapshot?: { title?: string; headings?: Array<{ text: string }> } };
+  assert.equal(output.snapshot?.title, "Next page");
+  assert.equal(output.snapshot?.headings?.[0]?.text, "Arrived");
+} finally {
+  await new Promise<void>((resolve, reject) => browserServer.close((error) => error ? reject(error) : resolve()));
+}
 
 const forbidden = await executor.execute({
   tool: "delete_file",

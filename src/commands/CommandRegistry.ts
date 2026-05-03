@@ -1,3 +1,5 @@
+import type { ToolApproval } from "../tools/ToolExecutor.ts";
+
 export type CommandPermission = "read" | "write" | "danger";
 
 export interface CommandInputSchema {
@@ -82,15 +84,30 @@ export function createCommandRegistry(runtime: CommandRuntime): CommandRegistry 
 }
 
 interface CommandRuntime {
+  health: () => unknown;
   doctor: (options?: { deep?: boolean; repair?: boolean }) => Promise<unknown>;
   listTools: () => unknown[];
   listSkills: () => unknown[];
+  listSkillCandidates: (options?: { status?: "proposed" | "approved" | "merged" | "rejected"; limit?: number }) => unknown[];
   listProviders: () => unknown[];
+  checkProviders: (options?: { deep?: boolean }) => Promise<unknown[]>;
+  providerUsage: (options?: { since?: Date; until?: Date; providerId?: string; limit?: number }) => unknown;
   listRoles: () => Promise<unknown[]>;
+  listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
+  listSessionMessages: (options: { sessionId: string; limit?: number }) => unknown[];
   resumeLatestSession: (options?: { includeHidden?: boolean }) => unknown;
   exportSession: (sessionId: string, options?: { format?: "json" | "markdown" }) => unknown;
   previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
   sessionUsage: (sessionId: string) => unknown;
+  recallExperiences: (query?: string, options?: { limit?: number }) => unknown[];
+  addExperienceFeedback: (input: { experienceId: string; rating: "useful" | "wrong" | "outdated" | "duplicate"; comment?: string }) => unknown;
+  buildDailyExperiences: (options?: { day?: Date }) => unknown;
+  getTimeline: (options: { runId: string }) => unknown;
+  renderTimeline: (runId: string) => string;
+  getTaskTrace: (taskId: string) => unknown;
+  securityAudit: () => Promise<unknown>;
+  buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
+  routeMessage: (input: string) => unknown;
   createSession: (options?: { title?: string; source?: string; metadata?: Record<string, unknown> }) => unknown;
   clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
   restoreSession: (sessionId: string) => unknown;
@@ -125,7 +142,7 @@ interface CommandRuntime {
   executeTool: (input: {
     tool: string;
     args?: Record<string, unknown>;
-    approval?: { approved?: boolean; reason?: string; approvedBy?: string };
+    approval?: ToolApproval;
     role?: string;
     permissionMode?: unknown;
     taskId?: string;
@@ -136,6 +153,14 @@ interface CommandRuntime {
 
 function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
   return [
+    {
+      name: "health",
+      aliases: ["runtime.health"],
+      description: "Return runtime health summary.",
+      permission: "read",
+      inputSchema: { args: [], examples: ["health"] },
+      run: () => runtime.health(),
+    },
     {
       name: "tools",
       aliases: ["tool.list"],
@@ -153,12 +178,56 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: () => runtime.listSkills(),
     },
     {
+      name: "skills.candidates.list",
+      aliases: ["candidate.list", "skill-candidates"],
+      description: "List skill candidates.",
+      permission: "read",
+      inputSchema: {
+        args: ["[status]", "[limit]"],
+        examples: ["skills.candidates.list proposed 50"],
+        properties: { status: "string", limit: "number" },
+      },
+      run: ({ args, input }) => runtime.listSkillCandidates({
+        status: parseSkillCandidateStatus(input.status ?? args[0]),
+        limit: numberInput(input.limit, args[1], 50),
+      }),
+    },
+    {
       name: "providers",
       aliases: ["provider.list"],
       description: "List model providers.",
       permission: "read",
       inputSchema: { args: [], examples: ["providers"] },
       run: () => runtime.listProviders(),
+    },
+    {
+      name: "provider.health",
+      aliases: ["providers.health"],
+      description: "Check provider health.",
+      permission: "read",
+      inputSchema: {
+        args: ["[--deep]"],
+        examples: ["provider.health --deep"],
+        properties: { deep: "boolean" },
+      },
+      run: ({ args, input }) => runtime.checkProviders({ deep: input.deep === true || args.includes("--deep") || args.includes("deep") }),
+    },
+    {
+      name: "provider.usage",
+      aliases: ["providers.usage"],
+      description: "Summarize provider usage.",
+      permission: "read",
+      inputSchema: {
+        args: ["[providerId]"],
+        examples: ["provider.usage main"],
+        properties: { since: "string", until: "string", providerId: "string", limit: "number" },
+      },
+      run: ({ args, input }) => runtime.providerUsage({
+        since: dateInput(input.since),
+        until: dateInput(input.until),
+        providerId: stringOptional(input.providerId) || args[0],
+        limit: numberInput(input.limit, undefined, 20),
+      }),
     },
     {
       name: "roles",
@@ -168,11 +237,135 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       inputSchema: { args: [], examples: ["roles"] },
       run: () => runtime.listRoles(),
     },
+    {
+      name: "experiences.recall",
+      aliases: ["experience.list", "experience.recall"],
+      description: "List or search active experiences.",
+      permission: "read",
+      inputSchema: {
+        args: ["[query]"],
+        examples: ["experiences.recall planner timeout"],
+        properties: { q: "string", query: "string", limit: "number" },
+      },
+      run: ({ args, input }) => runtime.recallExperiences(stringOptional(input.q) || stringOptional(input.query) || args.join(" "), {
+        limit: numberInput(input.limit, undefined, 8),
+      }),
+    },
+    {
+      name: "timeline.get",
+      aliases: ["timeline"],
+      description: "Return or render a run timeline.",
+      permission: "read",
+      inputSchema: {
+        args: ["<runId>"],
+        examples: ["timeline.get run_123"],
+        required: ["runId"],
+        properties: { runId: "string" },
+      },
+      run: ({ args, input, format }) => {
+        const runId = stringInput(input.runId, args[0], "runId");
+        return format === "text" ? runtime.renderTimeline(runId) : runtime.getTimeline({ runId });
+      },
+      renderText: (result) => typeof result === "string" ? result : JSON.stringify(result, null, 2),
+    },
+    {
+      name: "task.trace",
+      aliases: ["trace", "task-trace"],
+      description: "Return a task trace.",
+      permission: "read",
+      inputSchema: {
+        args: ["<taskId>"],
+        examples: ["task.trace task_123"],
+        required: ["taskId"],
+        properties: { taskId: "string" },
+      },
+      run: ({ args, input }) => runtime.getTaskTrace(stringInput(input.taskId, args[0], "taskId")),
+    },
+    {
+      name: "diagnostics.run",
+      aliases: ["diagnostics"],
+      description: "Run diagnostics without repairs.",
+      permission: "read",
+      inputSchema: { args: [], examples: ["diagnostics.run"] },
+      run: () => runtime.diagnostics({ repair: false }),
+    },
+    {
+      name: "security.audit",
+      aliases: ["audit"],
+      description: "Run security audit.",
+      permission: "read",
+      inputSchema: { args: [], examples: ["security.audit"] },
+      run: () => runtime.securityAudit(),
+    },
+    {
+      name: "context.build",
+      aliases: ["context"],
+      description: "Build context for a query.",
+      permission: "read",
+      inputSchema: {
+        args: ["<query>"],
+        examples: ["context.build planner"],
+        properties: { query: "string", sessionId: "string", runId: "string", role: "string", mode: "string" },
+      },
+      run: ({ args, input }) => runtime.buildContext({
+        query: stringOptional(input.query) || args.join(" "),
+        sessionId: stringOptional(input.sessionId),
+        runId: typeof input.runId === "string" ? input.runId : null,
+        role: stringOptional(input.role),
+        mode: input.mode === "deep" ? "deep" : "active",
+      }),
+    },
+    {
+      name: "router.route",
+      aliases: ["route"],
+      description: "Route an input to likely agent capabilities.",
+      permission: "read",
+      inputSchema: {
+        args: ["<input>"],
+        examples: ["router.route fix test"],
+        properties: { input: "string", message: "string" },
+      },
+      run: ({ args, input }) => runtime.routeMessage(stringOptional(input.input) || stringOptional(input.message) || args.join(" ")),
+    },
   ];
 }
 
 function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
   return [
+    {
+      name: "session.list",
+      aliases: ["sessions.list"],
+      description: "List sessions.",
+      permission: "read",
+      inputSchema: {
+        args: ["[status]"],
+        examples: ["session.list active", "sessions.list hidden"],
+        properties: { status: "string", includeHidden: "boolean", includeTrashed: "boolean", includeDeleted: "boolean", limit: "number" },
+      },
+      run: ({ args, input }) => runtime.listSessions({
+        status: parseSessionStatus(input.status ?? args[0]),
+        includeHidden: input.includeHidden === true,
+        includeTrashed: input.includeTrashed === true,
+        includeDeleted: input.includeDeleted === true,
+        limit: numberInput(input.limit, undefined, 50),
+      }),
+    },
+    {
+      name: "session.messages",
+      aliases: ["messages"],
+      description: "List session messages.",
+      permission: "read",
+      inputSchema: {
+        args: ["<sessionId>", "[limit]"],
+        examples: ["session.messages sess_123 40"],
+        required: ["sessionId"],
+        properties: { sessionId: "string", limit: "number" },
+      },
+      run: ({ args, input }) => runtime.listSessionMessages({
+        sessionId: stringInput(input.sessionId, args[0], "sessionId"),
+        limit: numberInput(input.limit, args[1], 100),
+      }),
+    },
     {
       name: "session.resume_latest",
       aliases: ["resume"],
@@ -478,6 +671,37 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ input }) => runtime.maintenance(normalizeDatedOptions(input)),
     },
     {
+      name: "experiences.build_daily",
+      aliases: ["build-daily-experiences"],
+      description: "Build daily experience records from task history.",
+      permission: "write",
+      inputSchema: {
+        args: [],
+        examples: ["experiences.build_daily"],
+        properties: { day: "string" },
+      },
+      run: ({ input }) => runtime.buildDailyExperiences({
+        day: dateInput(input.day) || new Date(),
+      }),
+    },
+    {
+      name: "experiences.feedback",
+      aliases: ["experience-feedback"],
+      description: "Add feedback to an experience.",
+      permission: "write",
+      inputSchema: {
+        args: ["<experienceId>", "<rating>"],
+        examples: ["experiences.feedback exp_123 useful"],
+        required: ["experienceId", "rating"],
+        properties: { experienceId: "string", rating: "string", comment: "string" },
+      },
+      run: ({ args, input }) => runtime.addExperienceFeedback({
+        experienceId: stringInput(input.experienceId, args[0], "experienceId"),
+        rating: parseFeedbackRating(input.rating ?? args[1]),
+        comment: stringOptional(input.comment),
+      }),
+    },
+    {
       name: "task.cancel",
       aliases: ["cancel-task"],
       description: "Cancel a task.",
@@ -517,7 +741,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ args, input }) => runtime.executeTool({
         tool: stringInput(input.tool, args[0], "tool"),
         args: objectInput(input.args),
-        approval: objectInput(input.approval) as { approved?: boolean; reason?: string; approvedBy?: string },
+        approval: objectInput(input.approval) as ToolApproval,
         role: stringOptional(input.role),
         permissionMode: input.permissionMode,
         taskId: stringOptional(input.taskId),
@@ -620,7 +844,7 @@ function objectInput(value: unknown): Record<string, unknown> {
 function normalizeDatedOptions(input: Record<string, unknown>): Record<string, unknown> {
   return {
     ...input,
-    ...(typeof input.day === "string" && input.day.trim() ? { day: new Date(input.day) } : {}),
+    ...(typeof input.day === "string" && input.day.trim() ? { day: dateInput(input.day) } : {}),
   };
 }
 
@@ -631,4 +855,29 @@ function stringArray(value: unknown): string[] | undefined {
 function parseProviderType(value: unknown): "echo" | "openai" | "ollama" {
   if (value === "echo" || value === "openai" || value === "ollama") return value;
   throw new Error("provider type must be echo, openai, or ollama");
+}
+
+function parseSkillCandidateStatus(value: unknown): "proposed" | "approved" | "merged" | "rejected" | undefined {
+  if (!value) return undefined;
+  if (value === "proposed" || value === "approved" || value === "merged" || value === "rejected") return value;
+  throw new Error("skill candidate status must be proposed, approved, merged, or rejected");
+}
+
+function parseSessionStatus(value: unknown): "active" | "hidden" | "trashed" | "deleted" | undefined {
+  if (!value) return undefined;
+  if (value === "active" || value === "hidden" || value === "trashed" || value === "deleted") return value;
+  if (value === "trash") return "trashed";
+  throw new Error("session status must be active, hidden, trashed, or deleted");
+}
+
+function parseFeedbackRating(value: unknown): "useful" | "wrong" | "outdated" | "duplicate" {
+  if (value === "useful" || value === "wrong" || value === "outdated" || value === "duplicate") return value;
+  throw new Error("experience feedback rating must be useful, wrong, outdated, or duplicate");
+}
+
+function dateInput(value: unknown): Date | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error(`invalid date: ${value}`);
+  return date;
 }

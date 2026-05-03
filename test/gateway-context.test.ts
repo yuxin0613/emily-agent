@@ -103,6 +103,26 @@ try {
 
   ws.send({
     type: "request",
+    id: "sessions-1",
+    method: "sessions.list",
+    params: { includeHidden: true },
+  });
+  const sessions = await ws.nextResponse("sessions-1");
+  assert.equal(sessions.ok, true);
+  assert.ok(Array.isArray(sessions.result));
+
+  ws.send({
+    type: "request",
+    id: "providers-health-1",
+    method: "providers.health",
+    params: {},
+  });
+  const providersHealth = await ws.nextResponse("providers-health-1");
+  assert.equal(providersHealth.ok, true);
+  assert.ok(Array.isArray(providersHealth.result));
+
+  ws.send({
+    type: "request",
     id: "route-1",
     method: "router.route",
     params: { input: "开发一个 API" },

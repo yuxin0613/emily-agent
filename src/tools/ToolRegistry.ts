@@ -109,7 +109,7 @@ const DEFAULT_TOOL_DEFINITIONS: ToolDefinition[] = [
     requiresApproval: true,
     aliases: ["fetch", "http_get", "http_request"],
     description: "Fetch HTTP or HTTPS resources with bounded body size.",
-    instructions: "Use for explicit URL retrieval after approval; prefer GET or HEAD and keep responses small.",
+    instructions: "Use after network_read approval for GET/HEAD or network_write approval for POST; keep responses small.",
   },
   {
     name: "browser",
@@ -118,8 +118,8 @@ const DEFAULT_TOOL_DEFINITIONS: ToolDefinition[] = [
     sideEffects: "network",
     requiresApproval: true,
     aliases: ["open_url", "browser_open", "browser_snapshot"],
-    description: "Take a lightweight page snapshot for a URL.",
-    instructions: "Use only after approval when page title or rendered HTML context is needed.",
+    description: "Run lightweight browser-style URL actions such as snapshot, links, forms, assertions, and link following.",
+    instructions: "Use only after browser_interaction approval when page structure or simple navigation context is needed.",
   },
   {
     name: "github",
@@ -128,8 +128,8 @@ const DEFAULT_TOOL_DEFINITIONS: ToolDefinition[] = [
     sideEffects: "network",
     requiresApproval: true,
     aliases: ["gh", "github_cli"],
-    description: "Run approved GitHub CLI read or workflow commands.",
-    instructions: "Use only after approval with a narrow gh subcommand and no shell interpolation.",
+    description: "Run structured GitHub PR/issue actions or approved GitHub CLI read/workflow commands.",
+    instructions: "Use github_read approval for read actions and github_write approval for comments or mutations; avoid shell interpolation.",
   },
   {
     name: "create_task",

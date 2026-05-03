@@ -54,6 +54,7 @@ const runtime = {
   health: () => ({ ok: true }),
   maintenance: async () => ({}),
   runCommand: async (name: string, options: { input?: Record<string, unknown> } = {}) => {
+    if (name === "diagnostics.run") return runtime.diagnostics({ repair: false });
     if (name === "diagnostics.repair") return runtime.diagnostics({ repair: true });
     if (name === "maintenance.run") return runtime.maintenance(options.input);
     return {};

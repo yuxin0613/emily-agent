@@ -105,12 +105,12 @@ flowchart LR
 - `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
 - `PermissionMode`: task/run 可携带 `read_only`、`workspace_write` 或 `danger_full_access`，最终工具权限始终是 `role.allowed_tools ∩ permissionMode - role.forbidden_tools`。
 - `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
-- `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
+- `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`http_fetch`、`browser`、`github`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
 - `SkillRegistry`: 内置并可从 `skills/<skill>/skill.md` 加载技能 prompt，task 的 `skillHints` 和 role 的 `skills` 会合并后注入 subagent prompt。
 - `SkillCandidateStore` / `SkillBuilder`: 从重复成功 workflow 中生成 `proposed` skill candidate；默认不会自动启用，审批后才写入 skill 文件，已有相似 skill 优先走 update。
 - `resumeLatestSession()` / `exportSession()` / `previewSessionCompaction()` / `sessionUsage()`: 基于现有 session/run/message/usage 数据提供 session 运维能力，不改变 `/new`、`/clear`、trash/restore 生命周期。
-- `CommandRegistry`: 统一注册 doctor、session 运维以及 tools/skills/providers/roles 查询类命令，供 TUI/Web/Gateway 复用；不替换 runtime 执行路径。
-- `ToolExecutor`: 在 `ToolRegistry` / `ToolGateway` 权限过滤之后执行真实工具，当前内置 workspace 文件读写、受限测试执行、task inspection、create_task、HTTP fetch、轻量浏览器快照和 GitHub CLI 包装；approval-sensitive 工具必须显式确认，结果会写入 `tool.execution.*` 事件。
+- `CommandRegistry`: 统一注册 doctor、session 运维、provider/role/skill/session 写命令、tool execution 和主要查询命令，供 TUI/Web/Gateway 复用；adapter 只负责 IO 和渲染，不替换 runtime 执行路径。
+- `ToolExecutor`: 在 `ToolRegistry` / `ToolGateway` 权限过滤之后执行真实工具，当前内置 workspace 文件读写、受限测试执行、task inspection、create_task、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作；approval-sensitive 工具必须带精确 approval template，结果会写入 `tool.execution.*` 事件。
 - `tool.hints.resolved` / `skill.hints.resolved`: 每个 worker 会记录工具/技能解析结果；未知或被拒绝的 hints 会额外记录 `runtime.anomaly`。
 
 ## 第二轮核心优化
@@ -177,8 +177,8 @@ flowchart LR
 - rolling 图不是一次性冻结的 DAG。粗粒度节点可以带 `expandable=true`，完成后会向同一个 graph 追加更细的实现、验证或后续拆分 task，并记录 `task_graph.expansion_planned` 和 `task_graph.expanded` 事件。
 - 自适应拆解优先走 planner 生成的 `GraphPatchSpec` 严格 JSON；如果模型输出不是 JSON、依赖非法、task key 冲突或超出上限，会记录 `runtime.anomaly` 并使用保守 fallback patch。
 - Planner 执行带预算护栏：`TaskGraphExecutor` 会限制并行 ready task、动态追加 task 总量和重规划次数；预算耗尽会记录 `task_graph.budget_exhausted`，失败/blocked 增多时会记录 `task_graph.budget_adjusted` 并降低并发。
-- 每个 graph 结束时会记录 `task_graph.quality`，包含 score、失败数、blocked 数、动态 task 数、失败聚类、预算状态和调参建议。
-- 当 `PlanSpec.failureStrategy` 为 `replan` 时，失败 task 会触发内部 replan planner task，仍要求返回 `GraphPatchSpec`，不会替换现有协议；replan 会记录 `task_graph.failure_clustered` 和 `task_graph.replan_quality`，用于判断是 timeout、provider、permission/policy 还是需要用户输入。
+- 每个 graph 结束时会记录 `task_graph.quality`，包含 score、active/recovered 失败数、blocked 数、动态 task 数、失败聚类、失败风险、预算状态和调参建议；已被 replan recovery 覆盖的旧失败会保留审计但降低质量扣分。
+- 当 `PlanSpec.failureStrategy` 为 `replan` 时，失败 task 会触发内部 replan planner task，仍要求返回 `GraphPatchSpec`，不会替换现有协议；replan 会记录 `task_graph.failure_clustered` 和 `task_graph.replan_quality`，用于判断是 timeout、provider、permission/policy、dependency、resource_budget、verification 还是需要用户输入，并据此调节 recovery task 预算。
 - 如果 `PlanSpec` 或 `GraphPatchSpec` 要求用户补充信息，run 会进入 `waiting_user`，记录 `task_graph.waiting_user`，并把问题交还给主 agent 而不是继续执行。
 - 动态追加的 task 会带上 `expandedFromTaskId`、`parentKey`、`expansionDepth` 和原 graph 的准出标准，timeline 可以复盘任务图是如何从粗到细长出来的。
 - 如果上游 success dependency 失败，下游 task 会被标记为 `blocked`，不会一直等待到超时。
@@ -268,11 +268,11 @@ Tools 和 skills 是两层不同的能力描述：
   - `run_tests`: 只允许 `npm test`、`npm run check/test` 或 `node test/*.test.ts`，不走 shell。
   - `inspect_task`: 返回 task trace。
   - `create_task`: 创建 follow-up task。
-  - `http_fetch`: 受限 HTTP/HTTPS fetch，限制方法、header 和响应大小，必须带 approval。
-  - `browser`: 基于 URL 获取轻量页面快照、title 和文本预览，必须带 approval。
-  - `github`: 通过 `gh` CLI 执行 allowlist 子命令，不走 shell，必须带 approval。
+  - `http_fetch`: 受限 HTTP/HTTPS fetch，限制方法、header 和响应大小；GET/HEAD 需要 `network_read` approval，POST 需要 `network_write` approval。
+  - `browser`: 轻量浏览器式交互，支持 `snapshot`、`links`、`forms`、`text`、`assert_text`、`follow_link` 和最多 10 步 `sequence`，需要 `browser_interaction` approval。
+  - `github`: 支持结构化 `pr.get`、`pr.list`、`issue.get`、`issue.list`、`pr.comment`、`issue.comment`，也保留受限 `gh` allowlist；读动作需要 `github_read` approval，写动作需要 `github_write` approval。
   - `delete_file` / `git_reset` / `shell` / `network` 仍是高风险或宽泛能力；`delete_file` 需要 role 显式允许且带 approval，`git_reset` / `shell` / `network` 内置 executor 继续拒绝。
-- task metadata 可带 `toolRequests: [{ tool, args, approval }]`，worker 会在模型调用前执行允许的工具，把结果注入 prompt，并记录 `tool.execution.started/completed/failed/approval_required`。
+- task metadata 可带 `toolRequests: [{ tool, args, approval }]`，worker 会在模型调用前执行允许的工具，把结果注入 prompt，并记录 `tool.execution.started/completed/failed/approval_required`；`tool.execution.started` 会写入最终要求的 approval template，便于外部应用做确认 UI。
 - `SkillRegistry`: 内置常用技能，也会加载 `skills/<name>/skill.md`。skill 是可复用工作流 prompt，可以声明 `capabilities`、`aliases` 和需要的 `tool_hints`。
 - worker 执行前会合并 `agent.md` 的 `skills` 与 task metadata 的 `skillHints`，解析后注入 `Skill context`；工具解析结果注入 `Tool context`。
 - Skill 采用渐进披露：`SkillRegistry.resolveForTask()` 会先看 role/task hints，再根据 trigger/capability 自动少量命中；`renderSkillContext(..., { mode: "progressive" })` 只注入命中的 skill 元数据和流程，避免把所有技能 prompt 塞进上下文。
@@ -684,14 +684,14 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/runtime/LifecycleHooks.ts`: runtime 生命周期 hook 注册和触发。
 - `src/runtime/Doctor.ts`: 聚合 health、diagnostics、provider health、security audit、session 和候选项状态的 runtime doctor 报告。
 - `src/runtime/SessionOps.ts`: resume latest、session export、compaction preview 和 per-session usage 汇总。
-- `src/commands/CommandRegistry.ts`: 统一注册可复用 runtime command，覆盖 doctor、session 运维、查询类命令、provider/role/skill/session 写命令、maintenance/cancel 和 tool execution，并带 input schema 与权限声明。
+- `src/commands/CommandRegistry.ts`: 统一注册可复用 runtime command，覆盖 doctor、health、provider/role/tool/skill/session/experience/timeline/context/router 查询、provider/role/skill/session/experience 写命令、maintenance/cancel 和 tool execution，并带 input schema 与权限声明。
 - `src/security/SecurityAudit.ts`: 底座安全审计报告。
 - `src/agents/AgentProfile.ts`: subagent profile 隔离描述和 prompt 渲染。
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
 - `src/agents/RoleWorkProduct.ts`: developer / researcher / reviewer 的本地工作产物增强层，补充代码库上下文、研究结构和 JSON review verdict。
 - `src/tasks/TaskStore.ts`: SQLite task、session、agent、event、role queue、状态机、lease、retry/dead-letter。
 - `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
-- `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛和 rolling 图扩展。
+- `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛、rolling 图扩展、replan quality 评分、失败聚类和预算自适应。
 - `src/tasks/TaskResult.ts`: 结构化 task result 序列化、解析和 summary 提取。
 - `src/planning/PlanSpec.ts`: PlanSpec / GraphPatchSpec 类型、解析、fallback 计划、准出标准识别和 validator。
 - `src/tasks/errors.ts`: 状态机错误类型。
@@ -713,7 +713,7 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/tools/ToolRegistry.ts`: 工具声明注册表，包含别名、副作用、approval 和提示词说明。
 - `src/tools/ToolGateway.ts`: 工具权限校验入口，解析 tool hints 并过滤 role 不允许的工具。
 - `src/tools/PermissionMode.ts`: task/run 级额外权限护栏，和 role policy 求交集。
-- `src/tools/ToolExecutor.ts`: 真实工具执行器，当前支持 workspace 文件读写、受限测试执行、task inspection 和 create_task，并写入审计事件。
+- `src/tools/ToolExecutor.ts`: 真实工具执行器，当前支持 workspace 文件读写、受限测试执行、task inspection、create_task、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作，并写入审计事件。
 - `src/skills/SkillRegistry.ts`: 技能注册表，加载内置技能和 `skills/<skill>/skill.md`。
 - `src/skills/SkillCandidateStore.ts`: skill candidate SQLite 存储、审批、拒绝和 skill 文件写入。
 - `src/skills/SkillBuilder.ts`: 从重复 task workflow 生成 proposed skill candidate，优先更新已有 skill。
@@ -767,7 +767,7 @@ npm run check
 - TUI/WebUI 静态渲染入口和 WebUI 基础结构。
 - WebSocket Gateway、ContextEngine active/deep 召回、确定性路由、LifecycleHooks 和 security audit。
 - doctor、CommandRegistry、session 运维 API 和 permission mode 的基础接线。
-- 外部向量库 adapter factory、pgvector host-injected driver、ToolExecutor 审计链、approval-sensitive executor、planner graph quality/replan/budget/failure-cluster 事件和 mock parity harness。
+- 外部向量库 adapter factory、pgvector host-injected driver、ToolExecutor 审计链、精细 approval template、轻量浏览器交互、GitHub PR/issue 结构化动作、planner graph quality/replan/budget/failure-cluster 校准和 mock parity harness。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。
@@ -775,7 +775,7 @@ npm run check
 - memory 压缩向量索引、内容去重、compact 和混合召回。
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
 - 经验相似匹配、applicability/contraindications、feedback/reuse、索引重建和 schema migration 记录。
-- mock parity 覆盖 provider/doctor、command registry、真实工具执行、动态 task、worker crash、cancel、gateway、memory candidate 审批和多轮 replan 长链路基准；外部 provider/vector parity 可通过环境变量启用。
+- mock parity 覆盖 provider/doctor、command registry、真实工具执行、动态 task、worker crash、cancel、gateway、memory candidate 审批和多轮 replan 长链路基准；planner calibration 额外使用真实长任务样本校验失败聚类和预算参数，外部 provider/vector parity 可通过环境变量启用。
 
 ## 下一阶段建议
 
@@ -783,6 +783,6 @@ npm run check
 
 - Provider：补原生 Anthropic、Gemini provider；OpenAI-compatible 私有网关可先通过 `openai` provider 的兼容配置承载，再按需要沉淀专用 adapter。
 - Memory：继续补真实 Milvus/Chroma/Qdrant collection bootstrap 和 pgvector driver 包装示例，方便宿主应用少写样板。
-- Tools：补更完整的浏览器交互、GitHub PR/issue 结构化动作和更细粒度的审批策略模板。
-- Planner：继续用真实长任务样本调 replan quality score、失败聚类权重和预算自适应参数。
-- CommandRegistry：继续迁移剩余 adapter 查询入口，让 Web/TUI/Gateway 最终只负责 IO 和渲染。
+- Tools：继续把真实浏览器驱动、GitHub GraphQL thread 操作和宿主应用确认弹窗接入为可选 executor，而不是扩大默认权限。
+- Planner：沉淀更多生产/研究/数据处理类长任务样本，继续校准质量评分和预算参数。
+- CommandRegistry：下一步迁移更多写类控制入口和文本 renderer，让 adapter 更薄。

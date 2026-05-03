@@ -30,9 +30,12 @@ export interface TaskGraphQuality {
   recommendations: string[];
   taskCount: number;
   failedCount: number;
+  activeFailedCount: number;
+  recoveredFailureCount: number;
   blockedCount: number;
   dynamicCount: number;
   failureClusters: Record<string, number>;
+  failureRisk: number;
   budget: {
     maxParallelTasks: number;
     finalParallelTasks: number;
@@ -134,6 +137,7 @@ export class TaskGraphExecutor {
         blockedCount: blocked.length,
         pendingCount: pending.size,
         expandedCount: expanded.length,
+        failureRisk: failureRiskForTasks([...failed, ...blocked]),
       });
       if (adjustedParallelTasks !== effectiveParallelTasks) {
         effectiveParallelTasks = adjustedParallelTasks;
@@ -876,16 +880,20 @@ export class TaskGraphExecutor {
     blockedCount,
     pendingCount,
     expandedCount,
+    failureRisk,
   }: {
     current: number;
     failedCount: number;
     blockedCount: number;
     pendingCount: number;
     expandedCount: number;
+    failureRisk: number;
   }): number {
-    if (failedCount + blockedCount >= 2) return 1;
-    if (failedCount || blockedCount) return Math.max(1, Math.min(current, Math.ceil(this.maxParallelTasks / 2)));
-    if (expandedCount >= this.maxDynamicTasks * 0.8) return Math.max(1, Math.min(current, 2));
+    const dynamicPressure = this.maxDynamicTasks > 0 ? expandedCount / this.maxDynamicTasks : 1;
+    if (failureRisk >= 1.4 || failedCount + blockedCount >= 3) return 1;
+    if (dynamicPressure >= 0.9) return 1;
+    if (failureRisk >= 0.7 || failedCount || blockedCount) return Math.max(1, Math.min(current, Math.ceil(this.maxParallelTasks / 2)));
+    if (dynamicPressure >= 0.75) return Math.max(1, Math.min(current, 2));
     if (pendingCount > this.maxParallelTasks * 2) return this.maxParallelTasks;
     return Math.max(1, Math.min(this.maxParallelTasks, current));
   }
@@ -899,12 +907,12 @@ export class TaskGraphExecutor {
     failureCluster: string;
     attempt: number;
   }): number {
-    const base = failureCluster === "permission_or_policy" || failureCluster === "needs_user_input"
-      ? 2
-      : failureCluster === "timeout" || failureCluster === "provider"
-        ? 3
-        : 6;
-    return Math.max(1, Math.min(availableSlots, base, Math.max(1, 7 - attempt)));
+    return calibratedReplanBudget({
+      availableSlots,
+      failureCluster,
+      attempt,
+      deliveryLevel: this.plan?.deliveryLevel,
+    });
   }
 
   private recordFailureCluster(task: Task, tasksByKey: Record<string, Task>): void {
@@ -1030,30 +1038,42 @@ function assessGraphQuality({
   const recommendations: string[] = [];
   const tasks = Object.values(tasksByKey);
   const missingAcceptance = tasks.filter((task) => !Array.isArray(task.metadata.acceptanceCriteria) || !task.metadata.acceptanceCriteria.length).length;
+  const recoveredFailures = failed.filter(isReplanSupersededTerminal);
+  const activeFailures = failed.filter((task) => !isReplanSupersededTerminal(task));
   const failedCount = failed.length;
+  const activeFailedCount = activeFailures.length;
+  const recoveredFailureCount = recoveredFailures.length;
   const blockedCount = blocked.length;
   const failureClusters = countFailureClusters([...failed, ...blocked]);
+  const failureRisk = failureRiskForTasks([...activeFailures, ...blocked]) + recoveredFailureCount * 0.15;
   if (missingAcceptance) issues.push(`${missingAcceptance} task(s) lack acceptance criteria`);
-  if (failedCount) issues.push(`${failedCount} task(s) failed`);
+  if (activeFailedCount) issues.push(`${activeFailedCount} active task failure(s) remain`);
+  if (recoveredFailureCount) issues.push(`${recoveredFailureCount} task failure(s) were superseded by replan recovery`);
   if (blockedCount) issues.push(`${blockedCount} task(s) blocked`);
   if (!completed.length) issues.push("no terminal task was recorded");
   if (failureClusters.permission_or_policy) recommendations.push("narrow role permissions or request explicit approval before retrying the affected branch");
   if (failureClusters.timeout) recommendations.push("split timeout-prone tasks into smaller recovery tasks with shorter acceptance criteria");
   if (failureClusters.provider) recommendations.push("retry provider-sensitive work through fallback provider or reduce prompt size");
+  if (failureClusters.verification) recommendations.push("create a targeted fix plus verification branch before final review");
+  if (failureClusters.dependency) recommendations.push("repair or bypass failed upstream dependencies before scheduling downstream tasks");
+  if (failureClusters.resource_budget) recommendations.push("lower concurrency or scope before adding more dynamic tasks");
   if (blockedCount) recommendations.push("surface blocked dependencies before adding more dynamic work");
   const terminalRatio = tasks.length ? completed.length / tasks.length : 0;
   const acceptancePenalty = tasks.length ? missingAcceptance / tasks.length : 0;
-  const failurePenalty = tasks.length ? (failedCount + blockedCount * 0.5) / tasks.length : 0;
-  const score = clamp01(0.35 + terminalRatio * 0.45 - acceptancePenalty * 0.15 - failurePenalty * 0.35 + Math.min(0.1, expanded.length * 0.02));
+  const failurePenalty = tasks.length ? (activeFailedCount + blockedCount * 0.7 + recoveredFailureCount * 0.25 + failureRisk * 0.4) / tasks.length : 0;
+  const score = clamp01(0.38 + terminalRatio * 0.44 - acceptancePenalty * 0.14 - failurePenalty * 0.34 + Math.min(0.08, expanded.length * 0.015));
   return {
     score: Number(score.toFixed(3)),
     issues,
     recommendations,
     taskCount: tasks.length,
     failedCount,
+    activeFailedCount,
+    recoveredFailureCount,
     blockedCount,
     dynamicCount: expanded.length,
     failureClusters,
+    failureRisk: Number(failureRisk.toFixed(3)),
     budget,
   };
 }
@@ -1082,9 +1102,23 @@ function assessPatchQuality(
   if (failureCluster === "permission_or_policy" && !patch.needsUserInput && patch.tasks.some((task) => task.permissionMode === "danger_full_access")) {
     issues.push("permission failure recovery escalates to danger_full_access without asking user");
   }
+  if (failureCluster === "timeout" && patch.tasks.some((task) => sameText(task.input, failedTask.input))) {
+    issues.push("timeout recovery keeps the original task scope");
+  }
+  if (failureCluster === "verification" && patch.tasks.length && !patch.tasks.some((task) => /test|verify|check|assert|review/i.test(`${task.title}\n${task.input}`))) {
+    issues.push("verification recovery lacks an explicit verification step");
+  }
+  if (failureCluster === "provider" && patch.tasks.length && !patch.tasks.some((task) => /fallback|reduce|simpl|json|parse|provider|model/i.test(`${task.title}\n${task.input}`))) {
+    issues.push("provider recovery does not address model/output fragility");
+  }
+  if (failureCluster === "resource_budget" && patch.tasks.length > 1) {
+    issues.push("resource budget recovery should prefer one narrow unblocker");
+  }
   const narrowed = patch.tasks.some((task) => !sameText(task.input, failedTask.input) || task.role !== failedTask.role);
   if (patch.tasks.length && !narrowed) issues.push("recovery tasks look identical to the failed task");
-  const score = clamp01(1 - issues.length * 0.2 - Math.max(0, patch.tasks.length - maxNewTasks) * 0.1);
+  const sizePenalty = Math.max(0, patch.tasks.length - Math.max(1, Math.ceil(maxNewTasks * 0.7))) * 0.04;
+  const clusterPenalty = (FAILURE_CLUSTER_WEIGHTS[failureCluster] || 0.6) * 0.04;
+  const score = clamp01(1 - issues.length * 0.18 - Math.max(0, patch.tasks.length - maxNewTasks) * 0.1 - sizePenalty - clusterPenalty);
   return {
     score: Number(score.toFixed(3)),
     issues,
@@ -1102,15 +1136,62 @@ function countFailureClusters(tasks: Task[]): Record<string, number> {
   return counts;
 }
 
-function classifyFailure(task: Task): string {
+const FAILURE_CLUSTER_WEIGHTS: Record<string, number> = {
+  permission_or_policy: 0.95,
+  dependency: 0.85,
+  resource_budget: 0.82,
+  provider: 0.75,
+  needs_user_input: 0.72,
+  timeout: 0.65,
+  verification: 0.55,
+  cancelled: 0.4,
+  unknown: 0.6,
+};
+
+export function classifyFailure(task: Task): string {
   const text = `${task.status}\n${task.error || ""}\n${task.result || ""}\n${String(task.metadata.lastError || "")}`.toLowerCase();
   if (task.status === "cancelled" || /cancel/.test(text)) return "cancelled";
+  if (/budget exhausted|max dynamic|quota|too many|resource|out of memory|oom/.test(text)) return "resource_budget";
+  if (/dependency|upstream|downstream|depends on|blocked by/.test(text)) return "dependency";
   if (/timed out|timeout|lease expired|stale/.test(text)) return "timeout";
   if (/provider|model|llm|rate limit|json|parse/.test(text)) return "provider";
   if (/not allowed|permission|forbidden|approval|policy|tool/.test(text)) return "permission_or_policy";
-  if (/user input|clarification|missing context|blocked|dependency/.test(text)) return "needs_user_input";
+  if (/user input|clarification|missing context|blocked/.test(text)) return "needs_user_input";
   if (/test|assert|verification|review/.test(text)) return "verification";
   return "unknown";
+}
+
+function failureRiskForTasks(tasks: Task[]): number {
+  return tasks.reduce((sum, task) => sum + (FAILURE_CLUSTER_WEIGHTS[classifyFailure(task)] || FAILURE_CLUSTER_WEIGHTS.unknown), 0);
+}
+
+function isReplanSupersededTerminal(task: Task): boolean {
+  return Boolean((task.status === "failed" || task.status === "dead_letter") && task.metadata.replanSupersededAt);
+}
+
+export function calibratedReplanBudget({
+  availableSlots,
+  failureCluster,
+  attempt,
+  deliveryLevel,
+}: {
+  availableSlots: number;
+  failureCluster: string;
+  attempt: number;
+  deliveryLevel?: unknown;
+}): number {
+  const base = failureCluster === "permission_or_policy" || failureCluster === "needs_user_input" || failureCluster === "resource_budget"
+    ? 2
+    : failureCluster === "dependency"
+      ? 3
+      : failureCluster === "timeout" || failureCluster === "provider"
+        ? 3
+        : failureCluster === "verification"
+          ? 4
+          : 5;
+  const deliveryBoost = deliveryLevel === "production" || deliveryLevel === "prod" ? 1 : 0;
+  const attemptDampener = Math.max(1, 7 - attempt);
+  return Math.max(1, Math.min(availableSlots, base + deliveryBoost, attemptDampener));
 }
 
 function sameText(left: string, right: string): boolean {

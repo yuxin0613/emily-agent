@@ -163,12 +163,14 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         permissionMode: parsePermissionMode(params.permissionMode),
       });
     case "sessions.list":
-      return runtime.listSessions({
-        status: parseSessionStatus(params.status),
-        includeHidden: params.includeHidden === true,
-        includeTrashed: params.includeTrashed === true,
-        includeDeleted: params.includeDeleted === true,
-        limit: parseLimit(params.limit, 50, 500),
+      return runtime.runCommand("session.list", {
+        input: {
+          status: typeof params.status === "string" ? params.status : undefined,
+          includeHidden: params.includeHidden === true,
+          includeTrashed: params.includeTrashed === true,
+          includeDeleted: params.includeDeleted === true,
+          limit: parseLimit(params.limit, 50, 500),
+        },
       });
     case "sessions.create":
       return runtime.runCommand("session.create", {
@@ -206,53 +208,71 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         },
       });
     case "providers.list":
-      return runtime.listProviders();
+      return runtime.runCommand("providers");
     case "providers.health":
-      return runtime.checkProviders({ deep: params.deep === true });
+      return runtime.runCommand("provider.health", { input: { deep: params.deep === true } });
     case "providers.usage":
-      return runtime.providerUsage({
-        providerId: typeof params.providerId === "string" ? params.providerId : undefined,
-        limit: parseLimit(params.limit, 20, 500),
+      return runtime.runCommand("provider.usage", {
+        input: {
+          providerId: typeof params.providerId === "string" ? params.providerId : undefined,
+          limit: parseLimit(params.limit, 20, 500),
+        },
       });
     case "roles.list":
-      return runtime.listRoles();
+      return runtime.runCommand("roles");
     case "roles.add":
       return runtime.runCommand("role.add", { input: params });
     case "tools.list":
-      return runtime.listTools();
+      return runtime.runCommand("tools");
     case "skills.list":
-      return runtime.listSkills();
+      return runtime.runCommand("skills");
     case "skills.candidates.list":
-      return runtime.listSkillCandidates({
-        status: parseSkillCandidateStatus(params.status),
-        limit: parseLimit(params.limit, 50, 500),
+      return runtime.runCommand("skills.candidates.list", {
+        input: {
+          status: typeof params.status === "string" ? params.status : undefined,
+          limit: parseLimit(params.limit, 50, 500),
+        },
       });
     case "experiences.recall":
-      return typeof params.q === "string" && params.q
-        ? runtime.experienceStore.recall(params.q, { scope: "project", limit: parseLimit(params.limit, 5, 100) })
-        : runtime.experienceStore.listActive();
+      return runtime.runCommand("experiences.recall", {
+        input: {
+          q: typeof params.q === "string" ? params.q : undefined,
+          query: typeof params.query === "string" ? params.query : undefined,
+          limit: parseLimit(params.limit, 5, 100),
+        },
+      });
     case "timeline.get":
-      return runtime.getTimeline({ runId: String(params.runId || "") });
+      return runtime.runCommand("timeline.get", {
+        input: { runId: String(params.runId || "") },
+        format: params.format === "text" ? "text" : "json",
+      });
     case "diagnostics.run":
-      return params.repair === true ? runtime.runCommand("diagnostics.repair") : runtime.diagnostics({ repair: false });
+      return params.repair === true ? runtime.runCommand("diagnostics.repair") : runtime.runCommand("diagnostics.run");
     case "doctor.run":
-      return runtime.doctor({ deep: params.deep === true, repair: params.repair === true });
+      return runtime.runCommand("doctor", { input: { deep: params.deep === true, repair: params.repair === true } });
     case "maintenance.run":
       return runtime.runCommand("maintenance.run", { input: params });
     case "security.audit":
-      return runtime.securityAudit();
+      return runtime.runCommand("security.audit");
     case "sessions.resume_latest":
-      return runtime.resumeLatestSession({ includeHidden: params.includeHidden === true });
+      return runtime.runCommand("session.resume_latest", { input: { includeHidden: params.includeHidden === true } });
     case "sessions.export":
-      return runtime.exportSession(String(params.sessionId || ""), {
-        format: params.format === "markdown" ? "markdown" : "json",
+      return runtime.runCommand("session.export", {
+        input: {
+          sessionId: String(params.sessionId || ""),
+          format: params.format === "markdown" ? "markdown" : "json",
+        },
+        format: params.format === "markdown" ? "text" : "json",
       });
     case "sessions.compact_preview":
-      return runtime.previewSessionCompaction(String(params.sessionId || ""), {
-        maxMessages: parseLimit(params.maxMessages, 20, 200),
+      return runtime.runCommand("session.compact_preview", {
+        input: {
+          sessionId: String(params.sessionId || ""),
+          maxMessages: parseLimit(params.maxMessages, 20, 200),
+        },
       });
     case "sessions.usage":
-      return runtime.sessionUsage(String(params.sessionId || ""));
+      return runtime.runCommand("session.usage", { input: { sessionId: String(params.sessionId || "") } });
     case "commands.list":
       return runtime.listCommands();
     case "commands.run":
@@ -262,15 +282,19 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         format: params.format === "text" ? "text" : "json",
       });
     case "context.build":
-      return runtime.buildContext({
-        query: String(params.query || params.message || ""),
-        sessionId: typeof params.sessionId === "string" ? params.sessionId : "gateway",
-        runId: typeof params.runId === "string" ? params.runId : null,
-        role: typeof params.role === "string" ? params.role : "gateway",
-        mode: params.mode === "deep" ? "deep" : "active",
+      return runtime.runCommand("context.build", {
+        input: {
+          query: String(params.query || params.message || ""),
+          sessionId: typeof params.sessionId === "string" ? params.sessionId : "gateway",
+          runId: typeof params.runId === "string" ? params.runId : undefined,
+          role: typeof params.role === "string" ? params.role : "gateway",
+          mode: params.mode === "deep" ? "deep" : "active",
+        },
       });
     case "router.route":
-      return runtime.routeMessage(String(params.input || params.message || ""));
+      return runtime.runCommand("router.route", {
+        input: { input: String(params.input || params.message || "") },
+      });
   }
 }
 
@@ -278,18 +302,6 @@ function parseLimit(value: unknown, fallback: number, max: number): number {
   const number = typeof value === "number" ? value : Number(value ?? fallback);
   if (!Number.isInteger(number) || number < 1) return fallback;
   return Math.min(number, max);
-}
-
-function parseSessionStatus(value: unknown): "active" | "hidden" | "trashed" | "deleted" | undefined {
-  if (!value) return undefined;
-  if (value === "active" || value === "hidden" || value === "trashed" || value === "deleted") return value;
-  throw new Error("Invalid session status");
-}
-
-function parseSkillCandidateStatus(value: unknown): "proposed" | "approved" | "merged" | "rejected" | undefined {
-  if (!value) return undefined;
-  if (value === "proposed" || value === "approved" || value === "merged" || value === "rejected") return value;
-  throw new Error("Invalid skill candidate status");
 }
 
 export interface GatewayRuntime {
