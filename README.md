@@ -37,8 +37,8 @@ flowchart LR
 1. **严格 Task 状态机**
    状态流转集中在 `TaskStore.transitionTask()`，非法跳转会抛错。当前状态包括 `pending`、`queued`、`running`、`blocked`、`needs_inspection`、`done`、`failed`、`dead_letter`。
 
-2. **lease + heartbeat**
-   worker 领取任务时写入 `lease_owner`、`lease_expires_at`、`heartbeat_at`。heartbeat 会续租，main 侧 reconcile 会处理 lease 过期任务。
+2. **lease token + heartbeat**
+   worker 领取任务时写入 `lease_owner`、`lease_token`、`lease_expires_at`、`heartbeat_at`。后续 heartbeat / finish / fail / cancel 都必须带本次领取的 `lease_token`，避免旧 worker 的晚到写入覆盖重试后的新执行。
 
 3. **崩溃窗口恢复**
    IPC 只发送 `taskId/eventId`。主进程收到通知后回 SQLite 查询最终状态。worker 异常退出、通知丢失、lease 过期都会进入恢复流程。
@@ -56,7 +56,7 @@ flowchart LR
    Web adapter 提供 `GET /events` SSE。TUI/WebUI 可以订阅 `task.changed`、`task.finished`、`agent.heartbeat` 等运行事件。
 
 8. **Memory Curator**
-   `MemoryCurator` 决定哪些记录进入长期语义索引。短期内存和文件日志仍完整保留，向量层只存更有复用价值的内容。
+   `MemoryCurator` 决定哪些记录进入长期语义索引。subagent 结果先进入 `memory_candidates`，由 main agent 或 maintenance 审批后才写入 MemorySystem，避免被拒绝的结果绕过审批直接污染长期记忆。
 
 9. **retry / dead-letter**
    task 记录 `retry_count` 和 `max_retries`。超过重试上限会进入 `dead_letter`，并记录 `deadLetterReason`。
@@ -89,6 +89,7 @@ flowchart LR
 - worker 异常退出统一走 `RecoveryPolicy`，可按任务状态选择 finish、retry、dead-letter 或 inspector 复核。
 - `RoleAgentManager` 会从 `role_queues` 动态发现角色，不要求所有角色预先写死在主进程。
 - memory candidate 审批使用 `WHERE status = 'pending'` 条件更新，避免 main agent 和 maintenance 并发重复写入长期记忆。
+- 普通记忆的长期向量索引用文件锁和临时文件原子替换保存；多进程 subagent 同时写入时会先 reload / merge 再落盘。
 - `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
 - `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
 

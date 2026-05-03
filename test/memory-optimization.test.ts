@@ -61,4 +61,27 @@ const after = await memory.recall("subagent exits without ipc notification", {
 assert.ok(after.semantic.length <= 1);
 assert.match(after.semantic[0]?.content || "", /SQLite leases/);
 
+const concurrentDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-memory-concurrent-"));
+const memoryA = await MemorySystem.create({ dataDir: concurrentDir });
+const memoryB = await MemorySystem.create({ dataDir: concurrentDir });
+await Promise.all([
+  memoryA.remember({
+    scope: "project",
+    kind: "decision",
+    content: "Concurrent vector write alpha keeps SQLite lease token memory safe when one process updates the index.",
+  }),
+  memoryB.remember({
+    scope: "project",
+    kind: "decision",
+    content: "Concurrent vector write beta keeps memory candidate approval safe when another process updates the index.",
+  }),
+]);
+const memoryC = await MemorySystem.create({ dataDir: concurrentDir });
+const concurrentRecall = await memoryC.recall("concurrent vector write memory", {
+  scope: "project",
+  limit: 10,
+});
+assert.ok(concurrentRecall.semantic.some((item) => item.content.includes("alpha")));
+assert.ok(concurrentRecall.semantic.some((item) => item.content.includes("beta")));
+
 console.log("memory optimization test passed");

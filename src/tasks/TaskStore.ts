@@ -98,6 +98,7 @@ export class TaskStore {
               retry_count INTEGER NOT NULL DEFAULT 0,
               max_retries INTEGER NOT NULL DEFAULT 1,
               lease_owner TEXT,
+              lease_token TEXT,
               lease_expires_at TEXT,
               heartbeat_at TEXT,
               main_ack_at TEXT,
@@ -195,11 +196,19 @@ export class TaskStore {
           `);
         },
       },
+      {
+        version: 4,
+        name: "add_task_lease_token",
+        up: () => {
+          this.ensureColumn("tasks", "lease_token", "TEXT");
+        },
+      },
     ]);
 
     this.ensureColumn("tasks", "retry_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tasks", "max_retries", "INTEGER NOT NULL DEFAULT 1");
     this.ensureColumn("tasks", "lease_owner", "TEXT");
+    this.ensureColumn("tasks", "lease_token", "TEXT");
     this.ensureColumn("tasks", "lease_expires_at", "TEXT");
     this.ensureColumn("tasks", "heartbeat_at", "TEXT");
     this.ensureColumn("tasks", "main_ack_at", "TEXT");
@@ -234,6 +243,7 @@ export class TaskStore {
       retryCount: 0,
       maxRetries,
       leaseOwner: null,
+      leaseToken: null,
       leaseExpiresAt: null,
       heartbeatAt: null,
       mainAckAt: null,
@@ -245,10 +255,10 @@ export class TaskStore {
       .prepare(`
         INSERT INTO tasks (
           id, role, status, title, input, result, error, assigned_agent_id,
-          parent_task_id, metadata, retry_count, max_retries, lease_owner,
+          parent_task_id, metadata, retry_count, max_retries, lease_owner, lease_token,
           lease_expires_at, heartbeat_at, main_ack_at, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         task.id,
@@ -264,6 +274,7 @@ export class TaskStore {
         task.retryCount,
         task.maxRetries,
         task.leaseOwner,
+        task.leaseToken,
         task.leaseExpiresAt,
         task.heartbeatAt,
         task.mainAckAt,
@@ -536,16 +547,27 @@ export class TaskStore {
       .run(status, new Date().toISOString(), taskId);
   }
 
-  claimTask(taskId: string, agentId: string, { leaseMs = 30000 }: { leaseMs?: number } = {}): number {
+  claimTask(taskId: string, agentId: string, {
+    leaseMs = 30000,
+    leaseToken = randomUUID(),
+  }: {
+    leaseMs?: number;
+    leaseToken?: string;
+  } = {}): number {
     const task = this.getTaskOrThrow(taskId);
+    if (task.status === "running") {
+      this.assertLeaseMatches(task, { agentId, leaseToken });
+    }
     const now = new Date();
     const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
     return this.transitionTask(taskId, "running", {
       agentId,
       reason: "claimed by worker",
+      expectedLease: task.status === "running" ? { owner: agentId, token: leaseToken } : undefined,
       patch: {
         assignedAgentId: agentId,
         leaseOwner: agentId,
+        leaseToken,
         leaseExpiresAt,
         heartbeatAt: now.toISOString(),
         metadata: task.metadata,
@@ -553,7 +575,13 @@ export class TaskStore {
     });
   }
 
-  heartbeatTask(taskId: string, agentId: string, { leaseMs = 30000 }: { leaseMs?: number } = {}): number {
+  heartbeatTask(taskId: string, agentId: string, {
+    leaseMs = 30000,
+    leaseToken = null,
+  }: {
+    leaseMs?: number;
+    leaseToken?: string | null;
+  } = {}): number {
     const task = this.getTaskOrThrow(taskId);
     if (task.status !== "running") {
       return this.addEvent({
@@ -563,14 +591,30 @@ export class TaskStore {
         payload: { status: task.status },
       });
     }
+    if (!this.leaseMatches(task, { agentId, leaseToken })) {
+      return this.addEvent({
+        type: "task.heartbeat_ignored",
+        taskId,
+        agentId,
+        payload: { status: task.status, reason: "lease token mismatch" },
+      });
+    }
 
     const now = new Date();
     const leaseExpiresAt = new Date(now.getTime() + leaseMs).toISOString();
-    this.db
+    const result = this.db
       .prepare(
-        "UPDATE tasks SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ? WHERE id = ?",
+        "UPDATE tasks SET heartbeat_at = ?, lease_expires_at = ?, updated_at = ? WHERE id = ? AND status = 'running' AND lease_owner IS ? AND lease_token IS ?",
       )
-      .run(now.toISOString(), leaseExpiresAt, now.toISOString(), taskId);
+      .run(now.toISOString(), leaseExpiresAt, now.toISOString(), taskId, agentId, leaseToken);
+    if (result.changes === 0) {
+      return this.addEvent({
+        type: "task.heartbeat_ignored",
+        taskId,
+        agentId,
+        payload: { status: "running", reason: "lease changed before heartbeat update" },
+      });
+    }
 
     return this.addEvent({
       type: "task.heartbeat",
@@ -590,6 +634,7 @@ export class TaskStore {
       error?: string | null;
       patch?: Partial<Task>;
       metadata?: Metadata;
+      expectedLease?: { owner: string | null; token: string | null };
     } = {},
   ): number {
     const task = this.getTaskOrThrow(taskId);
@@ -613,11 +658,14 @@ export class TaskStore {
             retry_count = ?,
             max_retries = ?,
             lease_owner = ?,
+            lease_token = ?,
             lease_expires_at = ?,
             heartbeat_at = ?,
             main_ack_at = ?,
             updated_at = ?
         WHERE id = ? AND status = ?
+          AND (? = 0 OR lease_owner IS ?)
+          AND (? = 0 OR lease_token IS ?)
       `)
       .run(
         nextStatus,
@@ -628,12 +676,17 @@ export class TaskStore {
         retryCount,
         patch.maxRetries ?? task.maxRetries,
         terminal ? null : (patch.leaseOwner ?? task.leaseOwner),
+        terminal ? null : (patch.leaseToken ?? task.leaseToken),
         terminal ? null : (patch.leaseExpiresAt ?? task.leaseExpiresAt),
         patch.heartbeatAt ?? task.heartbeatAt,
         patch.mainAckAt ?? task.mainAckAt,
         now,
         taskId,
         task.status,
+        options.expectedLease ? 1 : 0,
+        options.expectedLease?.owner ?? null,
+        options.expectedLease ? 1 : 0,
+        options.expectedLease?.token ?? null,
       );
     if (result.changes === 0) {
       throw new TaskTransitionConflictError(`Task transition conflict: ${taskId} expected ${task.status}`);
@@ -649,31 +702,57 @@ export class TaskStore {
     });
   }
 
-  finishTask(taskId: string, { result, agentId }: { result: string; agentId?: string | null }): number {
-    this.completeQueueItem(taskId, "done");
+  finishTask(taskId: string, {
+    result,
+    agentId,
+    leaseToken = null,
+    bypassLease = false,
+  }: {
+    result: string;
+    agentId?: string | null;
+    leaseToken?: string | null;
+    bypassLease?: boolean;
+  }): number {
+    const task = this.getTaskOrThrow(taskId);
+    this.assertTerminalMutationAllowed(task, { agentId, leaseToken, bypassLease });
     const eventId = this.transitionTask(taskId, "done", {
       agentId,
       result,
       error: null,
       reason: "worker completed",
+      expectedLease: expectedLeaseFor(task, { agentId, leaseToken, bypassLease }),
     });
+    this.completeQueueItem(taskId, "done");
     this.releaseReadyDependents(taskId);
     return eventId;
   }
 
   failTask(
     taskId: string,
-    { error, result, agentId }: { error: string; result?: string | null; agentId?: string | null },
+    {
+      error,
+      result,
+      agentId,
+      leaseToken = null,
+      bypassLease = false,
+    }: {
+      error: string;
+      result?: string | null;
+      agentId?: string | null;
+      leaseToken?: string | null;
+      bypassLease?: boolean;
+    },
   ): number {
     const task = this.getTaskOrThrow(taskId);
+    this.assertTerminalMutationAllowed(task, { agentId, leaseToken, bypassLease });
     const retryCount = task.retryCount + 1;
     const nextStatus: TaskStatus = retryCount > task.maxRetries ? "dead_letter" : "failed";
-    this.completeQueueItem(taskId, nextStatus);
     const eventId = this.transitionTask(taskId, nextStatus, {
       agentId,
       result: result ?? task.result,
       error,
       reason: nextStatus === "dead_letter" ? "max retries exceeded" : "worker failed",
+      expectedLease: expectedLeaseFor(task, { agentId, leaseToken, bypassLease }),
       patch: {
         retryCount,
         metadata: {
@@ -683,11 +762,22 @@ export class TaskStore {
         },
       },
     });
+    this.completeQueueItem(taskId, nextStatus);
     this.releaseReadyDependents(taskId);
     return eventId;
   }
 
-  cancelTask(taskId: string, { reason = "cancelled", agentId = null }: { reason?: string; agentId?: string | null } = {}): number {
+  cancelTask(taskId: string, {
+    reason = "cancelled",
+    agentId = null,
+    leaseToken = null,
+    bypassLease = false,
+  }: {
+    reason?: string;
+    agentId?: string | null;
+    leaseToken?: string | null;
+    bypassLease?: boolean;
+  } = {}): number {
     const task = this.getTaskOrThrow(taskId);
     if (this.isTerminalStatus(task.status)) {
       return this.addEvent({
@@ -697,17 +787,20 @@ export class TaskStore {
         payload: { status: task.status, reason },
       });
     }
-    this.completeQueueItem(taskId, "cancelled");
-    return this.transitionTask(taskId, "cancelled", {
+    this.assertTerminalMutationAllowed(task, { agentId, leaseToken, bypassLease });
+    const eventId = this.transitionTask(taskId, "cancelled", {
       agentId,
       error: reason,
       reason,
+      expectedLease: expectedLeaseFor(task, { agentId, leaseToken, bypassLease }),
       metadata: {
         ...task.metadata,
         cancelledAt: new Date().toISOString(),
         cancelReason: reason,
       },
     });
+    this.completeQueueItem(taskId, "cancelled");
+    return eventId;
   }
 
   releaseReadyDependents(taskId: string): string[] {
@@ -881,7 +974,19 @@ export class TaskStore {
       .run(id, role, status, currentTaskId, now, now, now);
   }
 
-  heartbeatAgent({ id, role, currentTaskId = null }: { id: string; role: string; currentTaskId?: string | null }): void {
+  heartbeatAgent({
+    id,
+    role,
+    currentTaskId = null,
+    leaseToken = null,
+    leaseMs = 30000,
+  }: {
+    id: string;
+    role: string;
+    currentTaskId?: string | null;
+    leaseToken?: string | null;
+    leaseMs?: number;
+  }): void {
     this.upsertAgent({
       id,
       role,
@@ -889,7 +994,7 @@ export class TaskStore {
       currentTaskId,
     });
     if (currentTaskId) {
-      this.heartbeatTask(currentTaskId, id);
+      this.heartbeatTask(currentTaskId, id, { leaseToken, leaseMs });
     }
   }
 
@@ -1211,6 +1316,7 @@ export class TaskStore {
       `Assigned Agent: ${task.assignedAgentId || "(none)"}`,
       `Retry: ${task.retryCount}/${task.maxRetries}`,
       `Lease Owner: ${task.leaseOwner || "(none)"}`,
+      `Lease Token: ${task.leaseToken || "(none)"}`,
       `Lease Expires At: ${task.leaseExpiresAt || "(none)"}`,
       `Heartbeat At: ${task.heartbeatAt || "(none)"}`,
       `Created At: ${task.createdAt}`,
@@ -1248,6 +1354,46 @@ export class TaskStore {
     return TERMINAL_STATUSES.has(status);
   }
 
+  private assertTerminalMutationAllowed(
+    task: Task,
+    {
+      agentId = null,
+      leaseToken = null,
+      bypassLease = false,
+    }: {
+      agentId?: string | null;
+      leaseToken?: string | null;
+      bypassLease?: boolean;
+    },
+  ): void {
+    if (bypassLease || task.status !== "running" || !agentId) return;
+    this.assertLeaseMatches(task, { agentId, leaseToken });
+  }
+
+  private assertLeaseMatches(task: Task, {
+    agentId,
+    leaseToken,
+  }: {
+    agentId: string;
+    leaseToken?: string | null;
+  }): void {
+    if (!this.leaseMatches(task, { agentId, leaseToken })) {
+      throw new TaskTransitionConflictError(`Task lease token mismatch: ${task.id}`);
+    }
+  }
+
+  private leaseMatches(task: Task, {
+    agentId,
+    leaseToken,
+  }: {
+    agentId: string;
+    leaseToken?: string | null;
+  }): boolean {
+    if (task.leaseOwner && task.leaseOwner !== agentId) return false;
+    if (task.leaseToken && task.leaseToken !== leaseToken) return false;
+    return true;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -1267,6 +1413,7 @@ interface TaskRow {
   retry_count: number;
   max_retries: number;
   lease_owner: string | null;
+  lease_token: string | null;
   lease_expires_at: string | null;
   heartbeat_at: string | null;
   main_ack_at: string | null;
@@ -1336,6 +1483,7 @@ function parseTask(row: TaskRow): Task {
     retryCount: row.retry_count,
     maxRetries: row.max_retries,
     leaseOwner: row.lease_owner,
+    leaseToken: row.lease_token,
     leaseExpiresAt: row.lease_expires_at,
     heartbeatAt: row.heartbeat_at,
     mainAckAt: row.main_ack_at,
@@ -1406,6 +1554,22 @@ function queueStatusForTask(task: Task): "done" | "failed" | "cancelled" | "dead
   if (task.status === "cancelled") return "cancelled";
   if (task.status === "dead_letter") return "dead_letter";
   return "failed";
+}
+
+function expectedLeaseFor(
+  task: Task,
+  {
+    agentId = null,
+    leaseToken = null,
+    bypassLease = false,
+  }: {
+    agentId?: string | null;
+    leaseToken?: string | null;
+    bypassLease?: boolean;
+  },
+): { owner: string | null; token: string | null } | undefined {
+  if (bypassLease || task.status !== "running" || !agentId) return undefined;
+  return { owner: agentId, token: leaseToken };
 }
 
 function graphStatusFromTasks(tasks: Task[]): TaskGraph["status"] {

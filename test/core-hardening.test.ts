@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
@@ -54,6 +54,60 @@ const maintenance = await runtime.maintenance({
 assert.ok(maintenance.database);
 assert.ok(maintenance.diagnostics);
 
+const rejectedMemoryTask = runtime.taskStore.createTask({
+  role: "qa-memory",
+  title: "rejected memory candidate",
+  input: "Return an echo-provider result that should be rejected by memory policy.",
+  metadata: {
+    sessionId: "memory-gate",
+  },
+});
+const rejectedMemoryFinished = await runtime.roleAgentManager.runTask(rejectedMemoryTask, {
+  timeoutMs: 10000,
+});
+assert.equal(rejectedMemoryFinished.status, "done");
+const rejectedCandidate = runtime.taskStore.getPendingMemoryCandidates({ limit: 100 })
+  .find((candidate) => candidate.taskId === rejectedMemoryTask.id);
+assert.ok(rejectedCandidate);
+await runtime.maintenance();
+assert.equal(runtime.taskStore.getMemoryCandidate(rejectedCandidate.id)?.status, "rejected");
+const leakedMemory = await runtime.memory.recall("EchoModelProvider", {
+  scope: "memory-gate",
+  limit: 10,
+});
+assert.equal([
+  ...leakedMemory.files,
+  ...leakedMemory.semantic,
+].some((item) => item.content.includes("EchoModelProvider")), false);
+
 await runtime.shutdown();
+
+const plannerFailDataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-fail-"));
+const plannerFailRoleDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-fail-roles-"));
+await mkdir(path.join(plannerFailRoleDir, "planner"), { recursive: true });
+await writeFile(path.join(plannerFailRoleDir, "planner", "agent.md"), [
+  "---",
+  "name: \"planner\"",
+  "role: \"Planner without read permission for failure test.\"",
+  "allowed_tools:",
+  "forbidden_tools:",
+  "capabilities:",
+  "  - planning",
+  "---",
+  "This role intentionally cannot read context.",
+  "",
+].join("\n"), "utf8");
+const plannerFailRuntime = await createRuntime({
+  dataDir: plannerFailDataDir,
+  roleDir: plannerFailRoleDir,
+});
+const plannerFailResponse = await plannerFailRuntime.handleUserMessage("实现一个 planner 失败时不等待依赖任务的测试", {
+  sessionId: "planner-fail",
+  source: "test",
+});
+const blockedDeveloper = plannerFailResponse.subResults?.find((result) => result.role === "developer");
+assert.equal(blockedDeveloper?.status, "blocked");
+assert.ok(plannerFailResponse.subResults?.some((result) => result.role === "planner" && result.status !== "done"));
+await plannerFailRuntime.shutdown();
 
 console.log("core hardening test passed");

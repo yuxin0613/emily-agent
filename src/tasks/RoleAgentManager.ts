@@ -10,11 +10,13 @@ interface RoleState {
   role: string;
   child: ChildProcess | null;
   activeTaskId: string | null;
+  activeLeaseToken: string | null;
   agentId: string;
 }
 
 interface RuntimeEvent {
   taskId: string;
+  leaseToken?: string | null;
   eventId: number | null;
   task: Task | null;
 }
@@ -97,6 +99,7 @@ export class RoleAgentManager extends EventEmitter {
     for (const roleState of this.roles.values()) {
       if (roleState.activeTaskId !== taskId) continue;
       roleState.activeTaskId = null;
+      roleState.activeLeaseToken = null;
       if (roleState.child && !roleState.child.killed) {
         roleState.child.send?.({ type: "task.cancel", taskId, reason });
         roleState.child.disconnect();
@@ -228,6 +231,7 @@ export class RoleAgentManager extends EventEmitter {
         role,
         child: null,
         activeTaskId: null,
+        activeLeaseToken: null,
         agentId: `${role}-${process.pid}`,
       });
     }
@@ -243,6 +247,7 @@ export class RoleAgentManager extends EventEmitter {
 
     const child = this.ensureWorker(roleState);
     roleState.activeTaskId = task.id;
+    roleState.activeLeaseToken = task.leaseToken;
     this.taskStore.upsertAgent({
       id: roleState.agentId,
       role: roleState.role,
@@ -252,6 +257,7 @@ export class RoleAgentManager extends EventEmitter {
 
     if (!child.connected || !child.send) {
       roleState.activeTaskId = null;
+      roleState.activeLeaseToken = null;
       this.recoverTask(task, "worker IPC send failed").then(() => {
         this.drainAllRoles();
       }).catch((error) => this.emit("error", error));
@@ -266,9 +272,11 @@ export class RoleAgentManager extends EventEmitter {
         agentId: roleState.agentId,
         dataDir: this.dataDir,
         leaseMs: this.leaseMs,
+        leaseToken: task.leaseToken,
       });
     } catch (error) {
       roleState.activeTaskId = null;
+      roleState.activeLeaseToken = null;
       this.recoverTask(task, `worker IPC send threw: ${error instanceof Error ? error.message : String(error)}`).then(() => {
         this.drainAllRoles();
       }).catch((innerError) => this.emit("error", innerError));
@@ -321,7 +329,7 @@ export class RoleAgentManager extends EventEmitter {
 
   async handleWorkerMessage(roleState: RoleState, message: unknown): Promise<void> {
     if (!message || typeof message !== "object") return;
-    const payload = message as { type?: string; taskId?: string; eventId?: number };
+    const payload = message as { type?: string; taskId?: string; eventId?: number; leaseToken?: string | null };
 
     if (payload.type === "task.changed" && payload.taskId) {
       await this.taskStore.writeTaskMarkdown(payload.taskId);
@@ -330,8 +338,10 @@ export class RoleAgentManager extends EventEmitter {
 
     if (payload.type === "task.finished" && payload.taskId) {
       const task = this.taskStore.getTask(payload.taskId);
-      if (roleState.activeTaskId === payload.taskId) {
+      const sameActiveLease = roleState.activeLeaseToken ? payload.leaseToken === roleState.activeLeaseToken : true;
+      if (roleState.activeTaskId === payload.taskId && sameActiveLease) {
         roleState.activeTaskId = null;
+        roleState.activeLeaseToken = null;
         this.taskStore.upsertAgent({
           id: roleState.agentId,
           role: roleState.role,
@@ -351,6 +361,8 @@ export class RoleAgentManager extends EventEmitter {
         id: roleState.agentId,
         role: roleState.role,
         currentTaskId: roleState.activeTaskId,
+        leaseToken: payload.leaseToken ?? null,
+        leaseMs: this.leaseMs,
       });
       if (roleState.activeTaskId) {
         this.emitTaskEvent("agent.heartbeat", roleState.activeTaskId, null);
@@ -362,8 +374,10 @@ export class RoleAgentManager extends EventEmitter {
     if (this.shuttingDown) return;
 
     const activeTaskId = roleState.activeTaskId;
+    const activeLeaseToken = roleState.activeLeaseToken;
     roleState.child = null;
     roleState.activeTaskId = null;
+    roleState.activeLeaseToken = null;
 
     this.taskStore.upsertAgent({
       id: roleState.agentId,
@@ -373,7 +387,7 @@ export class RoleAgentManager extends EventEmitter {
 
     if (activeTaskId) {
       const task = this.taskStore.getTask(activeTaskId);
-      if (task && task.status === "running") {
+      if (task && task.status === "running" && (!task.leaseToken || task.leaseToken === activeLeaseToken)) {
         await this.recoverTask(task, `worker exited before completion: code=${code ?? "null"} signal=${signal ?? "null"}`);
       }
     }
@@ -388,6 +402,7 @@ export class RoleAgentManager extends EventEmitter {
       const eventId = this.taskStore.finishTask(task.id, {
         result: task.result || "",
         agentId: task.assignedAgentId || undefined,
+        bypassLease: true,
       });
       await this.taskStore.writeTaskMarkdown(task.id);
       this.emitTaskEvent("task.finished", task.id, eventId);
@@ -398,6 +413,7 @@ export class RoleAgentManager extends EventEmitter {
       this.taskStore.failTask(task.id, {
         error: decision.reason,
         agentId: task.assignedAgentId || undefined,
+        bypassLease: true,
       });
       const latest = this.taskStore.getTask(task.id);
       if (latest && latest.status === "failed") {
@@ -410,6 +426,7 @@ export class RoleAgentManager extends EventEmitter {
       const eventId = this.taskStore.failTask(task.id, {
         error: decision.reason,
         agentId: task.assignedAgentId || undefined,
+        bypassLease: true,
       });
       await this.taskStore.writeTaskMarkdown(task.id);
       this.emitTaskEvent("task.finished", task.id, eventId);

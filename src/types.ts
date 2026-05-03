@@ -46,6 +46,7 @@ export interface Task {
   retryCount: number;
   maxRetries: number;
   leaseOwner: string | null;
+  leaseToken: string | null;
   leaseExpiresAt: string | null;
   heartbeatAt: string | null;
   mainAckAt: string | null;
@@ -138,6 +139,7 @@ export type RuntimeEventType =
   | "task.running"
   | "task.heartbeat"
   | "task.heartbeat_ignored"
+  | "task.stale_worker_ignored"
   | "task.done"
   | "task.failed"
   | "task.cancelled"

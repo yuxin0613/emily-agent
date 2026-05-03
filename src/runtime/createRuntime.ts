@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
 import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
@@ -20,6 +21,7 @@ export async function createRuntime(options: {
   defaultProviderId?: string;
   providerFallbackMode?: ProviderFallbackMode;
   mainProviderId?: string;
+  workerPath?: string;
 } = {}) {
   const dataDir = options.dataDir || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
@@ -65,7 +67,7 @@ export async function createRuntime(options: {
   const roleAgentManager = new RoleAgentManager({
     dataDir,
     taskStore,
-    workerPath: path.join(process.cwd(), "src", "workers", "subagentWorker.ts"),
+    workerPath: options.workerPath || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "workers", "subagentWorker.ts"),
     roleDir,
   });
   await roleAgentManager.start();

@@ -52,27 +52,6 @@ export class SubAgent {
       jsonWarnings: result.jsonWarnings,
     };
 
-    await this.memory.remember({
-      scope: sessionId,
-      kind: "subagent:result",
-      content,
-      metadata: {
-        source: this.name,
-        capabilities: this.capabilities,
-        providerId: provider.id,
-        model: provider.model,
-        latencyMs: provider.latencyMs,
-        attempts: provider.attempts,
-        finishReason: provider.finishReason,
-        rawProvider: provider.rawProvider,
-        usage: provider.usage,
-        costUsd: provider.costUsd,
-        usageRecordId: provider.usageRecordId,
-        jsonFormat: provider.jsonFormat,
-        jsonWarnings: provider.jsonWarnings,
-      },
-    });
-
     return {
       agent: this.name,
       role: this.role,

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, appendFile, open, rename, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { MemoryRecord, MemoryRecallResult, Metadata } from "../types.ts";
@@ -152,12 +152,14 @@ class VectorMemoryLayer {
   filePath: string;
   compressor: VectorCompressor;
   maxItems: number;
+  lockPath: string;
   items: Array<{ record: MemoryRecord; vector: CompressedVector; contentHash: string; updatedAt: string; hits: number }>;
 
   constructor({ filePath, compressor, maxItems }: { filePath: string; compressor: VectorCompressor; maxItems: number }) {
     this.filePath = filePath;
     this.compressor = compressor;
     this.maxItems = maxItems;
+    this.lockPath = `${filePath}.lock`;
     this.items = [];
   }
 
@@ -173,49 +175,62 @@ class VectorMemoryLayer {
   }
 
   async add(record: MemoryRecord): Promise<void> {
-    const contentHash = memoryHash(record);
-    const existing = this.items.find((item) => item.contentHash === contentHash);
-    if (existing) {
-      existing.record = mergeMemoryRecord(existing.record, record);
-      existing.updatedAt = new Date().toISOString();
-      await this.save();
-      return;
-    }
-    this.items.push({
-      record,
-      vector: this.compressor.compress(this.compressor.embed(record.content)),
-      contentHash,
-      updatedAt: new Date().toISOString(),
-      hits: 0,
+    await withFileLock(this.lockPath, async () => {
+      await this.load();
+      const contentHash = memoryHash(record);
+      const existing = this.items.find((item) => item.contentHash === contentHash);
+      if (existing) {
+        existing.record = mergeMemoryRecord(existing.record, record);
+        existing.updatedAt = new Date().toISOString();
+        await this.saveUnlocked();
+        return;
+      }
+      this.items.push({
+        record,
+        vector: this.compressor.compress(this.compressor.embed(record.content)),
+        contentHash,
+        updatedAt: new Date().toISOString(),
+        hits: 0,
+      });
+      await this.compactUnlocked({ maxItems: this.maxItems });
     });
-    await this.compact({ maxItems: this.maxItems });
   }
 
   async search(query: string, { scope, limit }: { scope: string; limit: number }): Promise<Array<MemoryRecord & { score: number }>> {
-    const queryEmbedding = this.compressor.embed(query);
-    const scored = this.items
-      .filter((item) => item.record.scope === scope)
-      .map((item) => ({
-        item,
-        ...item.record,
-        score: blendedMemoryScore({
-          semantic: this.compressor.similarity(queryEmbedding, item.vector),
-          lexical: lexicalScore(tokenize(query), tokenize(item.record.content)),
-          record: item.record,
-          hits: item.hits,
-        }),
-      }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit);
-    for (const result of scored) {
-      result.item.hits += 1;
-      result.item.updatedAt = new Date().toISOString();
-    }
-    if (scored.length) await this.save();
-    return scored.map(({ item: _item, ...record }) => record);
+    return withFileLock(this.lockPath, async () => {
+      await this.load();
+      const queryEmbedding = this.compressor.embed(query);
+      const scored = this.items
+        .filter((item) => item.record.scope === scope)
+        .map((item) => ({
+          item,
+          ...item.record,
+          score: blendedMemoryScore({
+            semantic: this.compressor.similarity(queryEmbedding, item.vector),
+            lexical: lexicalScore(tokenize(query), tokenize(item.record.content)),
+            record: item.record,
+            hits: item.hits,
+          }),
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+      for (const result of scored) {
+        result.item.hits += 1;
+        result.item.updatedAt = new Date().toISOString();
+      }
+      if (scored.length) await this.saveUnlocked();
+      return scored.map(({ item: _item, ...record }) => record);
+    });
   }
 
   async compact({ maxItems }: { maxItems: number }): Promise<{ before: number; after: number; removed: number; algorithm: string }> {
+    return withFileLock(this.lockPath, async () => {
+      await this.load();
+      return this.compactUnlocked({ maxItems });
+    });
+  }
+
+  private async compactUnlocked({ maxItems }: { maxItems: number }): Promise<{ before: number; after: number; removed: number; algorithm: string }> {
     const before = this.items.length;
     const byHash = new Map<string, VectorMemoryLayer["items"][number]>();
     for (const item of this.items) {
@@ -225,7 +240,7 @@ class VectorMemoryLayer {
     this.items = [...byHash.values()]
       .sort((a, b) => memoryRetentionScore(b) - memoryRetentionScore(a))
       .slice(0, maxItems);
-    await this.save();
+    await this.saveUnlocked();
     return {
       before,
       after: this.items.length,
@@ -234,12 +249,19 @@ class VectorMemoryLayer {
     };
   }
 
-  private async save(): Promise<void> {
-    await writeFile(this.filePath, JSON.stringify({
-      version: 2,
-      algorithm: this.compressor.name,
-      items: this.items,
-    }, null, 2), "utf8");
+  private async saveUnlocked(): Promise<void> {
+    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(tmpPath, JSON.stringify({
+        version: 2,
+        algorithm: this.compressor.name,
+        items: this.items,
+      }, null, 2), "utf8");
+      await rename(tmpPath, this.filePath);
+    } catch (error) {
+      await unlink(tmpPath).catch(() => undefined);
+      throw error;
+    }
   }
 }
 
@@ -362,4 +384,53 @@ function memoryRetentionScore(item: VectorMemoryLayer["items"][number]): number 
 
 function normalizeText(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+  const staleLockMs = 10000;
+  const deadline = Date.now() + staleLockMs;
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+
+  while (!handle) {
+    try {
+      const acquired = await open(lockPath, "wx");
+      try {
+        await acquired.writeFile(JSON.stringify({
+          pid: process.pid,
+          createdAt: new Date().toISOString(),
+        }));
+        handle = acquired;
+      } catch (error) {
+        await acquired.close().catch(() => undefined);
+        await unlink(lockPath).catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+      const current = await stat(lockPath).catch(() => null);
+      if (current && Date.now() - current.mtimeMs > staleLockMs) {
+        await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for memory vector lock: ${lockPath}`);
+      }
+      await sleep(25);
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await handle.close().catch(() => undefined);
+    await unlink(lockPath).catch(() => undefined);
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

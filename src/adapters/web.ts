@@ -379,9 +379,12 @@ async function load() {
     ['Tokens', data.totals.totalTokens],
     ['Cost USD', '$' + data.totals.costUsd.toFixed(6)]
   ];
-  document.getElementById('metrics').innerHTML = metrics.map(([label, value]) => '<div class="metric"><div class="label">' + label + '</div><div class="value">' + value + '</div></div>').join('');
-  document.getElementById('providers').innerHTML = data.providers.map((item) => '<tr><td>' + item.providerId + '</td><td>' + item.model + '</td><td>' + item.calls + '</td><td>' + item.totalTokens + '</td><td>$' + item.costUsd.toFixed(6) + '</td><td>' + item.avgLatencyMs + 'ms</td><td>' + item.blocked + '</td></tr>').join('');
-  document.getElementById('recent').innerHTML = data.recent.map((item) => '<tr><td>' + item.createdAt + '</td><td>' + item.providerId + '</td><td>' + item.agent + '</td><td>' + item.status + '</td><td>' + (item.errorCode || '') + '</td><td>$' + item.costUsd.toFixed(6) + '</td></tr>').join('');
+  document.getElementById('metrics').innerHTML = metrics.map(([label, value]) => '<div class="metric"><div class="label">' + escapeHtml(label) + '</div><div class="value">' + escapeHtml(value) + '</div></div>').join('');
+  document.getElementById('providers').innerHTML = data.providers.map((item) => '<tr><td>' + escapeHtml(item.providerId) + '</td><td>' + escapeHtml(item.model) + '</td><td>' + escapeHtml(item.calls) + '</td><td>' + escapeHtml(item.totalTokens) + '</td><td>$' + escapeHtml(Number(item.costUsd || 0).toFixed(6)) + '</td><td>' + escapeHtml(item.avgLatencyMs) + 'ms</td><td>' + escapeHtml(item.blocked) + '</td></tr>').join('');
+  document.getElementById('recent').innerHTML = data.recent.map((item) => '<tr><td>' + escapeHtml(item.createdAt) + '</td><td>' + escapeHtml(item.providerId) + '</td><td>' + escapeHtml(item.agent) + '</td><td>' + escapeHtml(item.status) + '</td><td>' + escapeHtml(item.errorCode || '') + '</td><td>$' + escapeHtml(Number(item.costUsd || 0).toFixed(6)) + '</td></tr>').join('');
+}
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 }
 load();
 setInterval(load, 5000);

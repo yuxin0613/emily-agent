@@ -234,6 +234,25 @@ export class MainAgent {
 
     const finishedPlanner = await this.roleAgentManager.runTask(plannerTask);
     results.push(this.formatTaskResult("planner", finishedPlanner));
+    if (finishedPlanner.status !== "done") {
+      for (const role of selectedAgents.filter((agentRole) => agentRole !== "planner")) {
+        const task = taskGraph[role];
+        if (!task) continue;
+        this.taskStore.transitionTask(task.id, "blocked", {
+          reason: "planner did not complete",
+          error: `Skipped because planner finished with status ${finishedPlanner.status}.`,
+          metadata: {
+            ...task.metadata,
+            blockedByTaskId: finishedPlanner.id,
+            blockedReason: "planner did not complete",
+          },
+        });
+        await this.taskStore.writeTaskMarkdown(task.id);
+        results.push(this.formatTaskResult(role, this.taskStore.getTaskOrThrow(task.id)));
+      }
+      this.taskStore.refreshTaskGraphStatuses();
+      return { subResults: results };
+    }
 
     for (const role of selectedAgents.filter((agentRole) => agentRole !== "planner")) {
       const task = taskGraph[role];

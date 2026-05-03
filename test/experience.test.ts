@@ -147,9 +147,11 @@ function createDoneTask(role: string, title: string, input: string, result: stri
   });
   taskStore.enqueueTask(task.id);
   taskStore.claimTask(task.id, `${role}-test`, { leaseMs: 1000 });
+  const leaseToken = taskStore.getTaskOrThrow(task.id).leaseToken;
   taskStore.finishTask(task.id, {
     result,
     agentId: `${role}-test`,
+    leaseToken,
   });
   return taskStore.getTaskOrThrow(task.id);
 }

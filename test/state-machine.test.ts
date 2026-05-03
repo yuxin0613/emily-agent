@@ -17,6 +17,7 @@ const task = store.createTask({
 
 store.enqueueTask(task.id);
 store.claimTask(task.id, "developer-test", { leaseMs: 1000 });
+const taskLeaseToken = store.getTaskOrThrow(task.id).leaseToken;
 
 assert.throws(() => {
   store.transitionTask(task.id, "queued", {
@@ -28,6 +29,9 @@ const stale = store.getTaskOrThrow(task.id);
 store.transitionTask(task.id, "done", {
   result: "completed once",
   agentId: "developer-test",
+  patch: {
+    leaseToken: taskLeaseToken,
+  },
 });
 assert.throws(() => {
   store.transitionTask(stale.id, "failed", {
@@ -61,18 +65,22 @@ store.enqueueTask(graph.b.id);
 assert.equal(store.getTaskOrThrow(graph.b.id).status, "pending");
 store.enqueueTask(graph.a.id);
 store.claimTask(graph.a.id, "planner-test", { leaseMs: 1000 });
+const graphALeaseToken = store.getTaskOrThrow(graph.a.id).leaseToken;
 store.finishTask(graph.a.id, {
   result: "a done",
   agentId: "planner-test",
+  leaseToken: graphALeaseToken,
 });
 assert.equal(store.getTaskOrThrow(graph.b.id).status, "queued");
 const graphId = String(graph.a.metadata.graphId);
 const runningGraphs = store.refreshTaskGraphStatuses();
 assert.ok(runningGraphs.some((item) => item.id === graphId && item.status === "running"));
 store.claimTask(graph.b.id, "developer-test", { leaseMs: 1000 });
+const graphBLeaseToken = store.getTaskOrThrow(graph.b.id).leaseToken;
 store.finishTask(graph.b.id, {
   result: "b done",
   agentId: "developer-test",
+  leaseToken: graphBLeaseToken,
 });
 const completedGraphs = store.refreshTaskGraphStatuses();
 assert.ok(completedGraphs.some((item) => item.id === graphId && item.status === "done"));
@@ -87,9 +95,11 @@ const retryTask = store.createTask({
 
 store.enqueueTask(retryTask.id);
 store.claimTask(retryTask.id, "developer-test", { leaseMs: 1000 });
+const retryFirstLeaseToken = store.getTaskOrThrow(retryTask.id).leaseToken;
 store.failTask(retryTask.id, {
   error: "first failure",
   agentId: "developer-test",
+  leaseToken: retryFirstLeaseToken,
 });
 
 const failed = store.getTaskOrThrow(retryTask.id);
@@ -98,9 +108,19 @@ assert.equal(failed.retryCount, 1);
 
 store.enqueueTask(retryTask.id);
 store.claimTask(retryTask.id, "developer-test", { leaseMs: 1000 });
+const retrySecondLeaseToken = store.getTaskOrThrow(retryTask.id).leaseToken;
+assert.notEqual(retryFirstLeaseToken, retrySecondLeaseToken);
+assert.throws(() => {
+  store.finishTask(retryTask.id, {
+    result: "late stale result",
+    agentId: "developer-test",
+    leaseToken: retryFirstLeaseToken,
+  });
+}, /lease token mismatch/);
 store.failTask(retryTask.id, {
   error: "second failure",
   agentId: "developer-test",
+  leaseToken: retrySecondLeaseToken,
 });
 
 const deadLetter = store.getTaskOrThrow(retryTask.id);
@@ -122,9 +142,11 @@ const staleRunTask = store.createTask({
 });
 store.enqueueTask(staleRunTask.id);
 store.claimTask(staleRunTask.id, "developer-test", { leaseMs: 1000 });
+const staleRunLeaseToken = store.getTaskOrThrow(staleRunTask.id).leaseToken;
 store.finishTask(staleRunTask.id, {
   result: "run task done",
   agentId: "developer-test",
+  leaseToken: staleRunLeaseToken,
 });
 const recoveredRuns = store.recoverStaleRuns({ olderThanMs: 0 });
 assert.ok(recoveredRuns.some((run) => run.id === staleRun.id && run.status === "done"));

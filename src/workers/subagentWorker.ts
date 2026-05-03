@@ -4,6 +4,7 @@ import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
+import { IllegalTaskTransitionError, TaskTransitionConflictError } from "../tasks/errors.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
 import { ToolGateway } from "../tools/ToolGateway.ts";
@@ -16,6 +17,7 @@ interface StartMessage {
   agentId: string;
   dataDir: string;
   leaseMs?: number;
+  leaseToken?: string | null;
 }
 
 const cancelledTasks = new Map<string, string>();
@@ -32,7 +34,7 @@ process.on("message", (message: unknown) => {
   });
 });
 
-async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: StartMessage): Promise<void> {
+async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000, leaseToken = null }: StartMessage): Promise<void> {
   const taskStore = await TaskStore.create({ dataDir });
   const memory = await MemorySystem.create({ dataDir });
   const providerUsageStore = await ProviderUsageStore.create({ dataDir });
@@ -45,13 +47,14 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: Star
       taskId,
       role,
       agentId,
+      leaseToken,
     });
   }, Math.max(1000, Math.floor(leaseMs / 3)));
 
   try {
-    eventId = taskStore.claimTask(taskId, agentId, { leaseMs });
+    eventId = taskStore.claimTask(taskId, agentId, { leaseMs, leaseToken: leaseToken || undefined });
     await taskStore.writeTaskMarkdown(taskId);
-    notify("task.changed", { taskId, eventId });
+    notify("task.changed", { taskId, eventId, leaseToken });
 
     const task = taskStore.getTaskOrThrow(taskId);
     throwIfCancelled(taskId);
@@ -66,39 +69,43 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: Star
     eventId = taskStore.finishTask(taskId, {
       result: serializeTaskResult(limitTaskResult(result, readNumber(task.metadata.maxResultChars, 12000))),
       agentId,
+      leaseToken,
     });
   } catch (error) {
     const message = error instanceof Error ? error.stack || error.message : String(error);
     if (error instanceof TaskCancelledError) {
-      eventId = taskStore.cancelTask(taskId, {
+      eventId = safeTaskMutation(taskStore, taskId, "task.cancelled", () => taskStore.cancelTask(taskId, {
         reason: error.message,
         agentId,
-      });
+        leaseToken,
+      }));
     } else {
-      eventId = taskStore.failTask(taskId, {
+      eventId = safeTaskMutation(taskStore, taskId, "task.failed", () => taskStore.failTask(taskId, {
         error: message,
         result: serializeTaskResult(createTaskResult({
           status: "failed",
           summary: `任务执行失败：${error instanceof Error ? error.message : String(error)}`,
         })),
         agentId,
-      });
+        leaseToken,
+      }));
     }
   } finally {
     clearInterval(heartbeat);
 
     const finalTask = taskStore.getTask(taskId);
-    if (finalTask?.status === "running") {
-      eventId = taskStore.failTask(taskId, {
+    if (finalTask?.status === "running" && (!finalTask.leaseToken || finalTask.leaseToken === leaseToken)) {
+      eventId = safeTaskMutation(taskStore, taskId, "task.failed", () => taskStore.failTask(taskId, {
         error: "Worker reached finally without a terminal status.",
         result: "任务没有产生明确结果，已由 worker finally 兜底标记失败。",
         agentId,
-      });
+        leaseToken,
+      }));
     }
 
     await taskStore.writeTaskMarkdown(taskId);
-    notify("task.changed", { taskId, eventId });
-    notify("task.finished", { taskId, eventId });
+    notify("task.changed", { taskId, eventId, leaseToken });
+    notify("task.finished", { taskId, eventId, leaseToken });
     providerUsageStore.close();
     taskStore.close();
   }
@@ -269,7 +276,7 @@ async function inspectTask({ task, taskStore }: { task: Task; taskStore: TaskSto
   });
 }
 
-function notify(type: string, payload: { taskId: string; eventId: number | null }): void {
+function notify(type: string, payload: { taskId: string; eventId: number | null; leaseToken?: string | null }): void {
   process.send?.({
     type,
     ...payload,
@@ -283,6 +290,24 @@ function isStartMessage(message: unknown): message is StartMessage {
       && (message as StartMessage).type === "task.start"
       && typeof (message as StartMessage).taskId === "string",
   );
+}
+
+function safeTaskMutation(taskStore: TaskStore, taskId: string, type: string, mutate: () => number): number | null {
+  try {
+    return mutate();
+  } catch (error) {
+    if (error instanceof TaskTransitionConflictError || error instanceof IllegalTaskTransitionError) {
+      return taskStore.addEvent({
+        type: "task.stale_worker_ignored",
+        taskId,
+        payload: {
+          attempted: type,
+          reason: error.message,
+        },
+      });
+    }
+    throw error;
+  }
 }
 
 function isCancelMessage(message: unknown): message is { type: "task.cancel"; taskId: string; reason?: string } {
