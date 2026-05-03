@@ -22,6 +22,7 @@ assert.ok(rows.some((row) => row.namespace === "task" && row.version === 2));
 assert.ok(rows.some((row) => row.namespace === "task" && row.version === 3));
 assert.ok(rows.some((row) => row.namespace === "task" && row.version === 4));
 assert.ok(rows.some((row) => row.namespace === "task" && row.version === 5));
+assert.ok(rows.some((row) => row.namespace === "task" && row.version === 6));
 assert.ok(rows.some((row) => row.namespace === "experience" && row.version === 1));
 assert.ok(rows.some((row) => row.namespace === "experience" && row.version === 2));
 assert.ok(rows.some((row) => row.namespace === "experience" && row.version === 3));

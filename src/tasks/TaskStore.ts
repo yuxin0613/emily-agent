@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Session, SessionStatus, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
+import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Session, SessionMessage, SessionMessageRole, SessionStatus, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "./errors.ts";
 import { RuntimeEventFactory } from "../events/RuntimeEventFactory.ts";
@@ -40,6 +40,15 @@ interface CreateSessionInput {
   id?: string;
   title?: string;
   source?: string;
+  metadata?: Metadata;
+}
+
+interface AddSessionMessageInput {
+  sessionId: string;
+  runId?: string | null;
+  role: SessionMessageRole;
+  content: string;
+  delegatedTo?: string[];
   metadata?: Metadata;
 }
 
@@ -233,6 +242,27 @@ export class TaskStore {
 
             CREATE INDEX IF NOT EXISTS idx_sessions_status_updated ON sessions(status, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_sessions_delete_after ON sessions(status, delete_after);
+          `);
+        },
+      },
+      {
+        version: 6,
+        name: "create_session_messages",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS session_messages (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              run_id TEXT,
+              role TEXT NOT NULL,
+              content TEXT NOT NULL,
+              delegated_to TEXT NOT NULL,
+              metadata TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_session_messages_session ON session_messages(session_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_session_messages_run ON session_messages(run_id);
           `);
         },
       },
@@ -587,6 +617,74 @@ export class TaskStore {
       "Recent inputs:",
       recentInputs,
     ].join("\n");
+  }
+
+  addSessionMessage({
+    sessionId,
+    runId = null,
+    role,
+    content,
+    delegatedTo = [],
+    metadata = {},
+  }: AddSessionMessageInput): SessionMessage {
+    this.ensureSession({
+      id: sessionId,
+      title: role === "user" ? titleFromUserInput(content) : "New session",
+      source: typeof metadata.source === "string" ? metadata.source : "runtime",
+    });
+    const now = new Date().toISOString();
+    const message: SessionMessage = {
+      id: randomUUID(),
+      sessionId,
+      runId,
+      role,
+      content,
+      delegatedTo,
+      metadata,
+      createdAt: now,
+    };
+    this.db
+      .prepare(`
+        INSERT INTO session_messages (
+          id, session_id, run_id, role, content, delegated_to, metadata, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        message.id,
+        message.sessionId,
+        message.runId,
+        message.role,
+        message.content,
+        JSON.stringify(message.delegatedTo),
+        JSON.stringify(message.metadata),
+        message.createdAt,
+      );
+    this.addEvent({
+      type: "session.message.created",
+      payload: {
+        sessionId,
+        runId: runId || "",
+        messageId: message.id,
+        role,
+      },
+    });
+    return message;
+  }
+
+  listSessionMessages({ sessionId, limit = 100 }: { sessionId: string; limit?: number }): SessionMessage[] {
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM (
+          SELECT rowid, * FROM session_messages
+          WHERE session_id = ?
+          ORDER BY created_at DESC, rowid DESC
+          LIMIT ?
+        )
+        ORDER BY created_at ASC, rowid ASC
+      `)
+      .all(sessionId, limit) as SessionMessageRow[];
+    return rows.map(parseSessionMessage);
   }
 
   createRun({ sessionId, source, userInput }: CreateRunInput): Run {
@@ -1759,6 +1857,17 @@ interface SessionRow {
   metadata: string;
 }
 
+interface SessionMessageRow {
+  id: string;
+  session_id: string;
+  run_id: string | null;
+  role: SessionMessageRole;
+  content: string;
+  delegated_to: string;
+  metadata: string;
+  created_at: string;
+}
+
 interface TaskGraphRow {
   id: string;
   run_id: string | null;
@@ -1858,6 +1967,19 @@ function parseSession(row: SessionRow): Session {
     deleteAfter: row.delete_after,
     archiveSummary: row.archive_summary,
     metadata: JSON.parse(row.metadata || "{}") as Metadata,
+  };
+}
+
+function parseSessionMessage(row: SessionMessageRow): SessionMessage {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    runId: row.run_id,
+    role: row.role,
+    content: row.content,
+    delegatedTo: JSON.parse(row.delegated_to || "[]") as string[],
+    metadata: JSON.parse(row.metadata || "{}") as Metadata,
+    createdAt: row.created_at,
   };
 }
 

@@ -230,8 +230,34 @@ export async function createRuntime(options: {
     trashSession(sessionId: string, options: Parameters<TaskStore["trashSession"]>[1] = {}) {
       return taskStore.trashSession(sessionId, options);
     },
-    async handleUserMessage(input: string, context = {}) {
-      return mainAgent.handleUserMessage(input, context);
+    listSessionMessages(options: Parameters<TaskStore["listSessionMessages"]>[0]) {
+      return taskStore.listSessionMessages(options);
+    },
+    async handleUserMessage(input: string, context: { sessionId?: string; source?: string } = {}) {
+      const sessionId = context.sessionId || "default";
+      const source = context.source || "unknown";
+      const normalizedInput = String(input || "").trim();
+      if (normalizedInput) {
+        taskStore.addSessionMessage({
+          sessionId,
+          role: "user",
+          content: normalizedInput,
+          metadata: { source },
+        });
+      }
+      const result = await mainAgent.handleUserMessage(input, context);
+      taskStore.addSessionMessage({
+        sessionId,
+        runId: typeof result.runId === "string" ? result.runId : null,
+        role: result.content.startsWith("这次运行没有完成") ? "error" : "assistant",
+        content: result.content,
+        delegatedTo: Array.isArray(result.delegatedTo) ? result.delegatedTo : [],
+        metadata: {
+          source: "main-agent",
+          needsUserInput: Boolean(result.needsUserInput),
+        },
+      });
+      return result;
     },
     buildDailyExperiences(options = {}) {
       return experienceBuilder.buildDailyExperiences(options);

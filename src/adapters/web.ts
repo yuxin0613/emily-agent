@@ -54,6 +54,7 @@ export async function startWebServer({
     clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
     restoreSession: (sessionId: string) => unknown;
     trashSession: (sessionId: string, options?: { deleteAfterDays?: number; reason?: string }) => unknown;
+    listSessionMessages: (options: { sessionId: string; limit?: number }) => unknown[];
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
@@ -223,6 +224,13 @@ export async function startWebServer({
         }));
       }
 
+      if (request.method === "GET" && url.pathname === "/sessions/messages") {
+        return sendJson(response, 200, runtime.listSessionMessages({
+          sessionId: String(url.searchParams.get("sessionId") || ""),
+          limit: Number(url.searchParams.get("limit") || 100),
+        }));
+      }
+
       if (request.method === "POST" && url.pathname === "/sessions/new") {
         const body = await readJson(request);
         return sendJson(response, 200, runtime.createSession({
@@ -351,7 +359,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {

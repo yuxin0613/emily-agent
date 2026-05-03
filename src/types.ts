@@ -183,6 +183,19 @@ export interface Session {
   metadata: Metadata;
 }
 
+export type SessionMessageRole = "user" | "assistant" | "system" | "error";
+
+export interface SessionMessage {
+  id: string;
+  sessionId: string;
+  runId: string | null;
+  role: SessionMessageRole;
+  content: string;
+  delegatedTo: string[];
+  metadata: Metadata;
+  createdAt: string;
+}
+
 export interface TaskDependency {
   taskId: string;
   dependsOnTaskId: string;
@@ -246,6 +259,7 @@ export type RuntimeEventType =
   | "session.restored"
   | "session.trashed"
   | "session.deleted"
+  | "session.message.created"
   | "task.created"
   | "task.dependency.created"
   | "task.queued"

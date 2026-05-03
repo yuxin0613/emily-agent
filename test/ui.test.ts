@@ -8,6 +8,7 @@ assert.match(html, /id="nav"/);
 assert.match(html, /id="content"/);
 assert.match(html, /Sessions/);
 assert.match(html, /\/sessions\/clear/);
+assert.match(html, /\/sessions\/messages/);
 assert.match(html, /\/sessions\/restore/);
 assert.match(html, /\/skill-candidates\/build/);
 assert.match(html, /\/chat/);

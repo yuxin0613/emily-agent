@@ -27,6 +27,32 @@ assert.equal(touched.runCount, 1);
 assert.equal(touched.title, "Session management");
 assert.ok(touched.lastActiveAt);
 
+taskStore.addSessionMessage({
+  sessionId: session.id,
+  role: "user",
+  content: "第一条 session 内消息",
+});
+taskStore.addSessionMessage({
+  sessionId: session.id,
+  runId: "run-1",
+  role: "assistant",
+  content: "第一条回复",
+  delegatedTo: ["planner"],
+});
+
+const messages = taskStore.listSessionMessages({ sessionId: session.id });
+assert.equal(messages.length, 2);
+assert.equal(messages[0].sessionId, session.id);
+assert.equal(messages[0].content, "第一条 session 内消息");
+assert.equal(messages[1].runId, "run-1");
+assert.deepEqual(messages[1].delegatedTo, ["planner"]);
+
+const other = taskStore.createSession({
+  title: "Other",
+  source: "test",
+});
+assert.equal(taskStore.listSessionMessages({ sessionId: other.id }).length, 0);
+
 const hidden = taskStore.hideSession(session.id, "clear command");
 assert.equal(hidden.status, "hidden");
 assert.ok(hidden.archiveSummary?.includes("Runs: 1"));

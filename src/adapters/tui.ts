@@ -58,6 +58,7 @@ function printHelp(): void {
     "  :diagnostics [repair]         runtime diagnostics",
     "  :maintenance                  run maintenance",
     "  :session <id>                 set chat session",
+    "  :messages                    show current session messages",
     "  :restore-session <id>         restore hidden or trashed session",
     "  :trash-session <id>           move session to trash",
     "  /new                          start a new visible session",
@@ -141,8 +142,11 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     case "session":
       if (!args[0]) throw new Error("session id is required");
-      state.sessionId = args[0];
+      selectSession(runtime, state, args[0]);
       output.write(`\nSession: ${state.sessionId}\n\n`);
+      return;
+    case "messages":
+      printSessionMessages(runtime.listSessionMessages({ sessionId: state.sessionId, limit: numberArg(args[0], 40) }));
       return;
     case "clear":
       if (prefix === "/") {
@@ -231,6 +235,24 @@ function startNewSession(runtime, state, args: string[] = []): void {
   state.sessionId = session.id;
   state.lastRunId = "";
   output.write(`\nNew session: ${session.id}\n\n`);
+}
+
+function selectSession(runtime, state, sessionId: string): void {
+  state.sessionId = sessionId;
+  const messages = runtime.listSessionMessages({ sessionId, limit: 40 });
+  const latest = [...messages].reverse().find((message) => message.runId);
+  state.lastRunId = latest?.runId || "";
+}
+
+function printSessionMessages(messages): void {
+  output.write("\nMessages\n");
+  for (const message of messages) {
+    const who = message.role === "user" ? "You" : "Emily";
+    const run = message.runId ? ` ${message.runId.slice(0, 8)}` : "";
+    output.write(`\n[${who}${run}] ${message.content}\n`);
+  }
+  if (!messages.length) output.write("\n(no messages)\n");
+  output.write("\n");
 }
 
 function clearCurrentSession(runtime, state): void {

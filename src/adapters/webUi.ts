@@ -161,7 +161,7 @@ const views = [
 const state = {
   view: 'dashboard',
   health: null,
-  lastRunId: localStorage.getItem('emily.lastRunId') || '',
+  lastRunId: '',
   sessionId: localStorage.getItem('emily.sessionId') || 'web',
   messages: [],
   events: [],
@@ -300,11 +300,32 @@ async function loadSessions({ includeHidden = false, includeTrashed = false } = 
   return sessions;
 }
 
+async function loadSessionMessages(sessionId = state.sessionId) {
+  if (!sessionId) {
+    state.messages = [];
+    state.lastRunId = '';
+    return [];
+  }
+  const messages = await api.get('/sessions/messages?sessionId=' + encodeURIComponent(sessionId) + '&limit=120');
+  state.messages = messages.map((message) => ({
+    kind: message.role === 'user' ? 'user' : 'agent',
+    content: message.content,
+    runId: message.runId || '',
+    delegatedTo: message.delegatedTo || [],
+    createdAt: message.createdAt
+  }));
+  const latestRun = [...messages].reverse().find((message) => message.runId);
+  state.lastRunId = latestRun ? latestRun.runId : '';
+  return messages;
+}
+
 async function newSession() {
   const created = await api.post('/sessions/new', { title: 'New session', source: 'web' });
   state.sessionId = created.id;
   state.messages = [];
+  state.lastRunId = '';
   localStorage.setItem('emily.sessionId', created.id);
+  localStorage.removeItem('emily.lastRunId');
   await refreshHealth();
   await loadSessions();
   return created;
@@ -314,7 +335,9 @@ async function clearSession() {
   const result = await api.post('/sessions/clear', { sessionId: state.sessionId, reason: 'cleared from web' });
   state.sessionId = result.next.id;
   state.messages = [];
+  state.lastRunId = '';
   localStorage.setItem('emily.sessionId', result.next.id);
+  localStorage.removeItem('emily.lastRunId');
   await refreshHealth();
   await loadSessions();
   return result;
@@ -356,16 +379,18 @@ async function renderDashboard(content) {
 
 async function renderChat(content) {
   await loadSessions();
+  await loadSessionMessages();
   const activeSessions = state.sessions.filter((session) => session.status === 'active');
   const sessionSelect = el('select', { className: 'compact', id: 'session-select' },
     ...activeSessions.map((session) => el('option', { value: session.id }, session.title || session.id))
   );
   sessionSelect.value = state.sessionId;
-  sessionSelect.addEventListener('change', () => {
+  sessionSelect.addEventListener('change', async () => {
     state.sessionId = sessionSelect.value;
-    state.messages = [];
     localStorage.setItem('emily.sessionId', state.sessionId);
-    loadSessions().catch(console.error);
+    await loadSessions();
+    await loadSessionMessages();
+    redraw();
   });
   const log = el('div', { className: 'chat-log stack' });
   const redraw = () => {
@@ -410,9 +435,8 @@ async function renderChat(content) {
       const response = await api.post('/chat', { sessionId: state.sessionId, message });
       if (response.runId) {
         state.lastRunId = response.runId;
-        localStorage.setItem('emily.lastRunId', response.runId);
       }
-      state.messages.push({ kind: 'agent', content: response.content || '', runId: response.runId || '', delegatedTo: response.delegatedTo || [] });
+      await loadSessionMessages();
       redraw();
       await refreshHealth();
     } catch (error) {
