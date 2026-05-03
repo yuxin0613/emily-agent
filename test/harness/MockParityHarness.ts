@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { dispatchGatewayRequest, type GatewayMethod } from "../../src/gateway/GatewayProtocol.ts";
@@ -42,6 +42,48 @@ export async function createMockParityHarness(label = "mock-parity") {
         params,
       });
     },
+    async runWorkerCrashRecovery() {
+      const task = runtime.taskStore.createTask({
+        role: "developer",
+        title: "mock crash recovery",
+        input: "Crash intentionally for mock parity.",
+        metadata: {
+          sessionId: label,
+          forceCrash: true,
+        },
+      });
+      return runtime.roleAgentManager.runTask(task, { timeoutMs: 10000 });
+    },
+    async cancelDelayedWorker() {
+      const task = runtime.taskStore.createTask({
+        role: "developer",
+        title: "mock cancellable task",
+        input: "Delay long enough for cancellation.",
+        metadata: {
+          sessionId: label,
+          forceDelayMs: 500,
+        },
+      });
+      const running = runtime.roleAgentManager.runTask(task, { timeoutMs: 5000 }).catch(() => runtime.taskStore.getTaskOrThrow(task.id));
+      await sleep(50);
+      await runtime.cancelTask(task.id, "mock parity cancel");
+      return running;
+    },
+    createMemoryCandidate(content = "Use agent memory candidate approval to keep durable experience useful, auditable, and scoped to repeated workflows.") {
+      return runtime.taskStore.createMemoryCandidate({
+        runId: null,
+        taskId: null,
+        scope: label,
+        kind: "note",
+        content,
+        createdBy: "mock-parity",
+      });
+    },
+    async writeWorkspaceFile(relativePath: string, content: string) {
+      const target = path.join(process.cwd(), relativePath);
+      await writeFile(target, content, "utf8");
+      return target;
+    },
     async close() {
       await runtime.shutdown();
     },
@@ -59,4 +101,8 @@ export function assertEventSequence(events: TaskEvent[], expected: string[]): vo
 
 export function assertHasEvent(events: TaskEvent[], type: string, predicate: (event: TaskEvent) => boolean = () => true): void {
   assert.ok(events.some((event) => event.type === type && predicate(event)), `Expected event ${type}`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

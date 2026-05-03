@@ -21,6 +21,16 @@ export interface TaskGraphExecutionResult {
   expanded: Task[];
   internal: Task[];
   pause: TaskGraphPause | null;
+  quality: TaskGraphQuality;
+}
+
+export interface TaskGraphQuality {
+  score: number;
+  issues: string[];
+  taskCount: number;
+  failedCount: number;
+  blockedCount: number;
+  dynamicCount: number;
 }
 
 export interface TaskGraphPause {
@@ -42,6 +52,7 @@ export class TaskGraphExecutor {
   roleAgentManager: RoleAgentManager;
   maxParallelTasks: number;
   maxDynamicTasks: number;
+  maxReplanAttempts: number;
   plan: PlanSpec | null;
 
   constructor({
@@ -49,18 +60,21 @@ export class TaskGraphExecutor {
     roleAgentManager,
     maxParallelTasks = 4,
     maxDynamicTasks = 200,
+    maxReplanAttempts = 2,
     plan = null,
   }: {
     taskStore: TaskStore;
     roleAgentManager: RoleAgentManager;
     maxParallelTasks?: number;
     maxDynamicTasks?: number;
+    maxReplanAttempts?: number;
     plan?: PlanSpec | null;
   }) {
     this.taskStore = taskStore;
     this.roleAgentManager = roleAgentManager;
     this.maxParallelTasks = maxParallelTasks;
     this.maxDynamicTasks = maxDynamicTasks;
+    this.maxReplanAttempts = maxReplanAttempts;
     this.plan = plan;
   }
 
@@ -120,6 +134,24 @@ export class TaskGraphExecutor {
         pending.delete(keyFor(tasksByKey, task.id));
         record(task);
         if (pause) continue;
+        const replan = await this.replanTaskIfNeeded(task, tasksByKey);
+        recordInternal(replan.plannerTask);
+        if (replan.pause) {
+          pause = replan.pause;
+          for (const blockedTask of await this.blockRemaining(
+            [...pending].map((key) => tasksByKey[key]).filter(Boolean),
+            `waiting for user input: ${replan.pause.reason}`,
+          )) {
+            pending.delete(keyFor(tasksByKey, blockedTask.id));
+            record(blockedTask);
+          }
+          pending.clear();
+          continue;
+        }
+        for (const replannedTask of replan.created) {
+          pending.add(String(replannedTask.metadata.graphKey));
+          expanded.push(replannedTask);
+        }
         const expansion = await this.expandTaskIfNeeded(task, tasksByKey);
         recordInternal(expansion.plannerTask);
         if (expansion.pause) {
@@ -142,7 +174,18 @@ export class TaskGraphExecutor {
     }
 
     this.taskStore.refreshTaskGraphStatuses();
-    return { completed, blocked, failed, graphId, expanded, internal, pause };
+    const quality = assessGraphQuality({ tasksByKey, completed, blocked, failed, expanded });
+    if (graphId) {
+      this.taskStore.addEvent({
+        type: "task_graph.quality",
+        payload: {
+          graphId,
+          runId: runIdFrom(tasksByKey) || "",
+          ...quality,
+        },
+      });
+    }
+    return { completed, blocked, failed, graphId, expanded, internal, pause, quality };
   }
 
   private async runOne(task: Task): Promise<Task> {
@@ -216,7 +259,18 @@ export class TaskGraphExecutor {
     const maxDepth = readNonNegativeNumber(task.metadata.maxExpansionDepth, 0);
     if (currentDepth >= maxDepth) return emptyExpansion();
     const availableSlots = this.maxDynamicTasks - Object.keys(tasksByKey).length;
-    if (availableSlots <= 0) return emptyExpansion();
+    if (availableSlots <= 0) {
+      this.taskStore.addEvent({
+        type: "task_graph.budget_exhausted",
+        taskId: task.id,
+        payload: {
+          graphId: typeof task.metadata.graphId === "string" ? task.metadata.graphId : "",
+          maxDynamicTasks: this.maxDynamicTasks,
+          currentTasks: Object.keys(tasksByKey).length,
+        },
+      });
+      return emptyExpansion();
+    }
 
     const planned = await this.planGraphPatch({
       task,
@@ -264,6 +318,108 @@ export class TaskGraphExecutor {
     });
     const created = this.createDynamicTasks(taskSpecs, task, tasksByKey, currentDepth + 1);
     return { plannerTask: planned.plannerTask, created, pause: null };
+  }
+
+  private async replanTaskIfNeeded(task: Task, tasksByKey: Record<string, Task>): Promise<ExpansionResult> {
+    if (!this.plan || this.plan.failureStrategy !== "replan") return emptyExpansion();
+    if (task.status !== "failed" && task.status !== "dead_letter") return emptyExpansion();
+    const graphKey = typeof task.metadata.graphKey === "string" ? task.metadata.graphKey : "";
+    if (!graphKey) return emptyExpansion();
+    const attempts = Object.values(tasksByKey).filter((item) => item.metadata.replannedFromTaskId === task.id).length;
+    if (attempts >= this.maxReplanAttempts) {
+      this.taskStore.addEvent({
+        type: "task_graph.replan_skipped",
+        taskId: task.id,
+        payload: {
+          graphId: typeof task.metadata.graphId === "string" ? task.metadata.graphId : "",
+          graphKey,
+          reason: "replan budget exhausted",
+          attempts,
+          maxReplanAttempts: this.maxReplanAttempts,
+        },
+      });
+      return emptyExpansion();
+    }
+    const availableSlots = this.maxDynamicTasks - Object.keys(tasksByKey).length;
+    if (availableSlots <= 0) return emptyExpansion();
+
+    const plannerTask = this.createReplanPlannerTask({
+      failedTask: task,
+      existingKeys: new Set(Object.keys(tasksByKey)),
+      maxNewTasks: Math.min(availableSlots, 6),
+      attempt: attempts + 1,
+    });
+    this.taskStore.addTaskDependency(plannerTask.id, task.id, "finished");
+    const finishedPlanner = await this.runOne(plannerTask);
+    this.taskStore.addEvent({
+      type: "task_graph.replan_planned",
+      taskId: task.id,
+      payload: {
+        graphId: typeof task.metadata.graphId === "string" ? task.metadata.graphId : "",
+        graphKey,
+        plannerTaskId: finishedPlanner.id,
+        plannerStatus: finishedPlanner.status,
+        attempt: attempts + 1,
+      },
+    });
+
+    if (finishedPlanner.status !== "done") {
+      this.recordPatchAnomaly(finishedPlanner, "planner_replan_failed", [`Replan planner finished with status ${finishedPlanner.status}.`]);
+      return { plannerTask: finishedPlanner, created: [], pause: null };
+    }
+    const parsed = parseGraphPatchSpec(taskResultSummary(finishedPlanner.result, ""), { parentKey: graphKey });
+    if (!parsed) {
+      this.recordPatchAnomaly(finishedPlanner, "planner_replan_unparseable", ["Replan planner returned no valid GraphPatchSpec JSON."]);
+      return { plannerTask: finishedPlanner, created: [], pause: null };
+    }
+    const validation = validateGraphPatchSpec(parsed, {
+      parentKey: graphKey,
+      existingKeys: new Set(Object.keys(tasksByKey)),
+      maxTasks: Math.min(availableSlots, 6),
+      maxWave: readNonNegativeNumber(task.metadata.maxWaves, this.plan.maxWaves || 100),
+    });
+    if (!validation.ok) {
+      this.recordPatchAnomaly(finishedPlanner, "planner_replan_invalid", validation.errors);
+      return { plannerTask: finishedPlanner, created: [], pause: null };
+    }
+    if (parsed.needsUserInput) {
+      return {
+        plannerTask: finishedPlanner,
+        created: [],
+        pause: {
+          reason: parsed.reason,
+          questions: parsed.questions,
+          taskId: task.id,
+          plannerTaskId: finishedPlanner.id,
+          source: "planner",
+        },
+      };
+    }
+    const specs = parsed.tasks.slice(0, availableSlots).map((spec) => ({
+      ...spec,
+      metadata: {
+        ...(spec.metadata || {}),
+        replannedFromTaskId: task.id,
+        replanAttempt: attempts + 1,
+      },
+      dependencyType: spec.dependsOn.includes(graphKey) ? "finished" as const : spec.dependencyType,
+    }));
+    if (!specs.length) return { plannerTask: finishedPlanner, created: [], pause: null };
+    this.taskStore.addEvent({
+      type: "task_graph.replanned",
+      taskId: task.id,
+      payload: {
+        graphId: typeof task.metadata.graphId === "string" ? task.metadata.graphId : "",
+        graphKey,
+        plannerTaskId: finishedPlanner.id,
+        addedTasks: specs.map((item) => item.key),
+      },
+    });
+    return {
+      plannerTask: finishedPlanner,
+      created: this.createDynamicTasks(specs, task, tasksByKey, readNonNegativeNumber(task.metadata.expansionDepth, 0) + 1),
+      pause: null,
+    };
   }
 
   private async planGraphPatch({
@@ -485,6 +641,100 @@ export class TaskGraphExecutor {
     });
   }
 
+  private createReplanPlannerTask({
+    failedTask,
+    existingKeys,
+    maxNewTasks,
+    attempt,
+  }: {
+    failedTask: Task;
+    existingKeys: Set<string>;
+    maxNewTasks: number;
+    attempt: number;
+  }): Task {
+    const parentKey = String(failedTask.metadata.graphKey || "");
+    const graphKey = uniqueInternalKey(`replan_${parentKey}_${attempt}`, existingKeys);
+    const metadata: Metadata = {
+      ...baseGraphMetadata(failedTask),
+      graphId: "",
+      graphKey,
+      graphRole: "planner",
+      internalGraph: true,
+      parentGraphId: typeof failedTask.metadata.graphId === "string" ? failedTask.metadata.graphId : "",
+      planPhase: "graph_replan",
+      parentKey,
+      replansTaskId: failedTask.id,
+      replanAttempt: attempt,
+      timeoutMs: readPositiveNumber(failedTask.metadata.timeoutMs, 30000),
+      maxResultChars: 20000,
+      maxMemoryCandidates: 0,
+      acceptanceCriteria: [
+        "Return one valid GraphPatchSpec JSON object.",
+        "Create only recovery tasks that can make progress after the failed task.",
+      ],
+    };
+    return this.taskStore.createTask({
+      role: "planner",
+      title: `replan graph: ${parentKey}`,
+      input: this.replanPrompt({ failedTask, maxNewTasks, attempt }),
+      parentTaskId: failedTask.id,
+      maxRetries: 1,
+      metadata,
+    });
+  }
+
+  private replanPrompt({ failedTask, maxNewTasks, attempt }: { failedTask: Task; maxNewTasks: number; attempt: number }): string {
+    const parentKey = String(failedTask.metadata.graphKey || "");
+    return [
+      "Create a GraphPatchSpec JSON object to replan after a failed task in the current task graph.",
+      "Return only JSON. Do not wrap it in markdown.",
+      "",
+      "Required shape:",
+      JSON.stringify({
+        reason: "why these recovery tasks are the right next move",
+        parentKey,
+        stop: false,
+        needsUserInput: false,
+        questions: [],
+        tasks: [{
+          key: `recover_${parentKey}`,
+          role: failedTask.role,
+          title: "recover failed task",
+          input: "recover or narrow the failed task",
+          parentKey,
+          dependsOn: [parentKey],
+          dependencyType: "finished",
+          acceptanceCriteria: ["Recovery task produces a usable result or a concrete blocker."],
+          toolHints: [],
+          skillHints: [],
+          timeoutMs: 30000,
+          maxRetries: 1,
+          maxResultChars: 12000,
+          maxMemoryCandidates: 1,
+          wave: readNonNegativeNumber(failedTask.metadata.wave, 1) + 1,
+          expandable: false,
+          expansionGoal: "",
+          maxExpansionDepth: 0,
+          permissionMode: failedTask.metadata.permissionMode || "workspace_write",
+        }],
+      }, null, 2),
+      "",
+      "Rules:",
+      `- parentKey must be exactly ${parentKey}.`,
+      `- Add at most ${Math.max(0, maxNewTasks)} recovery tasks.`,
+      "- Recovery tasks may depend on the failed parent with dependencyType=finished.",
+      "- Ask for user input if the failure cannot be resolved with current context.",
+      "- Do not recreate the same failing task without narrowing scope or changing approach.",
+      "",
+      `attempt: ${attempt}`,
+      `failed task role: ${failedTask.role}`,
+      `failed task title: ${failedTask.title}`,
+      `failed task error: ${failedTask.error || "(none)"}`,
+      "failed task result:",
+      taskResultSummary(failedTask.result, failedTask.error || "(no result)").slice(0, 6000),
+    ].join("\n");
+  }
+
   private createDynamicTasks(
     specs: PlanTaskSpec[],
     parentTask: Task,
@@ -562,6 +812,13 @@ function graphIdFrom(tasksByKey: Record<string, Task>): string | null {
   return null;
 }
 
+function runIdFrom(tasksByKey: Record<string, Task>): string | null {
+  for (const task of Object.values(tasksByKey)) {
+    if (typeof task.metadata.runId === "string") return task.metadata.runId;
+  }
+  return null;
+}
+
 function keyFor(tasksByKey: Record<string, Task>, taskId: string): string {
   return Object.entries(tasksByKey).find(([, task]) => task.id === taskId)?.[0] || "";
 }
@@ -580,6 +837,46 @@ function emptyExpansion(): ExpansionResult {
     created: [],
     pause: null,
   };
+}
+
+function assessGraphQuality({
+  tasksByKey,
+  completed,
+  blocked,
+  failed,
+  expanded,
+}: {
+  tasksByKey: Record<string, Task>;
+  completed: Task[];
+  blocked: Task[];
+  failed: Task[];
+  expanded: Task[];
+}): TaskGraphQuality {
+  const issues: string[] = [];
+  const tasks = Object.values(tasksByKey);
+  const missingAcceptance = tasks.filter((task) => !Array.isArray(task.metadata.acceptanceCriteria) || !task.metadata.acceptanceCriteria.length).length;
+  const failedCount = failed.length;
+  const blockedCount = blocked.length;
+  if (missingAcceptance) issues.push(`${missingAcceptance} task(s) lack acceptance criteria`);
+  if (failedCount) issues.push(`${failedCount} task(s) failed`);
+  if (blockedCount) issues.push(`${blockedCount} task(s) blocked`);
+  if (!completed.length) issues.push("no terminal task was recorded");
+  const terminalRatio = tasks.length ? completed.length / tasks.length : 0;
+  const acceptancePenalty = tasks.length ? missingAcceptance / tasks.length : 0;
+  const failurePenalty = tasks.length ? (failedCount + blockedCount * 0.5) / tasks.length : 0;
+  const score = clamp01(0.35 + terminalRatio * 0.45 - acceptancePenalty * 0.15 - failurePenalty * 0.35 + Math.min(0.1, expanded.length * 0.02));
+  return {
+    score: Number(score.toFixed(3)),
+    issues,
+    taskCount: tasks.length,
+    failedCount,
+    blockedCount,
+    dynamicCount: expanded.length,
+  };
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
 }
 
 function uniqueInternalKey(base: string, existingKeys: Set<string>): string {

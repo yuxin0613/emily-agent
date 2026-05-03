@@ -1,4 +1,5 @@
 import type { ProviderHealth } from "../llm/ModelProvider.ts";
+import type { VectorStoreHealth } from "../memory/VectorStoreAdapter.ts";
 import type { SecurityAuditReport } from "../security/SecurityAudit.ts";
 import type { RuntimeAnomaly } from "../types.ts";
 
@@ -14,6 +15,7 @@ export interface DoctorReport {
   memoryCandidates: {
     pending: number;
   };
+  vectorMemory: VectorStoreHealth;
   skillCandidates: {
     proposed: number;
   };
@@ -41,6 +43,7 @@ export async function buildDoctorReport({
   checkProviders,
   securityAudit,
   pendingMemoryCandidates,
+  vectorMemory,
   proposedSkillCandidates,
   sessions,
   gateway,
@@ -53,6 +56,7 @@ export async function buildDoctorReport({
   checkProviders: (options?: { deep?: boolean }) => Promise<ProviderHealth[]>;
   securityAudit: (options?: { emit?: boolean }) => Promise<SecurityAuditReport>;
   pendingMemoryCandidates: () => number;
+  vectorMemory: () => Promise<VectorStoreHealth>;
   proposedSkillCandidates: () => number;
   sessions: () => { active: number; hidden: number; trashed: number };
   gateway: () => { enabled: boolean; protocolVersion: number; methods: number };
@@ -70,6 +74,7 @@ export async function buildDoctorReport({
     memoryCandidates: {
       pending: pendingMemoryCandidates(),
     },
+    vectorMemory: await vectorMemory(),
     skillCandidates: {
       proposed: proposedSkillCandidates(),
     },
@@ -92,6 +97,7 @@ function statusFrom(report: DoctorReport): DoctorReport["status"] {
   if (report.security.status === "fail") return "fail";
   if (report.diagnostics.some((item) => item.severity === "critical")) return "fail";
   if (report.providerHealth.some((item) => !item.ok && !item.disabled)) return "warn";
+  if (!report.vectorMemory.ok) return "warn";
   if (report.security.status === "warn") return "warn";
   if (report.diagnostics.some((item) => item.severity === "warning")) return "warn";
   return "pass";

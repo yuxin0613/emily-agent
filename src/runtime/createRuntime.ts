@@ -11,6 +11,7 @@ import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
+import type { VectorStoreConfig } from "../memory/VectorStoreAdapter.ts";
 import { AgentRouter } from "../routing/AgentRouter.ts";
 import { RoleManager } from "../roles/RoleManager.ts";
 import { runSecurityAudit } from "../security/SecurityAudit.ts";
@@ -20,6 +21,7 @@ import { SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
+import { ToolExecutor } from "../tools/ToolExecutor.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { renderTimeline } from "../timeline/renderTimeline.ts";
 import { buildDoctorReport } from "./Doctor.ts";
@@ -41,6 +43,7 @@ export async function createRuntime(options: {
   mainProviderId?: string;
   workerPath?: string;
   skillDir?: string;
+  vectorStore?: VectorStoreConfig;
 } = {}) {
   const dataDir = options.dataDir || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
@@ -76,10 +79,15 @@ export async function createRuntime(options: {
   providerRegistry.getConfig(mainProviderId);
   if (shouldWriteProviderRegistry) await providerRegistry.write(dataDir);
   const model = options.model || providerRegistry.createProvider(mainProviderId);
-  const memory = await MemorySystem.create({ dataDir });
+  const memory = await MemorySystem.create({ dataDir, vectorStore: options.vectorStore });
   const taskStore = await TaskStore.create({ dataDir });
   const experienceStore = ExperienceStore.create({ dataDir });
   const toolRegistry = createDefaultToolRegistry();
+  const toolExecutor = new ToolExecutor({
+    workspaceDir: process.cwd(),
+    taskStore,
+    registry: toolRegistry,
+  });
   const skillRegistry = await SkillRegistry.create({ skillDir });
   const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });
   const roleManager = new RoleManager({ roleDir, providerRegistry });
@@ -184,6 +192,7 @@ export async function createRuntime(options: {
       checkProviders: (input) => providerRegistry.health(input),
       securityAudit,
       pendingMemoryCandidates: () => taskStore.getPendingMemoryCandidates({ limit: 1000 }).length,
+      vectorMemory: () => memory.vectorHealth(),
       proposedSkillCandidates: () => skillCandidateStore.countByStatus("proposed"),
       sessions: sessionCounts,
       gateway: () => ({
@@ -231,6 +240,29 @@ export async function createRuntime(options: {
       taskStore,
       sessionId,
       providerUsage: (runIds) => providerUsageStore.summaryForRuns(runIds),
+    });
+  }
+
+  async function executeTool(input: {
+    tool: string;
+    args?: Record<string, unknown>;
+    role?: string;
+    permissionMode?: unknown;
+    taskId?: string;
+    runId?: string;
+    sessionId?: string;
+  }) {
+    const task = input.taskId ? taskStore.getTask(input.taskId) : null;
+    const roleName = input.role || task?.role || "developer";
+    const roleDefinition = await roleManager.getRole(roleName);
+    return toolExecutor.execute({
+      tool: input.tool,
+      args: input.args || {},
+      roleDefinition,
+      permissionMode: parsePermissionMode(input.permissionMode ?? task?.metadata.permissionMode),
+      task,
+      runId: input.runId || (typeof task?.metadata.runId === "string" ? task.metadata.runId : null),
+      sessionId: input.sessionId || (typeof task?.metadata.sessionId === "string" ? task.metadata.sessionId : null),
     });
   }
 
@@ -322,6 +354,65 @@ export async function createRuntime(options: {
     exportSession,
     previewSessionCompaction,
     sessionUsage,
+    createSession: (input) => taskStore.createSession(input),
+    clearSession: (sessionId, input = {}) => {
+      const current = taskStore.getSession(sessionId);
+      const hidden = current?.status === "active"
+        ? taskStore.hideSession(sessionId, input.reason || "cleared by command")
+        : current;
+      const next = taskStore.createSession({
+        title: input.nextTitle || "New session",
+        source: input.source || "command",
+        metadata: {
+          createdBy: "clear",
+          previousSessionId: sessionId,
+        },
+      });
+      return { hidden, next };
+    },
+    restoreSession: (sessionId) => taskStore.restoreSession(sessionId),
+    trashSession: (sessionId, input = {}) => taskStore.trashSession(sessionId, input),
+    addProvider: async (input) => {
+      providerRegistry.add(input);
+      await providerRegistry.write(dataDir);
+      return providerRegistry.getConfig(input.id);
+    },
+    enableProvider: async (providerId) => {
+      const provider = providerRegistry.enable(providerId);
+      await providerRegistry.write(dataDir);
+      return provider;
+    },
+    disableProvider: async (providerId) => {
+      const provider = providerRegistry.disable(providerId, {
+        referencedBy: await roleReferences(providerId),
+      });
+      await providerRegistry.write(dataDir);
+      return provider;
+    },
+    removeProvider: async (providerId) => {
+      const provider = providerRegistry.remove(providerId, {
+        referencedBy: await roleReferences(providerId),
+      });
+      await providerRegistry.write(dataDir);
+      return provider;
+    },
+    addRole: (input) => roleManager.addRole(input),
+    updateRoleProvider: (name, input) => roleManager.updateRoleProvider(name, input),
+    initializeDefaultRoles: (input) => roleManager.initializeDefaultRoles(input),
+    buildSkillCandidates: (input = {}) => skillBuilder.buildSkillCandidates(input),
+    approveSkillCandidate: (candidateId, input = {}) => skillCandidateStore.approveCandidate(candidateId, {
+      reason: input.reason,
+      registry: skillRegistry,
+    }),
+    rejectSkillCandidate: (candidateId, reason) => skillCandidateStore.rejectCandidate(candidateId, reason),
+    diagnostics,
+    maintenance,
+    cancelTask: (taskId, reason) => roleAgentManager.cancelTask(taskId, reason),
+    cancelRun: async (runId, reason) => {
+      await roleAgentManager.cancelRun(runId, reason);
+      return taskStore.getRun(runId);
+    },
+    executeTool,
   });
 
   return {
@@ -332,6 +423,7 @@ export async function createRuntime(options: {
     skillCandidateStore,
     providerRegistry,
     providerUsageStore,
+    executeTool,
     roleManager,
     experienceStore,
     experienceBuilder,
@@ -498,11 +590,12 @@ export async function createRuntime(options: {
     exportSession,
     previewSessionCompaction,
     sessionUsage,
+    executeTool,
     listCommands() {
       return commandRegistry.list();
     },
-    runCommand(name: string, options: { args?: string[]; format?: "json" | "text" } = {}) {
-      return commandRegistry.run(name, options.args || [], { format: options.format || "json" });
+    runCommand(name: string, options: { args?: string[]; format?: "json" | "text"; input?: Record<string, unknown> } = {}) {
+      return commandRegistry.run(name, options.args || [], { format: options.format || "json", input: options.input || {} });
     },
     async cancelTask(taskId: string, reason?: string) {
       return roleAgentManager.cancelTask(taskId, reason);

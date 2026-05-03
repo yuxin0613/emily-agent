@@ -4,27 +4,52 @@ import { createHash, randomUUID } from "node:crypto";
 import type { MemoryRecord, MemoryRecallResult, Metadata } from "../types.ts";
 import { ScalarQuantCompressor, type CompressedVector, type VectorCompressor } from "../experience/VectorCompressor.ts";
 import { MemoryCurator } from "./MemoryCurator.ts";
+import {
+  createVectorStoreAdapter,
+  vectorStoreConfigFromEnv,
+  type VectorStoreAdapter,
+  type VectorStoreConfig,
+  type VectorStoreHealth,
+} from "./VectorStoreAdapter.ts";
+
+interface MemoryVectorLayer {
+  load(): Promise<void>;
+  add(record: MemoryRecord): Promise<void>;
+  search(query: string, options: { scope: string; limit: number }): Promise<Array<MemoryRecord & { score: number }>>;
+  compact(options: { maxItems: number }): Promise<{ before: number; after: number; removed: number; algorithm: string }>;
+  health(): Promise<VectorStoreHealth>;
+}
 
 export class MemorySystem {
   shortTerm: InMemoryLayer;
   fileLayer: FileMemoryLayer;
-  vectorLayer: VectorMemoryLayer;
+  vectorLayer: MemoryVectorLayer;
   curator: MemoryCurator;
 
-  static async create({ dataDir }: { dataDir: string }): Promise<MemorySystem> {
+  static async create({ dataDir, vectorStore }: { dataDir: string; vectorStore?: VectorStoreConfig }): Promise<MemorySystem> {
     const memoryDir = path.join(dataDir, "memory");
     await mkdir(memoryDir, { recursive: true });
+    const compressor = new ScalarQuantCompressor();
+    const fileVectorLayer = new VectorMemoryLayer({
+      filePath: path.join(memoryDir, "vector-index.json"),
+      compressor,
+      maxItems: 500,
+    });
+    const vectorConfig = vectorStore || vectorStoreConfigFromEnv();
+    const externalAdapter = createVectorStoreAdapter(vectorConfig);
 
     const system = new MemorySystem({
       shortTerm: new InMemoryLayer({ maxRecords: 100 }),
       fileLayer: new FileMemoryLayer({
         filePath: path.join(memoryDir, "events.jsonl"),
       }),
-      vectorLayer: new VectorMemoryLayer({
-        filePath: path.join(memoryDir, "vector-index.json"),
-        compressor: new ScalarQuantCompressor(),
-        maxItems: 500,
-      }),
+      vectorLayer: externalAdapter
+        ? new ExternalVectorMemoryLayer({
+          adapter: externalAdapter,
+          fallback: fileVectorLayer,
+          compressor,
+        })
+        : fileVectorLayer,
       curator: new MemoryCurator(),
     });
 
@@ -40,7 +65,7 @@ export class MemorySystem {
   }: {
     shortTerm: InMemoryLayer;
     fileLayer: FileMemoryLayer;
-    vectorLayer: VectorMemoryLayer;
+    vectorLayer: MemoryVectorLayer;
     curator: MemoryCurator;
   }) {
     this.shortTerm = shortTerm;
@@ -93,6 +118,10 @@ export class MemorySystem {
     const file = await this.fileLayer.compact({ maxRecords: options.maxFileRecords ?? 1000 });
     const vector = await this.vectorLayer.compact({ maxItems: options.maxVectorRecords ?? 500 });
     return { file, vector };
+  }
+
+  async vectorHealth(): Promise<VectorStoreHealth> {
+    return this.vectorLayer.health();
   }
 }
 
@@ -224,6 +253,16 @@ class VectorMemoryLayer {
     this.items = items.map((item) => normalizeVectorItem(item, this.compressor)).filter((item): item is VectorMemoryLayer["items"][number] => Boolean(item));
   }
 
+  async health(): Promise<VectorStoreHealth> {
+    return {
+      kind: "file",
+      ok: true,
+      collection: path.basename(this.filePath),
+      fallbackToFile: true,
+      message: `${this.items.length} indexed records`,
+    };
+  }
+
   async add(record: MemoryRecord): Promise<void> {
     await withFileLock(this.lockPath, async () => {
       await this.load();
@@ -315,6 +354,85 @@ class VectorMemoryLayer {
   }
 }
 
+class ExternalVectorMemoryLayer implements MemoryVectorLayer {
+  adapter: VectorStoreAdapter;
+  fallback: VectorMemoryLayer;
+  compressor: VectorCompressor;
+
+  constructor({ adapter, fallback, compressor }: { adapter: VectorStoreAdapter; fallback: VectorMemoryLayer; compressor: VectorCompressor }) {
+    this.adapter = adapter;
+    this.fallback = fallback;
+    this.compressor = compressor;
+  }
+
+  async load(): Promise<void> {
+    await this.fallback.load();
+  }
+
+  async add(record: MemoryRecord): Promise<void> {
+    if (this.adapter.fallbackToFile) await this.fallback.add(record);
+    try {
+      const embedding = this.compressor.embed(record.content);
+      await this.adapter.upsert([{
+        id: record.id,
+        record,
+        embedding,
+        vector: this.compressor.compress(embedding),
+        contentHash: memoryHash(record),
+        updatedAt: new Date().toISOString(),
+        hits: 0,
+      }]);
+    } catch (error) {
+      if (!this.adapter.fallbackToFile) throw error;
+    }
+  }
+
+  async search(query: string, { scope, limit }: { scope: string; limit: number }): Promise<Array<MemoryRecord & { score: number }>> {
+    if (!this.adapter.fallbackToFile) {
+      return this.adapter.search({
+        query,
+        queryEmbedding: this.compressor.embed(query),
+        scope,
+        limit,
+      });
+    }
+    try {
+      const external = await this.adapter.search({
+        query,
+        queryEmbedding: this.compressor.embed(query),
+        scope,
+        limit,
+      });
+      if (external.length) return mergeSearchResults(external, await this.fallback.search(query, { scope, limit })).slice(0, limit);
+    } catch {
+      // File fallback is the offline source of truth when external vector stores are down.
+    }
+    return this.fallback.search(query, { scope, limit });
+  }
+
+  async compact({ maxItems }: { maxItems: number }): Promise<{ before: number; after: number; removed: number; algorithm: string }> {
+    const file = this.adapter.fallbackToFile
+      ? await this.fallback.compact({ maxItems })
+      : { before: 0, after: 0, removed: 0, algorithm: "no-file-fallback" };
+    const external = await this.adapter.compact({ maxItems }).catch(() => null);
+    return {
+      ...file,
+      algorithm: `${this.adapter.kind}${external ? "" : ":unavailable"}+${file.algorithm}`,
+    };
+  }
+
+  async health(): Promise<VectorStoreHealth> {
+    const health = await this.adapter.health();
+    if (health.ok || !this.adapter.fallbackToFile) return health;
+    const fallback = await this.fallback.health();
+    return {
+      ...health,
+      ok: fallback.ok,
+      message: `${health.message || "external unavailable"}; using file fallback (${fallback.message || "ok"})`,
+    };
+  }
+}
+
 function normalizeRecord(record: Partial<MemoryRecord> & { content: string }): MemoryRecord {
   return {
     id: record.id || randomUUID(),
@@ -344,6 +462,18 @@ function scoreTextRecords(records: MemoryRecord[], query: string, scope: string)
       score: lexicalScore(queryTokens, tokenize(record.content)),
     }))
     .sort((a, b) => b.score - a.score);
+}
+
+function mergeSearchResults(
+  left: Array<MemoryRecord & { score: number }>,
+  right: Array<MemoryRecord & { score: number }>,
+): Array<MemoryRecord & { score: number }> {
+  const byId = new Map<string, MemoryRecord & { score: number }>();
+  for (const item of [...left, ...right]) {
+    const existing = byId.get(item.id);
+    byId.set(item.id, existing && existing.score >= item.score ? existing : item);
+  }
+  return [...byId.values()].sort((a, b) => b.score - a.score);
 }
 
 function lexicalScore(queryTokens: string[], recordTokens: string[]): number {

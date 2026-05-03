@@ -31,7 +31,7 @@ assert.ok(memory.shortTerm.length > 0);
 assert.ok(memory.files.length > 0);
 assert.ok(memory.semantic.length > 0);
 
-const events = runtime.taskStore.getLatestEvents({ limit: 80 });
+const events = runtime.taskStore.getLatestEvents({ limit: 200 });
 assert.ok(events.some((event) => event.type === "task.done"));
 assert.ok(events.some((event) => event.type === "run.completed"));
 assert.ok(response.runId);

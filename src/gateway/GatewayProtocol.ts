@@ -241,6 +241,7 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
     case "commands.run":
       return runtime.runCommand(String(params.name || params.command || ""), {
         args: Array.isArray(params.args) ? params.args.map(String) : [],
+        input: params.input && typeof params.input === "object" && !Array.isArray(params.input) ? params.input as Record<string, unknown> : params,
         format: params.format === "text" ? "text" : "json",
       });
     case "context.build":
@@ -317,7 +318,7 @@ export interface GatewayRuntime {
   previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
   sessionUsage: (sessionId: string) => unknown;
   listCommands: () => unknown[];
-  runCommand: (name: string, options?: { args?: string[]; format?: "json" | "text" }) => Promise<unknown>;
+  runCommand: (name: string, options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text" }) => Promise<unknown>;
   buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
   routeMessage: (input: string) => unknown;
 }

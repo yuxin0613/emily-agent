@@ -12,6 +12,7 @@ import { IllegalTaskTransitionError, TaskTransitionConflictError } from "../task
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
 import { ToolGateway } from "../tools/ToolGateway.ts";
+import { ToolExecutor, type ToolExecutionResult } from "../tools/ToolExecutor.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import type { SkillHintResolution, Task, TaskResult, ToolHintResolution } from "../types.ts";
 
@@ -196,6 +197,23 @@ async function runRoleTask({
     toolResolution,
     skillResolution,
   });
+  const toolExecutor = new ToolExecutor({
+    workspaceDir: process.cwd(),
+    taskStore,
+    registry: createDefaultToolRegistry(),
+  });
+  const toolExecutionResults: ToolExecutionResult[] = [];
+  for (const request of readToolRequests(task.metadata.toolRequests)) {
+    toolExecutionResults.push(await toolExecutor.execute({
+      tool: request.tool,
+      args: request.args,
+      roleDefinition: definition,
+      permissionMode,
+      task,
+      runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
+      sessionId: String(task.metadata.sessionId || "default"),
+    }));
+  }
   if (typeof task.metadata.forceDelayMs === "number") {
     await sleep(task.metadata.forceDelayMs);
   }
@@ -222,6 +240,9 @@ async function runRoleTask({
       "",
       "Tool context:",
       ...toolGateway.renderToolContext(toolResolution),
+      "",
+      "Tool execution results:",
+      ...renderToolExecutionResults(toolExecutionResults),
       "",
       "Skill context:",
       ...skillRegistry.renderSkillContext(skillResolution, { mode: "progressive" }),
@@ -289,6 +310,12 @@ async function runRoleTask({
           allowed: toolResolution.allowed.map((tool) => tool.name),
           denied: toolResolution.denied,
           unknown: toolResolution.unknown,
+          executed: toolExecutionResults.map((result) => ({
+            tool: result.tool,
+            ok: result.ok,
+            durationMs: result.durationMs,
+            error: result.error || "",
+          })),
         },
         skills: {
           requested: skillResolution.requested,
@@ -443,6 +470,26 @@ function readStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
   if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
   return [];
+}
+
+function readToolRequests(value: unknown): Array<{ tool: string; args: Record<string, unknown> }> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    .map((item) => ({
+      tool: String(item.tool || ""),
+      args: item.args && typeof item.args === "object" && !Array.isArray(item.args) ? item.args as Record<string, unknown> : {},
+    }))
+    .filter((item) => item.tool.trim());
+}
+
+function renderToolExecutionResults(results: ToolExecutionResult[]): string[] {
+  if (!results.length) return ["(none requested)"];
+  return results.map((result) => [
+    `- ${result.tool}: ${result.ok ? "ok" : "failed"} (${result.durationMs}ms)`,
+    result.error ? `  error: ${result.error}` : "",
+    result.output ? `  output: ${JSON.stringify(result.output).slice(0, 4000)}` : "",
+  ].filter(Boolean).join("\n"));
 }
 
 function unique(values: string[]): string[] {

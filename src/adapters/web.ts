@@ -77,7 +77,7 @@ export async function startWebServer({
     previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
     sessionUsage: (sessionId: string) => unknown;
     listCommands: () => unknown[];
-    runCommand: (name: string, options?: { args?: string[]; format?: "json" | "text" }) => Promise<unknown>;
+    runCommand: (name: string, options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text" }) => Promise<unknown>;
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
@@ -203,6 +203,7 @@ export async function startWebServer({
         const body = await readJson(request);
         const result = await runtime.runCommand(String(body.name || body.command || ""), {
           args: Array.isArray(body.args) ? body.args.map(String) : [],
+          input: typeof body.input === "object" && body.input && !Array.isArray(body.input) ? body.input as Record<string, unknown> : body,
           format: body.format === "text" ? "text" : "json",
         });
         return body.format === "text"
