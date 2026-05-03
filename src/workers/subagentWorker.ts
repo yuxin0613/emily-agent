@@ -476,7 +476,6 @@ function readStringArray(value: unknown): string[] {
 function readToolRequests(value: unknown): Array<{
   tool: string;
   args: Record<string, unknown>;
-  approval?: { approved?: boolean; reason?: string; approvedBy?: string };
 }> {
   if (!Array.isArray(value)) return [];
   return value
@@ -484,9 +483,6 @@ function readToolRequests(value: unknown): Array<{
     .map((item) => ({
       tool: String(item.tool || ""),
       args: item.args && typeof item.args === "object" && !Array.isArray(item.args) ? item.args as Record<string, unknown> : {},
-      approval: item.approval && typeof item.approval === "object" && !Array.isArray(item.approval)
-        ? item.approval as { approved?: boolean; reason?: string; approvedBy?: string }
-        : undefined,
     }))
     .filter((item) => item.tool.trim());
 }

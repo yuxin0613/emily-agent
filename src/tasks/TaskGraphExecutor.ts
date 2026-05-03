@@ -1,6 +1,7 @@
 import {
   createFallbackGraphPatch,
   parseGraphPatchSpec,
+  sanitizePlannerMetadata,
   validateGraphPatchSpec,
   type GraphPatchSpec,
   type PlanSpec,
@@ -10,6 +11,7 @@ import { taskResultSummary } from "./TaskResult.ts";
 import type { Metadata, Task, TaskDependency, TaskStatus } from "../types.ts";
 import type { RoleAgentManager } from "./RoleAgentManager.ts";
 import type { TaskStore } from "./TaskStore.ts";
+import { clampPermissionMode } from "../tools/PermissionMode.ts";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "cancelled", "dead_letter"]);
 
@@ -954,7 +956,7 @@ export class TaskGraphExecutor {
   private createDynamicTask(spec: PlanTaskSpec, parentTask: Task, expansionDepth: number): Task {
     const metadata: Metadata = {
       ...baseGraphMetadata(parentTask),
-      ...(spec.metadata || {}),
+      ...(sanitizePlannerMetadata(spec.metadata) || {}),
       graphKey: spec.key,
       graphRole: spec.role,
       parentKey: spec.parentKey || String(parentTask.metadata.graphKey || ""),
@@ -964,7 +966,7 @@ export class TaskGraphExecutor {
       acceptanceCriteria: spec.acceptanceCriteria,
       toolHints: spec.toolHints,
       skillHints: spec.skillHints,
-      permissionMode: spec.permissionMode || parentTask.metadata.permissionMode || "workspace_write",
+      permissionMode: clampPermissionMode(spec.permissionMode, parentTask.metadata.permissionMode),
       timeoutMs: spec.timeoutMs,
       maxResultChars: spec.maxResultChars,
       maxMemoryCandidates: spec.maxMemoryCandidates,

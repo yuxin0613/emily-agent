@@ -14,6 +14,12 @@ export function parsePermissionMode(value: unknown, fallback: PermissionMode = "
   return fallback;
 }
 
+export function clampPermissionMode(requested: unknown, inherited: unknown = "workspace_write"): PermissionMode {
+  const inheritedMode = parsePermissionMode(inherited);
+  const requestedMode = parsePermissionMode(requested, inheritedMode);
+  return permissionRank(requestedMode) <= permissionRank(inheritedMode) ? requestedMode : inheritedMode;
+}
+
 export function permissionModeAllows(mode: PermissionMode, tool: ToolPermission): boolean {
   if (mode === "danger_full_access") return true;
   if (mode === "workspace_write") return WORKSPACE_WRITE_TOOLS.has(tool);
@@ -27,4 +33,10 @@ export function filterToolsByPermissionMode(tools: ToolPermission[], mode: Permi
 export function permissionModeToolList(mode: PermissionMode): ToolPermission[] | "role_defined" {
   if (mode === "danger_full_access") return "role_defined";
   return mode === "workspace_write" ? [...WORKSPACE_WRITE_TOOLS] : [...READ_ONLY_TOOLS];
+}
+
+function permissionRank(mode: PermissionMode): number {
+  if (mode === "danger_full_access") return 2;
+  if (mode === "workspace_write") return 1;
+  return 0;
 }

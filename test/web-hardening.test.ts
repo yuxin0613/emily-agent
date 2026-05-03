@@ -72,6 +72,10 @@ const server = await startWebServer({
 });
 
 try {
+  const app = await fetch(`${server.url}/`);
+  assert.equal(app.status, 200);
+  assert.equal((await app.text()).includes("test-token"), false);
+
   const health = await fetch(`${server.url}/health`);
   assert.equal(health.status, 200);
 

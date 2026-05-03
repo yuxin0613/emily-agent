@@ -1,6 +1,7 @@
 import type { Metadata, Task, TaskDependency } from "../types.ts";
-import type { PlanSpec } from "../planning/PlanSpec.ts";
+import { sanitizePlannerMetadata, type PlanSpec } from "../planning/PlanSpec.ts";
 import type { TaskStore } from "./TaskStore.ts";
+import { clampPermissionMode } from "../tools/PermissionMode.ts";
 
 export interface TaskGraphSpec {
   tasks: Array<{
@@ -88,13 +89,13 @@ export function createTaskGraphFromPlan({
         dependencyType: task.dependencyType,
         maxRetries: task.maxRetries,
         metadata: {
-          ...(task.metadata || {}),
+          ...(sanitizePlannerMetadata(task.metadata) || {}),
           graphRole: task.role,
           acceptanceCriteria: task.acceptanceCriteria,
           toolHints: task.toolHints,
           skillHints: task.skillHints,
           parentKey: task.parentKey || "",
-          permissionMode: task.permissionMode || baseMetadata.permissionMode || "workspace_write",
+          permissionMode: clampPermissionMode(task.permissionMode, baseMetadata.permissionMode),
           timeoutMs: task.timeoutMs,
           maxResultChars: task.maxResultChars,
           maxMemoryCandidates: task.maxMemoryCandidates,

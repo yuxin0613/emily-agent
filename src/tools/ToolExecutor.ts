@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { Metadata, PermissionMode, RoleDefinition, Task, ToolPermission } from "../types.ts";
@@ -182,7 +184,7 @@ export class ToolExecutor {
   }
 
   private async readFile(args: Record<string, unknown>): Promise<{ path: string; content: string; bytes: number; truncated: boolean }> {
-    const filePath = this.resolveWorkspacePath(requiredString(args.path, "path"));
+    const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path, "path"));
     const maxBytes = positiveNumber(args.maxBytes, 128000);
     const content = await readFile(filePath, "utf8");
     const truncated = Buffer.byteLength(content, "utf8") > maxBytes;
@@ -196,7 +198,7 @@ export class ToolExecutor {
   }
 
   private async writeFile(args: Record<string, unknown>): Promise<{ path: string; bytes: number }> {
-    const filePath = this.resolveWorkspacePath(requiredString(args.path, "path"));
+    const filePath = await this.resolveWritableWorkspacePath(requiredString(args.path, "path"));
     const content = String(args.content ?? "");
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, content, "utf8");
@@ -207,7 +209,7 @@ export class ToolExecutor {
   }
 
   private async deleteFile(args: Record<string, unknown>): Promise<{ path: string; deleted: boolean }> {
-    const filePath = this.resolveWorkspacePath(requiredString(args.path, "path"));
+    const filePath = await this.resolveDeletableWorkspacePath(requiredString(args.path, "path"));
     await rm(filePath, { force: false, recursive: false });
     return {
       path: path.relative(this.workspaceDir, filePath),
@@ -236,6 +238,7 @@ export class ToolExecutor {
     truncated: boolean;
   }> {
     const url = parseHttpUrl(requiredString(args.url, "url"));
+    await assertAllowedHttpEgress(url);
     const method = parseHttpMethod(args.method);
     const maxBytes = positiveNumber(args.maxBytes, 256000);
     const timeoutMs = positiveNumber(args.timeoutMs, 15000);
@@ -391,12 +394,53 @@ export class ToolExecutor {
     return task;
   }
 
-  private resolveWorkspacePath(input: string): string {
+  private resolveLexicalWorkspacePath(input: string): string {
     const resolved = path.resolve(this.workspaceDir, input);
     if (resolved !== this.workspaceDir && !resolved.startsWith(`${this.workspaceDir}${path.sep}`)) {
       throw new Error(`Path escapes workspace: ${input}`);
     }
     return resolved;
+  }
+
+  private async resolveReadableWorkspacePath(input: string): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input);
+    const real = await realpath(resolved);
+    await this.assertRealPathInsideWorkspace(real, input);
+    return real;
+  }
+
+  private async resolveWritableWorkspacePath(input: string): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input);
+    await this.assertParentInsideWorkspace(path.dirname(resolved), input);
+    const stats = await lstat(resolved).catch((error) => {
+      if (isNodeError(error) && error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (stats?.isSymbolicLink()) {
+      throw new Error(`Refusing to write through workspace symlink: ${input}`);
+    }
+    if (stats) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
+    return resolved;
+  }
+
+  private async resolveDeletableWorkspacePath(input: string): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input);
+    await this.assertParentInsideWorkspace(path.dirname(resolved), input);
+    const stats = await lstat(resolved);
+    if (!stats.isSymbolicLink()) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
+    return resolved;
+  }
+
+  private async assertParentInsideWorkspace(parentPath: string, originalInput: string): Promise<void> {
+    const existingParent = await nearestExistingParent(parentPath);
+    await this.assertRealPathInsideWorkspace(await realpath(existingParent), originalInput);
+  }
+
+  private async assertRealPathInsideWorkspace(realTarget: string, originalInput: string): Promise<void> {
+    const realWorkspace = await realpath(this.workspaceDir);
+    if (realTarget !== realWorkspace && !realTarget.startsWith(`${realWorkspace}${path.sep}`)) {
+      throw new Error(`Path escapes workspace through symlink: ${originalInput}`);
+    }
   }
 
   private addEvent(type: string, request: ToolExecutionRequest, payload: Record<string, unknown>): number | null {
@@ -448,6 +492,89 @@ function parseHeaders(input: unknown): Record<string, string> | undefined {
     result[key] = String(value);
   }
   return result;
+}
+
+async function assertAllowedHttpEgress(url: URL): Promise<void> {
+  if (isHttpEgressAllowedByPolicy(url)) return;
+  const hostname = url.hostname.toLowerCase();
+  if (isBlockedHostname(hostname)) {
+    throw new Error(`HTTP egress to private or local host is blocked: ${url.hostname}`);
+  }
+  const literalIp = ipAddressFromHost(hostname);
+  if (literalIp && isPrivateAddress(literalIp)) {
+    throw new Error(`HTTP egress to private or local address is blocked: ${url.hostname}`);
+  }
+  const addresses = await lookup(hostname, { all: true, verbatim: true }).catch(() => []);
+  for (const entry of addresses) {
+    if (isPrivateAddress(entry.address)) {
+      throw new Error(`HTTP egress to private or local resolved address is blocked: ${url.hostname}`);
+    }
+  }
+}
+
+function isHttpEgressAllowedByPolicy(url: URL): boolean {
+  if (process.env.EMILY_HTTP_ALLOW_PRIVATE === "true") return true;
+  const hostname = url.hostname.toLowerCase();
+  const origin = url.origin.toLowerCase();
+  return parseCsvEnv("EMILY_HTTP_EGRESS_ALLOWLIST").some((entry) => {
+    const normalized = entry.toLowerCase();
+    if (normalized === hostname || normalized === origin) return true;
+    if (normalized.startsWith("*.")) return hostname.endsWith(normalized.slice(1));
+    return false;
+  });
+}
+
+function parseCsvEnv(name: string): string[] {
+  return String(process.env[name] || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function ipAddressFromHost(hostname: string): string | null {
+  const bracketless = hostname.replace(/^\[|\]$/g, "");
+  return isIP(bracketless) ? bracketless : null;
+}
+
+function isBlockedHostname(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[|\]$/g, "");
+  return normalized === "localhost"
+    || normalized.endsWith(".localhost")
+    || normalized === "0"
+    || normalized === "0.0.0.0"
+    || normalized === "::"
+    || normalized === "::1";
+}
+
+function isPrivateAddress(address: string): boolean {
+  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
+  const embeddedIpv4 = normalized.match(/(?:^|:)ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  if (embeddedIpv4) return isPrivateIpv4(embeddedIpv4);
+  if (isIP(normalized) === 4) return isPrivateIpv4(normalized);
+  if (isIP(normalized) === 6) {
+    return normalized === "::1"
+      || normalized === "::"
+      || normalized.startsWith("fc")
+      || normalized.startsWith("fd")
+      || /^fe[89ab]/.test(normalized)
+      || normalized.startsWith("2001:db8:");
+  }
+  return false;
+}
+
+function isPrivateIpv4(address: string): boolean {
+  const parts = address.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  return a === 0
+    || a === 10
+    || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+    || (a === 198 && (b === 18 || b === 19))
+    || a >= 224;
 }
 
 async function readResponseText(response: Response, maxBytes: number): Promise<{ text: string; bytes: number; truncated: boolean }> {
@@ -719,8 +846,30 @@ function parseGithubCommand(input: unknown): string[] {
 }
 
 function isGithubWriteCommand(command: string[]): boolean {
-  const joined = command.join(" ");
+  const normalized = command.map((part) => part.toLowerCase());
+  if (normalized[0] === "api") {
+    const method = githubApiMethod(normalized);
+    if (method && method !== "get") return true;
+    return normalized.some((part) => part === "-f"
+      || part === "--field"
+      || part.startsWith("--field=")
+      || part === "--raw-field"
+      || part.startsWith("--raw-field=")
+      || part === "--input"
+      || part.startsWith("--input="));
+  }
+  const joined = normalized.join(" ");
   return /\b(comment|create|edit|close|reopen|merge|ready|review|rerun|cancel|delete|dispatch)\b/.test(joined);
+}
+
+function githubApiMethod(command: string[]): string | null {
+  for (let index = 0; index < command.length; index += 1) {
+    const part = command[index];
+    if (part === "--method" || part === "-x") return command[index + 1] || null;
+    const match = part.match(/^--method=(.+)$/);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 function githubTarget(args: Record<string, unknown>): string {
@@ -744,6 +893,25 @@ function parseJsonOutput(stdout: string): unknown {
   } catch {
     return null;
   }
+}
+
+async function nearestExistingParent(inputPath: string): Promise<string> {
+  let current = inputPath;
+  while (true) {
+    try {
+      await lstat(current);
+      return current;
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+      const next = path.dirname(current);
+      if (next === current) throw error;
+      current = next;
+    }
+  }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }
 
 function requiredString(value: unknown, label: string): string {

@@ -627,7 +627,9 @@ WebUI 地址：
 http://127.0.0.1:3000/
 ```
 
-Web/API 默认启用本地 token 防护。启动时会打印一次性 token，也可以用 `EMILY_WEB_TOKEN=... npm run web` 固定 token。除 `/` 和 `/health` 外，请求需要带 `x-emily-token` 或 `Authorization: Bearer ...`；浏览器 WebUI 会自动携带。
+Web/API 默认启用本地 token 防护。启动时会打印一次性 token，也可以用 `EMILY_WEB_TOKEN=... npm run web` 固定 token。除 `/` 和 `/health` 外，请求需要带 `x-emily-token` 或 `Authorization: Bearer ...`；浏览器 WebUI 不会从服务端内嵌管理 token，首次打开可输入 token，或用 `http://127.0.0.1:3000/?token=$TOKEN` 初始化到本地浏览器存储。
+
+HTTP/browser 工具默认拒绝 loopback、内网、link-local 和云 metadata 等私有地址，避免把 agent 变成 SSRF 通道。开发测试如确实要访问本地服务，可临时设置 `EMILY_HTTP_ALLOW_PRIVATE=true`，或用 `EMILY_HTTP_EGRESS_ALLOWLIST=example.com,https://api.example.com` 做精确放行。
 
 其它 agent 应用建议优先走 WebSocket：
 

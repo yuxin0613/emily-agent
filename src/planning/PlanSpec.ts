@@ -415,7 +415,7 @@ function normalizeTaskSpec(item: unknown, index: number, defaultParentKey?: stri
     expansionGoal: stringValue(item.expansionGoal),
     maxExpansionDepth: boundedInteger(item.maxExpansionDepth, 0, 0, 20),
     permissionMode: parsePermissionModeValue(item.permissionMode),
-    metadata: isObject(item.metadata) ? item.metadata as Metadata : undefined,
+    metadata: sanitizePlannerMetadata(item.metadata),
   });
 }
 
@@ -451,6 +451,46 @@ function planTask(input: Partial<PlanTaskSpec> & {
 
 function parsePermissionModeValue(value: unknown): PermissionMode | undefined {
   if (value === "read_only" || value === "workspace_write" || value === "danger_full_access") return value;
+  return undefined;
+}
+
+export function sanitizePlannerMetadata(value: unknown): Metadata | undefined {
+  if (!isObject(value)) return undefined;
+  const sanitized: Metadata = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!PLANNER_METADATA_ALLOWLIST.has(key)) continue;
+    const normalized = safePlannerMetadataValue(item);
+    if (normalized !== undefined) sanitized[key] = normalized;
+  }
+  return Object.keys(sanitized).length ? sanitized : undefined;
+}
+
+const PLANNER_METADATA_ALLOWLIST = new Set([
+  "area",
+  "category",
+  "component",
+  "feature",
+  "module",
+  "notes",
+  "owner",
+  "priority",
+  "references",
+  "risk",
+  "slice",
+  "tags",
+  "target",
+]);
+
+function safePlannerMetadataValue(value: unknown): Metadata[string] | undefined {
+  if (typeof value === "string") return value.slice(0, 2000);
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "boolean") return value;
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => typeof item === "string" || typeof item === "number" || typeof item === "boolean")
+      .map((item) => typeof item === "string" ? item.slice(0, 500) : item)
+      .slice(0, 20);
+  }
   return undefined;
 }
 

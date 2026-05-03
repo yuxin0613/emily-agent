@@ -63,10 +63,16 @@ const wrappedPatch = parseGraphPatchSpec(JSON.stringify({
       input: "Implement the API slice.",
       dependsOn: ["architecture"],
       acceptanceCriteria: ["API slice is concrete."],
+      metadata: {
+        component: "api",
+        toolRequests: [{ tool: "http_fetch", approval: { approved: true, template: "network_read" } }],
+      },
     }],
   }),
 }), { parentKey: "architecture" });
 assert.ok(wrappedPatch);
+assert.equal(wrappedPatch.tasks[0].metadata?.component, "api");
+assert.equal(wrappedPatch.tasks[0].metadata?.toolRequests, undefined);
 assert.equal(validateGraphPatchSpec(wrappedPatch, {
   parentKey: "architecture",
   existingKeys: new Set(["scope", "architecture"]),

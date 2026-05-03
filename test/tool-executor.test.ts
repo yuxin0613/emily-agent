@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -90,6 +90,45 @@ const githubWriteApproval = await executor.execute({
 assert.equal(githubWriteApproval.ok, false);
 assert.match(String(githubWriteApproval.error || ""), /github_write/);
 
+const rawGithubApiWrite = await executor.execute({
+  tool: "github",
+  args: { command: ["api", "--method", "DELETE", "/repos/example/repo/git/refs/heads/main"] },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(rawGithubApiWrite.ok, false);
+assert.match(String(rawGithubApiWrite.error || ""), /github_write/);
+
+const localNetworkBlocked = await executor.execute({
+  tool: "http_fetch",
+  args: { url: "http://127.0.0.1:9/" },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  approval: { approved: true, template: "network_read", reason: "denylist test" },
+  sessionId: "tool-executor",
+});
+assert.equal(localNetworkBlocked.ok, false);
+assert.match(String(localNetworkBlocked.error || ""), /private|local/);
+
+const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-workspace-"));
+const outsideDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-outside-"));
+await writeFile(path.join(outsideDir, "secret.txt"), "outside secret", "utf8");
+await symlink(path.join(outsideDir, "secret.txt"), path.join(workspaceDir, "secret-link"));
+const symlinkExecutor = new ToolExecutor({
+  workspaceDir,
+  registry: createDefaultToolRegistry(),
+});
+const symlinkRead = await symlinkExecutor.execute({
+  tool: "read_file",
+  args: { path: "secret-link" },
+  roleDefinition: role,
+  permissionMode: "read_only",
+  sessionId: "tool-executor",
+});
+assert.equal(symlinkRead.ok, false);
+assert.match(String(symlinkRead.error || ""), /symlink|escapes workspace/);
+
 const browserServer = http.createServer((request, response) => {
   if (request.url === "/next") {
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -101,6 +140,8 @@ const browserServer = http.createServer((request, response) => {
 });
 await new Promise<void>((resolve) => browserServer.listen(0, "127.0.0.1", resolve));
 const address = browserServer.address() as AddressInfo;
+const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
+process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 try {
   const browser = await executor.execute({
     tool: "browser",
@@ -115,6 +156,8 @@ try {
   assert.equal(output.snapshot?.title, "Next page");
   assert.equal(output.snapshot?.headings?.[0]?.text, "Arrived");
 } finally {
+  if (previousPrivateEgress === undefined) delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
+  else process.env.EMILY_HTTP_ALLOW_PRIVATE = previousPrivateEgress;
   await new Promise<void>((resolve, reject) => browserServer.close((error) => error ? reject(error) : resolve()));
 }
 

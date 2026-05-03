@@ -863,9 +863,11 @@ function simpleProviderCommand(
 }
 
 function validateInput(command: RuntimeCommand, input: Record<string, unknown>, args: string[]): void {
+  const positionalArgs = requiredPositionalArgs(command.inputSchema.args);
   for (const key of command.inputSchema.required || []) {
     if (input[key] === undefined || input[key] === null || input[key] === "") {
-      if (args.length) continue;
+      const position = positionalArgs.indexOf(key);
+      if (position >= 0 && typeof args[position] === "string" && args[position].trim()) continue;
       throw new Error(`Command ${command.name} requires input.${key}`);
     }
   }
@@ -881,6 +883,12 @@ function validateInput(command: RuntimeCommand, input: Record<string, unknown>, 
     }
     if (typeof input[key] !== expected) throw new Error(`Command ${command.name} input.${key} must be ${expected}`);
   }
+}
+
+function requiredPositionalArgs(args: string[]): string[] {
+  return args
+    .map((arg) => arg.match(/^<([^>]+)>$/)?.[1])
+    .filter((arg): arg is string => Boolean(arg));
 }
 
 function renderDoctor(result: unknown): string {

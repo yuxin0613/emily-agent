@@ -167,7 +167,7 @@ const state = {
   events: [],
   sessions: []
 };
-const AUTH_TOKEN = ${JSON.stringify(authToken)};
+let AUTH_TOKEN = bootstrapAuthToken();
 const qs = (selector) => document.querySelector(selector);
 const api = {
   get: async (url) => request(url),
@@ -175,6 +175,7 @@ const api = {
 };
 
 document.addEventListener('DOMContentLoaded', () => {
+  ensureAuthToken();
   renderNav();
   qs('#refresh-btn').addEventListener('click', () => loadView(state.view));
   qs('#global-search').addEventListener('keydown', (event) => {
@@ -194,6 +195,27 @@ document.addEventListener('DOMContentLoaded', () => {
     .then(() => loadSessions())
     .then(() => navigate(location.hash.replace('#', '') || 'dashboard'));
 });
+
+function bootstrapAuthToken() {
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token') || '';
+  if (token) {
+    localStorage.setItem('emily.authToken', token);
+    params.delete('token');
+    const nextQuery = params.toString();
+    history.replaceState(null, '', location.pathname + (nextQuery ? '?' + nextQuery : '') + location.hash);
+    return token;
+  }
+  return localStorage.getItem('emily.authToken') || '';
+}
+
+function ensureAuthToken() {
+  if (AUTH_TOKEN) return;
+  const token = window.prompt('Emily AgentOS token') || '';
+  if (!token.trim()) return;
+  AUTH_TOKEN = token.trim();
+  localStorage.setItem('emily.authToken', AUTH_TOKEN);
+}
 
 window.addEventListener('hashchange', () => {
   navigate(location.hash.replace('#', '') || 'dashboard');

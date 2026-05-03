@@ -106,7 +106,7 @@ export async function startWebServer({
       const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
 
       if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) {
-        return sendHtml(response, 200, webAppHtml({ authToken }));
+        return sendHtml(response, 200, webAppHtml());
       }
 
       if (request.method === "GET" && url.pathname === "/health") {

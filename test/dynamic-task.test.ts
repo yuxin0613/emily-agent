@@ -89,6 +89,34 @@ async function runUserInputPauseTest(): Promise<void> {
   store.close();
 }
 
+async function runPermissionClampTest(): Promise<void> {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "dynamic-permission-"));
+  const store = await TaskStore.create({ dataDir });
+  const plan = createRollingPlan("dynamic-permission");
+  plan.tasks[0] = {
+    ...plan.tasks[0],
+    permissionMode: "danger_full_access",
+    metadata: {
+      toolRequests: [{ tool: "http_fetch", approval: { approved: true, template: "network_read" } }],
+      component: "planner-hardening",
+    },
+  };
+  const tasksByKey = createTaskGraphFromPlan({
+    taskStore: store,
+    plan,
+    baseMetadata: {
+      runId: "dynamic-permission",
+      sessionId: "dynamic-permission",
+      source: "test",
+      permissionMode: "read_only",
+    },
+  });
+  assert.equal(tasksByKey.architecture.metadata.permissionMode, "read_only");
+  assert.equal(tasksByKey.architecture.metadata.component, "planner-hardening");
+  assert.equal(tasksByKey.architecture.metadata.toolRequests, undefined);
+  store.close();
+}
+
 async function createDynamicFixture(runId: string): Promise<{
   store: TaskStore;
   plan: PlanSpec;
@@ -252,5 +280,6 @@ function taskResult(summary: string): string {
 await runForwardReferenceDependencyTest();
 await runFallbackClosureTest();
 await runUserInputPauseTest();
+await runPermissionClampTest();
 
 console.log("dynamic task test passed");

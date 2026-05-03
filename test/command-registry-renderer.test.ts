@@ -85,6 +85,11 @@ try {
     format: "text",
   }));
   assert.match(routeText, /Route/);
+
+  await assert.rejects(
+    runtime.runCommand("experiences.feedback", { args: ["exp_only"] }),
+    /requires input\.rating/,
+  );
 } finally {
   await runtime.shutdown();
 }
