@@ -10,6 +10,65 @@ export class EchoModelProvider implements ModelProvider {
   }
 
   async complete({ agent, role, prompt }: ModelCompleteInput): Promise<ModelCompleteResult> {
+    if (agent === "planner" && /GraphPatchSpec|adaptively expand/i.test(prompt)) {
+      const parentKey = extractParentKey(prompt);
+      return this.result(JSON.stringify({
+        reason: "Echo adaptive graph patch from the completed parent task.",
+        parentKey,
+        stop: false,
+        needsUserInput: false,
+        questions: [],
+        tasks: [
+          {
+            key: "implementation",
+            role: "developer",
+            title: "implementation slice",
+            input: "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.",
+            parentKey,
+            dependsOn: [parentKey],
+            dependencyType: "success",
+            acceptanceCriteria: [
+              "A concrete implementation slice or precise executable design is produced.",
+              "The result states what remains for later rolling waves.",
+            ],
+            toolHints: ["read_file", "write_file", "run_tests"],
+            skillHints: ["coding", "implementation"],
+            timeoutMs: 30000,
+            maxRetries: 1,
+            maxResultChars: 12000,
+            maxMemoryCandidates: 1,
+            wave: 2,
+            expandable: false,
+            expansionGoal: "",
+            maxExpansionDepth: 0,
+          },
+          {
+            key: "verification",
+            role: "reviewer",
+            title: "verification slice",
+            input: "Verify the implementation slice against the delivery exit criteria and return pass/fail/needs_user_input.",
+            parentKey,
+            dependsOn: ["implementation"],
+            dependencyType: "finished",
+            acceptanceCriteria: [
+              "The implementation result is checked against the current exit criteria.",
+              "The verdict is explicit and actionable.",
+            ],
+            toolHints: [],
+            skillHints: ["review", "quality"],
+            timeoutMs: 30000,
+            maxRetries: 1,
+            maxResultChars: 12000,
+            maxMemoryCandidates: 1,
+            wave: 2,
+            expandable: false,
+            expansionGoal: "",
+            maxExpansionDepth: 0,
+          },
+        ],
+      }));
+    }
+
     if (agent === "planner") {
       return this.result([
         "我会把任务拆成三步：",
@@ -65,4 +124,11 @@ export class EchoModelProvider implements ModelProvider {
 function compactPrompt(prompt: string): string {
   const lines = prompt.split("\n").filter(Boolean);
   return lines.slice(0, 8).join("\n");
+}
+
+function extractParentKey(prompt: string): string {
+  const jsonLike = prompt.match(/"parentKey"\s*:\s*"([^"]+)"/);
+  if (jsonLike?.[1]) return jsonLike[1];
+  const exact = prompt.match(/parentKey must be exactly ([A-Za-z0-9._-]+)/);
+  return exact?.[1]?.replace(/[.,;:]+$/, "") || "architecture";
 }

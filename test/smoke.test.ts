@@ -14,7 +14,10 @@ const response = await runtime.handleUserMessage("帮我设计一个 Node 多 ag
 
 assert.equal(response.agent, "emily");
 assert.ok(response.content.includes("EchoModelProvider"));
-assert.deepEqual(response.delegatedTo, ["planner", "developer"]);
+assert.ok(response.delegatedTo.includes("planner"));
+assert.ok(response.delegatedTo.includes("developer"));
+assert.ok(response.plan);
+assert.equal(response.plan.deliveryLevel, "poc");
 assert.ok(response.subResults?.some((result) => result.role === "reviewer"));
 assert.equal(response.reviewerVerdict?.verdict, "pass");
 

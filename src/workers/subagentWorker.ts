@@ -277,10 +277,15 @@ async function inspectTask({ task, taskStore }: { task: Task; taskStore: TaskSto
 }
 
 function notify(type: string, payload: { taskId: string; eventId: number | null; leaseToken?: string | null }): void {
-  process.send?.({
-    type,
-    ...payload,
-  });
+  if (!process.connected || !process.send) return;
+  try {
+    process.send({
+      type,
+      ...payload,
+    });
+  } catch {
+    // The SQLite task row is the source of truth; IPC is only a best-effort notification.
+  }
 }
 
 function isStartMessage(message: unknown): message is StartMessage {

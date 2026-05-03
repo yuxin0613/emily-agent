@@ -1,4 +1,5 @@
 import type { Metadata, Task, TaskDependency } from "../types.ts";
+import type { PlanSpec } from "../planning/PlanSpec.ts";
 import type { TaskStore } from "./TaskStore.ts";
 
 export interface TaskGraphSpec {
@@ -9,6 +10,7 @@ export interface TaskGraphSpec {
     input: string;
     dependsOn?: string[];
     dependencyType?: TaskDependency["dependencyType"];
+    maxRetries?: number;
     metadata?: Metadata;
   }>;
 }
@@ -32,6 +34,7 @@ export function createTaskGraph({
       role: node.role,
       title: node.title,
       input: node.input,
+      maxRetries: node.maxRetries,
       metadata: {
         ...baseMetadata,
         ...(node.metadata || {}),
@@ -53,4 +56,53 @@ export function createTaskGraph({
   }
 
   return tasks;
+}
+
+export function createTaskGraphFromPlan({
+  taskStore,
+  plan,
+  baseMetadata = {},
+}: {
+  taskStore: TaskStore;
+  plan: PlanSpec;
+  baseMetadata?: Metadata;
+}): Record<string, Task> {
+  return createTaskGraph({
+    taskStore,
+    baseMetadata: {
+      ...baseMetadata,
+      planGoal: plan.goal,
+      deliveryLevel: plan.deliveryLevel,
+      planningMode: plan.planningMode,
+      failureStrategy: plan.failureStrategy,
+      exitCriteria: plan.exitCriteria,
+      maxWaves: plan.maxWaves,
+    },
+    spec: {
+      tasks: plan.tasks.map((task) => ({
+        key: task.key,
+        role: task.role,
+        title: task.title,
+        input: task.input,
+        dependsOn: task.dependsOn,
+        dependencyType: task.dependencyType,
+        maxRetries: task.maxRetries,
+        metadata: {
+          ...(task.metadata || {}),
+          graphRole: task.role,
+          acceptanceCriteria: task.acceptanceCriteria,
+          toolHints: task.toolHints,
+          skillHints: task.skillHints,
+          parentKey: task.parentKey || "",
+          timeoutMs: task.timeoutMs,
+          maxResultChars: task.maxResultChars,
+          maxMemoryCandidates: task.maxMemoryCandidates,
+          wave: task.wave,
+          expandable: task.expandable,
+          expansionGoal: task.expansionGoal,
+          maxExpansionDepth: task.maxExpansionDepth,
+        },
+      })),
+    },
+  });
 }

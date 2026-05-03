@@ -75,6 +75,10 @@ flowchart LR
 - `TaskResult`: worker 结果使用结构化 JSON，包含 `status`、`summary`、`artifacts`、`memoryCandidates` 和 `nextActions`。
 - `task_graphs`: 为一次 run 的 DAG 提供 graph id，task metadata 会带上 `graphId`，便于跨 task 追踪。
 - `task_dependencies`: task graph / DAG 依赖，依赖满足后才会进入 `queued`。
+- `PlanSpec`: planner 输出或 fallback 生成结构化计划，包含 `deliveryLevel`、`exitCriteria`、`planningMode`、task DAG、每个 task 的 `acceptanceCriteria`。
+- `GraphPatchSpec`: rolling 图运行时的增量拆解协议，planner 会基于已完成节点结果追加下一层 task；解析或校验失败时降级到 fallback patch。
+- 长任务准出标准：检测到结果导向长任务但没有说明 `POC` / `UAT` / `production` 时，run 会进入 `waiting_user`，先要求用户确认准出等级。
+- `TaskGraphExecutor`: 自动执行 PlanSpec DAG，按依赖推进 queued / pending task，支持并行 ready task、role singleton 约束、失败后阻断依赖任务，以及 rolling 模式下的运行时图扩展。
 - `reviewer`: 正常流程里的结果验收 agent，区别于异常恢复用的 `inspector`；reviewer 优先输出 JSON verdict，再降级解析文本，并影响 run 状态。
 - `memory_candidates`: subagent 输出先成为候选记忆，统一由 `MemoryCandidatePolicy` approve / reject 后才写入 MemorySystem。
 - `getTimeline({ runId })`: 返回一次 run 的 run、tasks、events。
@@ -135,6 +139,29 @@ flowchart LR
 8. maintenance 增加 WAL checkpoint、optimize、vacuum、event retention 和 memory candidate retention。
 9. Web API 增加 diagnostics、cancel-task、cancel-run 控制入口。
 10. 增加 core hardening / chaos 类测试，覆盖取消、worker 超时、graph metadata、diagnostics 和 maintenance。
+
+## 结构化 Planner 和长任务执行
+
+新的 planner 路径不再固定为 `planner -> developer -> reviewer`。主 agent 会先让 planner 产出 `PlanSpec` JSON；如果 LLM 返回非 JSON 或结构不合格，会记录 `runtime.anomaly` 并使用保守 fallback plan。
+
+`PlanSpec` 的核心字段：
+
+- `deliveryLevel`: `poc`、`uat` 或 `production`，决定准出标准。
+- `exitCriteria`: 本次 run 的结果验收标准。
+- `planningMode`: `single_wave` 或 `rolling`；长任务默认使用 rolling，任务图可以先粗后细地逐步展开。
+- `tasks`: DAG task 列表，包含 `key`、`role`、`parentKey`、`dependsOn`、`acceptanceCriteria`、`timeoutMs`、`maxRetries`。
+- `expandable`: rolling 模式下可展开节点的标记；节点完成后 executor 会先创建 planner 扩展任务，让 planner 根据 `expansionGoal`、父节点结果和当前图状态返回 `GraphPatchSpec`。
+- `review`: 最终验收要求，reviewer 会根据 exit criteria 做质量门。
+
+执行语义：
+
+- 没有准出等级的长任务先返回确认问题，不启动大量子任务。
+- 有准出等级后，`TaskGraphExecutor` 会自动执行当前 DAG：依赖满足即入队，多个 ready task 可以并行等待，单个 role 仍保持 singleton worker。
+- rolling 图不是一次性冻结的 DAG。粗粒度节点可以带 `expandable=true`，完成后会向同一个 graph 追加更细的实现、验证或后续拆分 task，并记录 `task_graph.expansion_planned` 和 `task_graph.expanded` 事件。
+- 自适应拆解优先走 planner 生成的 `GraphPatchSpec` 严格 JSON；如果模型输出不是 JSON、依赖非法、task key 冲突或超出上限，会记录 `runtime.anomaly` 并使用保守 fallback patch。
+- 动态追加的 task 会带上 `expandedFromTaskId`、`parentKey`、`expansionDepth` 和原 graph 的准出标准，timeline 可以复盘任务图是如何从粗到细长出来的。
+- 如果上游 success dependency 失败，下游 task 会被标记为 `blocked`，不会一直等待到超时。
+- 每个 task 的 `acceptanceCriteria` 写入 metadata，timeline / task trace 可以复盘为什么这个 task 存在、验收标准是什么。
 
 ## 多模型 Provider
 
@@ -377,10 +404,12 @@ curl http://127.0.0.1:3000/events
 ## 模块边界
 
 - `src/agents/MainAgent.ts`: 主 agent，负责用户沟通、记忆召回、角色路由、任务派发和结果汇总。
-- `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务并写回记忆。
+- `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
 - `src/tasks/TaskStore.ts`: SQLite task、agent、event、role queue、状态机、lease、retry/dead-letter。
 - `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
+- `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛和 rolling 图扩展。
 - `src/tasks/TaskResult.ts`: 结构化 task result 序列化、解析和 summary 提取。
+- `src/planning/PlanSpec.ts`: PlanSpec / GraphPatchSpec 类型、解析、fallback 计划、准出标准识别和 validator。
 - `src/tasks/errors.ts`: 状态机错误类型。
 - `src/events/RuntimeEventFactory.ts`: 统一生成 runtime event payload。
 - `src/recovery/RecoveryPolicy.ts`: worker exit / 异常恢复决策。

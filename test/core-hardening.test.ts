@@ -101,13 +101,12 @@ const plannerFailRuntime = await createRuntime({
   dataDir: plannerFailDataDir,
   roleDir: plannerFailRoleDir,
 });
-const plannerFailResponse = await plannerFailRuntime.handleUserMessage("实现一个 planner 失败时不等待依赖任务的测试", {
+const plannerFailResponse = await plannerFailRuntime.handleUserMessage("实现一个 planner 失败时不等待依赖任务的 POC 测试", {
   sessionId: "planner-fail",
   source: "test",
 });
-const blockedDeveloper = plannerFailResponse.subResults?.find((result) => result.role === "developer");
-assert.equal(blockedDeveloper?.status, "blocked");
 assert.ok(plannerFailResponse.subResults?.some((result) => result.role === "planner" && result.status !== "done"));
+assert.ok(!plannerFailResponse.subResults?.some((result) => result.role === "developer"));
 await plannerFailRuntime.shutdown();
 
 console.log("core hardening test passed");

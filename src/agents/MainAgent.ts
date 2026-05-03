@@ -8,8 +8,18 @@ import type { ExperienceStore } from "../experience/ExperienceStore.ts";
 import type { ExperienceRecallResult } from "../types.ts";
 import { parseReviewerVerdict, type ReviewerVerdict } from "../review/ReviewerVerdict.ts";
 import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
-import { createTaskGraph } from "../tasks/TaskGraph.ts";
+import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts";
+import { TaskGraphExecutor } from "../tasks/TaskGraphExecutor.ts";
 import { taskResultSummary } from "../tasks/TaskResult.ts";
+import {
+  createFallbackPlanSpec,
+  deliveryLevelQuestion,
+  inferDeliveryLevel,
+  parsePlanSpec,
+  requiresDeliveryLevelClarification,
+  validatePlanSpec,
+  type PlanSpec,
+} from "../planning/PlanSpec.ts";
 
 interface MainAgentResult {
   agent: string;
@@ -26,6 +36,13 @@ interface MainAgentResult {
     content: string;
   }>;
   reviewerVerdict?: ReviewerVerdict;
+  plan?: {
+    goal: string;
+    deliveryLevel: string;
+    planningMode: string;
+    taskCount: number;
+    exitCriteria: string[];
+  };
 }
 
 export class MainAgent {
@@ -79,6 +96,8 @@ export class MainAgent {
       userInput: normalizedInput,
     });
     const selectedAgents = this.selectSubAgents(normalizedInput);
+    let delegatedTo = selectedAgents;
+    let planSummary: MainAgentResult["plan"];
     let subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }> = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
 
@@ -89,6 +108,28 @@ export class MainAgent {
         content: normalizedInput,
         metadata: { source, runId: run.id },
       });
+
+      if (requiresDeliveryLevelClarification(normalizedInput)) {
+        const content = deliveryLevelQuestion(normalizedInput);
+        this.taskStore.completeRun(run.id, "waiting_user");
+        await this.memory.remember({
+          scope: sessionId,
+          kind: "message:assistant",
+          content,
+          metadata: {
+            source: "main-agent",
+            runId: run.id,
+            waitingFor: "delivery_level",
+          },
+        });
+        return {
+          agent: this.name,
+          runId: run.id,
+          content,
+          delegatedTo: [],
+          subResults: [],
+        };
+      }
 
       const relevantMemory = await this.memory.recall(normalizedInput, {
         scope: sessionId,
@@ -108,6 +149,8 @@ export class MainAgent {
       });
       subResults = delegated.subResults;
       reviewerVerdict = delegated.reviewerVerdict;
+      delegatedTo = delegated.delegatedTo;
+      planSummary = summarizePlan(delegated.plan);
 
       const content = await this.synthesizeResponse({
         input: normalizedInput,
@@ -115,6 +158,7 @@ export class MainAgent {
         sessionId,
         relevantMemory,
         relevantExperiences,
+        plan: delegated.plan,
         subResults,
       });
       for (const experience of relevantExperiences) {
@@ -128,7 +172,8 @@ export class MainAgent {
         metadata: {
           source: "main-agent",
           runId: run.id,
-          delegatedTo: selectedAgents,
+          delegatedTo,
+          plan: planSummary || null,
         },
       });
 
@@ -142,9 +187,10 @@ export class MainAgent {
         agent: this.name,
         runId: run.id,
         content,
-        delegatedTo: selectedAgents,
+        delegatedTo,
         memory: relevantMemory,
         experiences: relevantExperiences,
+        plan: planSummary,
         subResults,
         reviewerVerdict,
       };
@@ -160,7 +206,7 @@ export class MainAgent {
           metadata: {
             source: "main-agent",
             runId: run.id,
-            delegatedTo: selectedAgents,
+            delegatedTo,
           },
         });
       } catch {
@@ -170,9 +216,10 @@ export class MainAgent {
         agent: this.name,
         runId: run.id,
         content,
-        delegatedTo: selectedAgents,
+        delegatedTo,
         subResults,
         reviewerVerdict,
+        plan: planSummary,
       };
     }
   }
@@ -192,10 +239,13 @@ export class MainAgent {
   }): Promise<{
     subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }>;
     reviewerVerdict?: ReviewerVerdict;
+    delegatedTo: string[];
+    plan: PlanSpec;
   }> {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
-    const taskGraph = createTaskGraph({
+    const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc");
+    const planningGraph = createTaskGraph({
       taskStore: this.taskStore,
       baseMetadata: {
         sessionId,
@@ -212,84 +262,118 @@ export class MainAgent {
             key: "planner",
             role: "planner",
             title: `planner: ${input.slice(0, 60)}`,
-            input,
-            metadata: { graphRole: "planner" },
-          },
-          ...selectedAgents.filter((agentRole) => agentRole !== "planner").map((role) => ({
-            key: role,
-            role,
-            title: `${role}: ${input.slice(0, 60)}`,
-            input,
-            dependsOn: ["planner"],
+            input: planningPrompt,
             metadata: {
-              graphRole: role,
-              autoRetry: false,
+              graphRole: "planner",
+              planPhase: "planning",
+              deliveryLevel: inferDeliveryLevel(input) || "poc",
             },
-          })),
+          },
         ],
       },
     });
-    const plannerTask = taskGraph.planner;
-    const graphId = String(plannerTask.metadata.graphId || "");
+    const plannerTask = planningGraph.planner;
 
     const finishedPlanner = await this.roleAgentManager.runTask(plannerTask);
     results.push(this.formatTaskResult("planner", finishedPlanner));
     if (finishedPlanner.status !== "done") {
-      for (const role of selectedAgents.filter((agentRole) => agentRole !== "planner")) {
-        const task = taskGraph[role];
-        if (!task) continue;
-        this.taskStore.transitionTask(task.id, "blocked", {
-          reason: "planner did not complete",
-          error: `Skipped because planner finished with status ${finishedPlanner.status}.`,
-          metadata: {
-            ...task.metadata,
-            blockedByTaskId: finishedPlanner.id,
-            blockedReason: "planner did not complete",
-          },
-        });
-        await this.taskStore.writeTaskMarkdown(task.id);
-        results.push(this.formatTaskResult(role, this.taskStore.getTaskOrThrow(task.id)));
-      }
       this.taskStore.refreshTaskGraphStatuses();
-      return { subResults: results };
+      const fallback = createFallbackPlanSpec(input, selectedAgents);
+      return { subResults: results, delegatedTo: ["planner"], plan: fallback };
     }
 
-    for (const role of selectedAgents.filter((agentRole) => agentRole !== "planner")) {
-      const task = taskGraph[role];
-      const finishedTask = await this.roleAgentManager.runTask(task);
-      results.push(this.formatTaskResult(role, finishedTask));
+    let plan = parsePlanSpec(this.formatTaskResult("planner", finishedPlanner).content)
+      || createFallbackPlanSpec(input, selectedAgents);
+    const validation = validatePlanSpec(plan);
+    if (!validation.ok) {
+      this.taskStore.addEvent({
+        type: "runtime.anomaly",
+        taskId: finishedPlanner.id,
+        payload: {
+          severity: "warning",
+          code: "planner_plan_invalid",
+          message: "Planner returned an invalid PlanSpec; fallback plan was used.",
+          errors: validation.errors,
+          runId,
+          repaired: true,
+        },
+      });
+      plan = createFallbackPlanSpec(input, selectedAgents);
+    }
+
+    const executionTasks = createTaskGraphFromPlan({
+      taskStore: this.taskStore,
+      plan,
+      baseMetadata: {
+        sessionId,
+        source,
+        runId,
+        createdBy: this.name,
+        planSourceTaskId: finishedPlanner.id,
+      },
+    });
+    const executor = new TaskGraphExecutor({
+      taskStore: this.taskStore,
+      roleAgentManager: this.roleAgentManager,
+      plan,
+    });
+    const execution = await executor.execute(executionTasks);
+    for (const task of execution.completed) {
+      results.push(this.formatTaskResult(task.role, task));
+    }
+    for (const task of execution.internal) {
+      this.taskStore.acknowledgeTask(task.id);
     }
 
     if (results.some((result) => result.role !== "planner" && result.status === "done")) {
       this.taskStore.updateRunStatus(runId, "reviewing");
-      const reviewTask = this.taskStore.createTask({
-        role: "reviewer",
-        title: `reviewer: ${input.slice(0, 60)}`,
-        input: [
-          "Review whether the subagent outputs satisfy the user request.",
-          `User input: ${input}`,
-          "Sub-results:",
-          ...results.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
-        ].join("\n"),
-        metadata: {
-          sessionId,
-          source,
-          runId,
-          createdBy: this.name,
-          graphRole: "reviewer",
-          graphId,
-        },
-      });
-      for (const result of results.filter((item) => item.role !== "planner")) {
-        this.taskStore.addTaskDependency(reviewTask.id, result.taskId, "finished");
+      const explicitReview = results.filter((result) => result.role === "reviewer").at(-1);
+      if (explicitReview) {
+        reviewerVerdict = parseReviewerVerdict(explicitReview.content);
+      } else if (plan.review.required) {
+        const reviewTask = this.taskStore.createTask({
+          role: "reviewer",
+          title: `reviewer: ${input.slice(0, 60)}`,
+          input: [
+            "Review whether the graph outputs satisfy the user request and delivery exit criteria.",
+            `User input: ${input}`,
+            `Delivery level: ${plan.deliveryLevel}`,
+            "Exit criteria:",
+            ...plan.exitCriteria.map((item) => `- ${item}`),
+            "Sub-results:",
+            ...results.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
+          ].join("\n"),
+          metadata: {
+            sessionId,
+            source,
+            runId,
+            createdBy: this.name,
+            graphRole: "reviewer",
+            graphId: execution.graphId || "",
+            acceptanceCriteria: plan.review.criteria,
+          },
+        });
+        for (const result of results.filter((item) => item.role !== "planner")) {
+          this.taskStore.addTaskDependency(reviewTask.id, result.taskId, "finished");
+        }
+        const finishedReview = await this.roleAgentManager.runTask(reviewTask);
+        const reviewResult = this.formatTaskResult("reviewer", finishedReview);
+        reviewerVerdict = parseReviewerVerdict(reviewResult.content);
+        results.push(reviewResult);
       }
-      const finishedReview = await this.roleAgentManager.runTask(reviewTask);
-      const reviewResult = this.formatTaskResult("reviewer", finishedReview);
-      reviewerVerdict = parseReviewerVerdict(reviewResult.content);
-      results.push(reviewResult);
     }
 
-    return { subResults: results, reviewerVerdict };
+    return {
+      subResults: results,
+      reviewerVerdict,
+      delegatedTo: unique([
+        "planner",
+        ...plan.tasks.map((task) => task.role),
+        ...results.map((result) => result.role),
+        ...(plan.review.required ? ["reviewer"] : []),
+      ]),
+      plan,
+    };
   }
 
   async approveRunMemoryCandidates(runId: string): Promise<void> {
@@ -328,7 +412,7 @@ export class MainAgent {
     const lower = input.toLowerCase();
     const agents = ["planner"];
 
-    if (/(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui)/i.test(lower)) {
+    if (/(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口)/i.test(lower)) {
       agents.push("developer");
     } else {
       agents.push("researcher");
@@ -343,6 +427,7 @@ export class MainAgent {
     sessionId,
     relevantMemory,
     relevantExperiences,
+    plan,
     subResults,
   }: {
     input: string;
@@ -350,6 +435,7 @@ export class MainAgent {
     sessionId?: string;
     relevantMemory: MemoryRecallResult;
     relevantExperiences: ExperienceRecallResult[];
+    plan?: PlanSpec;
     subResults: Array<{ agent: string; content: string }>;
   }): Promise<string> {
     const prompt = [
@@ -357,6 +443,8 @@ export class MainAgent {
       `Relevant memory count: ${relevantMemory.semantic.length + relevantMemory.shortTerm.length}`,
       "Relevant active experiences:",
       ...formatExperiences(relevantExperiences),
+      "Execution plan:",
+      ...(plan ? formatPlan(plan) : ["- (none)"]),
       "Sub-agent results:",
       ...subResults.map((result) => `- ${result.agent}: ${result.content}`),
       "",
@@ -372,6 +460,88 @@ export class MainAgent {
     }), this.model);
     return result.content;
   }
+}
+
+function plannerPrompt(input: string, deliveryLevel: string): string {
+  return [
+    "Create a PlanSpec JSON object for an outcome-oriented agent task graph.",
+    "Return only JSON. Do not wrap it in markdown.",
+    "",
+    "Required shape:",
+    JSON.stringify({
+      goal: "string",
+      deliveryLevel,
+      exitCriteria: ["string"],
+      planningMode: "single_wave or rolling",
+      maxWaves: 1,
+      failureStrategy: "block_dependents",
+      tasks: [{
+        key: "implementation",
+        role: "developer",
+        title: "short task title",
+        input: "full task instructions",
+        parentKey: "",
+        dependsOn: [],
+        dependencyType: "success",
+        acceptanceCriteria: ["string"],
+        toolHints: [],
+        skillHints: [],
+        timeoutMs: 30000,
+        maxRetries: 1,
+        maxResultChars: 12000,
+        maxMemoryCandidates: 1,
+        wave: 1,
+        expandable: false,
+        expansionGoal: "",
+        maxExpansionDepth: 0,
+      }],
+      review: {
+        required: true,
+        criteria: ["string"],
+      },
+      clarificationRequired: false,
+      clarificationQuestions: [],
+    }, null, 2),
+    "",
+    "Planning rules:",
+    "- For long product/application work, decompose by outcome -> module -> feature slice -> verification.",
+    "- For rolling mode, keep the initial graph coarse and mark tasks that should expand later with expandable=true.",
+    "- Expandable tasks should describe expansionGoal and maxExpansionDepth.",
+    "- Each task must have acceptanceCriteria.",
+    "- Use dependencies instead of prose ordering.",
+    "- Keep the first wave small enough to execute now; use planningMode=rolling for larger goals.",
+    "- Use deliveryLevel to decide exit criteria: poc, uat, production.",
+    "",
+    `User request: ${input}`,
+  ].join("\n");
+}
+
+function summarizePlan(plan?: PlanSpec): MainAgentResult["plan"] | undefined {
+  if (!plan) return undefined;
+  return {
+    goal: plan.goal,
+    deliveryLevel: plan.deliveryLevel,
+    planningMode: plan.planningMode,
+    taskCount: plan.tasks.length,
+    exitCriteria: plan.exitCriteria,
+  };
+}
+
+function formatPlan(plan: PlanSpec): string[] {
+  return [
+    `- goal: ${plan.goal}`,
+    `- deliveryLevel: ${plan.deliveryLevel}`,
+    `- planningMode: ${plan.planningMode}`,
+    `- taskCount: ${plan.tasks.length}`,
+    "- exitCriteria:",
+    ...plan.exitCriteria.map((item) => `  - ${item}`),
+    "- tasks:",
+    ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
+  ];
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 function runStatusFrom({
