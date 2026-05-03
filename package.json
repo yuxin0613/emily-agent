@@ -9,8 +9,8 @@
     "start": "node src/index.ts",
     "tui": "node src/index.ts --tui",
     "web": "node src/index.ts --web",
-    "test": "node test/smoke.test.ts && node test/recovery.test.ts && node test/restart.test.ts && node test/state-machine.test.ts && node test/core-hardening.test.ts && node test/provider.test.ts && node test/tool-skill.test.ts && node test/skill-candidate.test.ts && node test/planner-graph.test.ts && node test/dynamic-task.test.ts && node test/memory-optimization.test.ts && node test/experience.test.ts && node test/policy.test.ts && node test/migration.test.ts",
-    "check": "node test/smoke.test.ts && node test/recovery.test.ts && node test/restart.test.ts && node test/state-machine.test.ts && node test/core-hardening.test.ts && node test/provider.test.ts && node test/tool-skill.test.ts && node test/skill-candidate.test.ts && node test/planner-graph.test.ts && node test/dynamic-task.test.ts && node test/memory-optimization.test.ts && node test/experience.test.ts && node test/policy.test.ts && node test/migration.test.ts"
+    "test": "node test/smoke.test.ts && node test/recovery.test.ts && node test/restart.test.ts && node test/state-machine.test.ts && node test/core-hardening.test.ts && node test/provider.test.ts && node test/tool-skill.test.ts && node test/skill-candidate.test.ts && node test/session.test.ts && node test/ui.test.ts && node test/planner-graph.test.ts && node test/dynamic-task.test.ts && node test/memory-optimization.test.ts && node test/experience.test.ts && node test/policy.test.ts && node test/migration.test.ts",
+    "check": "node test/smoke.test.ts && node test/recovery.test.ts && node test/restart.test.ts && node test/state-machine.test.ts && node test/core-hardening.test.ts && node test/provider.test.ts && node test/tool-skill.test.ts && node test/skill-candidate.test.ts && node test/session.test.ts && node test/ui.test.ts && node test/planner-graph.test.ts && node test/dynamic-task.test.ts && node test/memory-optimization.test.ts && node test/experience.test.ts && node test/policy.test.ts && node test/migration.test.ts"
   },
   "engines": {
     "node": ">=22.18"

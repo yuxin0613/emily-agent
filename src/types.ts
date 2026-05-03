@@ -165,6 +165,24 @@ export interface Run {
   completedAt: string | null;
 }
 
+export type SessionStatus = "active" | "hidden" | "trashed" | "deleted";
+
+export interface Session {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  source: string;
+  runCount: number;
+  createdAt: string;
+  updatedAt: string;
+  lastActiveAt: string | null;
+  hiddenAt: string | null;
+  trashedAt: string | null;
+  deleteAfter: string | null;
+  archiveSummary: string | null;
+  metadata: Metadata;
+}
+
 export interface TaskDependency {
   taskId: string;
   dependsOnTaskId: string;
@@ -222,6 +240,12 @@ export type RuntimeEventType =
   | "run.started"
   | "run.status"
   | "run.completed"
+  | "session.created"
+  | "session.updated"
+  | "session.hidden"
+  | "session.restored"
+  | "session.trashed"
+  | "session.deleted"
   | "task.created"
   | "task.dependency.created"
   | "task.queued"

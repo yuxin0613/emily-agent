@@ -2,7 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
+import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Session, SessionStatus, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "./errors.ts";
 import { RuntimeEventFactory } from "../events/RuntimeEventFactory.ts";
@@ -34,6 +34,13 @@ interface CreateRunInput {
   sessionId: string;
   source: string;
   userInput: string;
+}
+
+interface CreateSessionInput {
+  id?: string;
+  title?: string;
+  source?: string;
+  metadata?: Metadata;
 }
 
 export class TaskStore {
@@ -203,6 +210,32 @@ export class TaskStore {
           this.ensureColumn("tasks", "lease_token", "TEXT");
         },
       },
+      {
+        version: 5,
+        name: "create_sessions",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS sessions (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              status TEXT NOT NULL,
+              source TEXT NOT NULL,
+              run_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              last_active_at TEXT,
+              hidden_at TEXT,
+              trashed_at TEXT,
+              delete_after TEXT,
+              archive_summary TEXT,
+              metadata TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sessions_status_updated ON sessions(status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_sessions_delete_after ON sessions(status, delete_after);
+          `);
+        },
+      },
     ]);
 
     this.ensureColumn("tasks", "retry_count", "INTEGER NOT NULL DEFAULT 0");
@@ -291,7 +324,273 @@ export class TaskStore {
     return { ...task, eventId };
   }
 
+  createSession({
+    id = randomUUID(),
+    title = "New session",
+    source = "runtime",
+    metadata = {},
+  }: CreateSessionInput = {}): Session {
+    const now = new Date().toISOString();
+    const session: Session = {
+      id,
+      title: normalizeSessionTitle(title),
+      status: "active",
+      source,
+      runCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      lastActiveAt: null,
+      hiddenAt: null,
+      trashedAt: null,
+      deleteAfter: null,
+      archiveSummary: null,
+      metadata,
+    };
+    this.db
+      .prepare(`
+        INSERT INTO sessions (
+          id, title, status, source, run_count, created_at, updated_at, last_active_at,
+          hidden_at, trashed_at, delete_after, archive_summary, metadata
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        session.id,
+        session.title,
+        session.status,
+        session.source,
+        session.runCount,
+        session.createdAt,
+        session.updatedAt,
+        session.lastActiveAt,
+        session.hiddenAt,
+        session.trashedAt,
+        session.deleteAfter,
+        session.archiveSummary,
+        JSON.stringify(session.metadata),
+      );
+    this.addEvent({
+      type: "session.created",
+      payload: { sessionId: session.id, title: session.title, source: session.source },
+    });
+    return session;
+  }
+
+  ensureSession({ id, title, source = "runtime", metadata = {} }: CreateSessionInput & { id: string }): Session {
+    const existing = this.getSession(id);
+    if (existing) {
+      if (existing.status === "deleted") {
+        throw new Error(`Session has been deleted: ${id}`);
+      }
+      return existing;
+    }
+    return this.createSession({ id, title: title || "New session", source, metadata });
+  }
+
+  touchSession(sessionId: string, { userInput = "", source = "runtime" }: { userInput?: string; source?: string } = {}): Session {
+    const existing = this.ensureSession({
+      id: sessionId,
+      title: titleFromUserInput(userInput),
+      source,
+    });
+    const now = new Date().toISOString();
+    const nextTitle = shouldReplaceSessionTitle(existing.title)
+      ? titleFromUserInput(userInput, existing.title)
+      : existing.title;
+    this.db
+      .prepare(`
+        UPDATE sessions
+        SET title = ?,
+            status = CASE WHEN status IN ('hidden', 'trashed', 'deleted') THEN 'active' ELSE status END,
+            source = CASE WHEN source = 'runtime' THEN ? ELSE source END,
+            run_count = run_count + 1,
+            updated_at = ?,
+            last_active_at = ?,
+            hidden_at = NULL,
+            trashed_at = NULL,
+            delete_after = NULL
+        WHERE id = ?
+      `)
+      .run(nextTitle, source, now, now, sessionId);
+    const touched = this.getSession(sessionId);
+    if (!touched) throw new Error(`Session not found after touch: ${sessionId}`);
+    this.addEvent({
+      type: "session.updated",
+      payload: { sessionId, title: touched.title, source, runCount: touched.runCount },
+    });
+    return touched;
+  }
+
+  getSession(sessionId: string): Session | null {
+    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId) as SessionRow | undefined;
+    return row ? parseSession(row) : null;
+  }
+
+  listSessions({
+    status,
+    includeHidden = false,
+    includeTrashed = false,
+    includeDeleted = false,
+    limit = 50,
+  }: {
+    status?: SessionStatus;
+    includeHidden?: boolean;
+    includeTrashed?: boolean;
+    includeDeleted?: boolean;
+    limit?: number;
+  } = {}): Session[] {
+    const statuses = status
+      ? [status]
+      : [
+        "active",
+        ...(includeHidden ? ["hidden"] : []),
+        ...(includeTrashed ? ["trashed"] : []),
+        ...(includeDeleted ? ["deleted"] : []),
+      ];
+    if (!statuses.length) return [];
+    const placeholders = statuses.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM sessions
+        WHERE status IN (${placeholders})
+        ORDER BY COALESCE(last_active_at, updated_at, created_at) DESC
+        LIMIT ?
+      `)
+      .all(...statuses, limit) as SessionRow[];
+    return rows.map(parseSession);
+  }
+
+  hideSession(sessionId: string, reason = "cleared by user"): Session {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (session.status === "deleted") throw new Error(`Session has been deleted: ${sessionId}`);
+    const now = new Date().toISOString();
+    const summary = this.buildSessionArchiveSummary(sessionId);
+    this.db
+      .prepare(`
+        UPDATE sessions
+        SET status = 'hidden',
+            hidden_at = ?,
+            updated_at = ?,
+            archive_summary = ?,
+            metadata = ?
+        WHERE id = ? AND status != 'deleted'
+      `)
+      .run(now, now, summary, JSON.stringify({ ...session.metadata, hiddenReason: reason }), sessionId);
+    const hidden = this.getSession(sessionId);
+    if (!hidden) throw new Error(`Session not found after hide: ${sessionId}`);
+    this.addEvent({
+      type: "session.hidden",
+      payload: { sessionId, reason },
+    });
+    return hidden;
+  }
+
+  restoreSession(sessionId: string): Session {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (session.status === "deleted") throw new Error(`Session has been deleted: ${sessionId}`);
+    const now = new Date().toISOString();
+    this.db
+      .prepare(`
+        UPDATE sessions
+        SET status = 'active',
+            hidden_at = NULL,
+            trashed_at = NULL,
+            delete_after = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(now, sessionId);
+    const restored = this.getSession(sessionId);
+    if (!restored) throw new Error(`Session not found after restore: ${sessionId}`);
+    this.addEvent({
+      type: "session.restored",
+      payload: { sessionId },
+    });
+    return restored;
+  }
+
+  trashSession(sessionId: string, { deleteAfterDays = 30, reason = "archived" }: { deleteAfterDays?: number; reason?: string } = {}): Session {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error(`Session not found: ${sessionId}`);
+    if (session.status === "deleted") throw new Error(`Session has been deleted: ${sessionId}`);
+    const now = new Date();
+    const deleteAfter = new Date(now.getTime() + deleteAfterDays * 24 * 60 * 60 * 1000).toISOString();
+    const summary = session.archiveSummary || this.buildSessionArchiveSummary(sessionId);
+    this.db
+      .prepare(`
+        UPDATE sessions
+        SET status = 'trashed',
+            trashed_at = ?,
+            delete_after = ?,
+            updated_at = ?,
+            archive_summary = ?,
+            metadata = ?
+        WHERE id = ? AND status != 'deleted'
+      `)
+      .run(now.toISOString(), deleteAfter, now.toISOString(), summary, JSON.stringify({ ...session.metadata, trashReason: reason }), sessionId);
+    const trashed = this.getSession(sessionId);
+    if (!trashed) throw new Error(`Session not found after trash: ${sessionId}`);
+    this.addEvent({
+      type: "session.trashed",
+      payload: { sessionId, reason, deleteAfter },
+    });
+    return trashed;
+  }
+
+  archiveHiddenSessions({ deleteAfterDays = 30, limit = 50 }: { deleteAfterDays?: number; limit?: number } = {}): Session[] {
+    const hidden = this.listSessions({ status: "hidden", limit });
+    return hidden.map((session) => this.trashSession(session.id, {
+      deleteAfterDays,
+      reason: "memory_skill_archive_complete",
+    }));
+  }
+
+  pruneTrashedSessions({ olderThanDays = 30 }: { olderThanDays?: number } = {}): number {
+    const nowIso = new Date().toISOString();
+    const fallbackCutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    const now = new Date().toISOString();
+    const rows = this.db
+      .prepare(`
+        SELECT id FROM sessions
+        WHERE status = 'trashed'
+          AND (
+            (delete_after IS NOT NULL AND delete_after <= ?)
+            OR (delete_after IS NULL AND trashed_at IS NOT NULL AND trashed_at <= ?)
+          )
+      `)
+      .all(nowIso, fallbackCutoff) as Array<{ id: string }>;
+    for (const row of rows) {
+      this.db
+        .prepare("UPDATE sessions SET status = 'deleted', updated_at = ? WHERE id = ?")
+        .run(now, row.id);
+      this.addEvent({
+        type: "session.deleted",
+        payload: { sessionId: row.id },
+      });
+    }
+    return rows.length;
+  }
+
+  buildSessionArchiveSummary(sessionId: string): string {
+    const runs = this.getRunsForSession(sessionId, { includeHidden: true, limit: 20 });
+    if (!runs.length) return "No runs were recorded in this session.";
+    const statusCounts = runs.reduce<Record<string, number>>((acc, run) => {
+      acc[run.status] = (acc[run.status] || 0) + 1;
+      return acc;
+    }, {});
+    const recentInputs = runs.slice(0, 5).map((run) => `- ${truncateText(run.userInput, 96)}`).join("\n");
+    return [
+      `Runs: ${runs.length}`,
+      `Statuses: ${Object.entries(statusCounts).map(([status, count]) => `${status}=${count}`).join(", ")}`,
+      "Recent inputs:",
+      recentInputs,
+    ].join("\n");
+  }
+
   createRun({ sessionId, source, userInput }: CreateRunInput): Run {
+    this.touchSession(sessionId, { userInput, source });
     const now = new Date().toISOString();
     const run: Run = {
       id: randomUUID(),
@@ -330,6 +629,13 @@ export class TaskStore {
   getRun(runId: string): Run | null {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as RunRow | undefined;
     return row ? parseRun(row) : null;
+  }
+
+  getRunsForSession(sessionId: string, { limit = 50 }: { includeHidden?: boolean; limit?: number } = {}): Run[] {
+    const rows = this.db
+      .prepare("SELECT * FROM runs WHERE session_id = ? ORDER BY started_at DESC LIMIT ?")
+      .all(sessionId, limit) as RunRow[];
+    return rows.map(parseRun);
   }
 
   getActiveRuns({ olderThanMs = 0 }: { olderThanMs?: number } = {}): Run[] {
@@ -1289,6 +1595,9 @@ export class TaskStore {
     queuedRoles: string[];
     openTaskGraphs: number;
     diagnostics: number;
+    activeSessions: number;
+    hiddenSessions: number;
+    trashedSessions: number;
   } {
     return {
       pendingTasks: count(this.db, "SELECT COUNT(*) AS count FROM tasks WHERE status IN ('pending', 'queued')"),
@@ -1300,6 +1609,9 @@ export class TaskStore {
       queuedRoles: this.getQueuedRoles(),
       openTaskGraphs: count(this.db, "SELECT COUNT(*) AS count FROM task_graphs WHERE status IN ('pending', 'running')"),
       diagnostics: this.diagnostics({ repair: false, emit: false }).length,
+      activeSessions: count(this.db, "SELECT COUNT(*) AS count FROM sessions WHERE status = 'active'"),
+      hiddenSessions: count(this.db, "SELECT COUNT(*) AS count FROM sessions WHERE status = 'hidden'"),
+      trashedSessions: count(this.db, "SELECT COUNT(*) AS count FROM sessions WHERE status = 'trashed'"),
     };
   }
 
@@ -1431,6 +1743,22 @@ interface RunRow {
   completed_at: string | null;
 }
 
+interface SessionRow {
+  id: string;
+  title: string;
+  status: SessionStatus;
+  source: string;
+  run_count: number;
+  created_at: string;
+  updated_at: string;
+  last_active_at: string | null;
+  hidden_at: string | null;
+  trashed_at: string | null;
+  delete_after: string | null;
+  archive_summary: string | null;
+  metadata: string;
+}
+
 interface TaskGraphRow {
   id: string;
   run_id: string | null;
@@ -1515,6 +1843,24 @@ function parseRun(row: RunRow): Run {
   };
 }
 
+function parseSession(row: SessionRow): Session {
+  return {
+    id: row.id,
+    title: row.title,
+    status: row.status,
+    source: row.source,
+    runCount: row.run_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastActiveAt: row.last_active_at,
+    hiddenAt: row.hidden_at,
+    trashedAt: row.trashed_at,
+    deleteAfter: row.delete_after,
+    archiveSummary: row.archive_summary,
+    metadata: JSON.parse(row.metadata || "{}") as Metadata,
+  };
+}
+
 function parseTaskGraph(row: TaskGraphRow): TaskGraph {
   return {
     id: row.id,
@@ -1594,6 +1940,26 @@ function recoverableRunStatusFromTasks(tasks: Task[]): Run["status"] | null {
   if (tasks.some((task) => task.status === "blocked")) return "blocked";
   if (tasks.some((task) => task.status === "done")) return "partially_done";
   return "failed";
+}
+
+function normalizeSessionTitle(title: string): string {
+  const normalized = title.replace(/\s+/g, " ").trim();
+  return truncateText(normalized || "New session", 64);
+}
+
+function shouldReplaceSessionTitle(title: string): boolean {
+  return title === "New session" || /^Session \d{4}-\d{2}-\d{2}/.test(title);
+}
+
+function titleFromUserInput(input: string, fallback = "New session"): string {
+  const firstLine = input.split(/\r?\n/).find((line) => line.trim()) || "";
+  return normalizeSessionTitle(firstLine || fallback);
+}
+
+function truncateText(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 function count(db: DatabaseSync, sql: string): number {

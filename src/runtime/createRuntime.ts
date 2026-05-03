@@ -201,6 +201,35 @@ export async function createRuntime(options: {
     initializeDefaultRoles(options: Parameters<RoleManager["initializeDefaultRoles"]>[0] = {}) {
       return roleManager.initializeDefaultRoles(options);
     },
+    listSessions(options: Parameters<TaskStore["listSessions"]>[0] = {}) {
+      return taskStore.listSessions(options);
+    },
+    getSession(sessionId: string) {
+      return taskStore.getSession(sessionId);
+    },
+    createSession(options: Parameters<TaskStore["createSession"]>[0] = {}) {
+      return taskStore.createSession(options);
+    },
+    clearSession(sessionId: string, options: { source?: string; reason?: string; nextTitle?: string } = {}) {
+      const hidden = taskStore.getSession(sessionId)
+        ? taskStore.hideSession(sessionId, options.reason || "cleared by user")
+        : null;
+      const next = taskStore.createSession({
+        title: options.nextTitle || "New session",
+        source: options.source || "runtime",
+        metadata: {
+          createdBy: "clear",
+          previousSessionId: sessionId,
+        },
+      });
+      return { hidden, next };
+    },
+    restoreSession(sessionId: string) {
+      return taskStore.restoreSession(sessionId);
+    },
+    trashSession(sessionId: string, options: Parameters<TaskStore["trashSession"]>[1] = {}) {
+      return taskStore.trashSession(sessionId, options);
+    },
     async handleUserMessage(input: string, context = {}) {
       return mainAgent.handleUserMessage(input, context);
     },
@@ -250,6 +279,7 @@ export async function createRuntime(options: {
       maxFileMemoryRecords?: number;
       maxVectorMemoryRecords?: number;
       pruneArchivedExperienceVectorDays?: number;
+      sessionTrashDays?: number;
       skillLookbackDays?: number;
       skillMinOccurrences?: number;
       skillMinScore?: number;
@@ -284,6 +314,14 @@ export async function createRuntime(options: {
         maxEvents: options.maxEvents,
         pruneDecidedMemoryCandidatesOlderThanDays: options.pruneMemoryCandidateDays,
       });
+      const sessions = {
+        archived: taskStore.archiveHiddenSessions({
+          deleteAfterDays: options.sessionTrashDays ?? 30,
+        }).length,
+        pruned: taskStore.pruneTrashedSessions({
+          olderThanDays: options.sessionTrashDays ?? 30,
+        }),
+      };
       return {
         reconcile: {
           expiredLeaseTasks: reconcile.expiredLeaseTasks.length,
@@ -306,6 +344,7 @@ export async function createRuntime(options: {
         memoryCompaction,
         experienceIndex,
         database,
+        sessions,
         health: health(),
       };
     },

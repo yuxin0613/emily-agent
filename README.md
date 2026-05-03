@@ -465,9 +465,13 @@ curl -X POST http://127.0.0.1:3000/experiences/feedback \
 
 要求 Node.js `>=22.18`。
 
+启动 TUI：
+
 ```bash
 npm start
 ```
+
+TUI 支持 `:health`、`:providers`、`:roles`、`:sessions`、`:tools`、`:skills`、`:candidates`、`:timeline`、`:diagnostics`、`:maintenance` 和直接聊天。会话命令中，`/new` 会创建一个新的可见 session，`/clear` 会隐藏当前 session 并创建新 session；隐藏 session 可通过 `:sessions all` 查看，并用 `:restore-session <id>` 恢复。
 
 启动 Web 适配器：
 
@@ -475,12 +479,26 @@ npm start
 npm run web
 ```
 
+WebUI 地址：
+
+```bash
+http://127.0.0.1:3000/
+```
+
+WebUI 采用 Wiki.js 风格的信息架构：左侧分组导航、顶部搜索、内容工作区和管理面板，覆盖 chat、sessions、timeline、providers、roles、tools、skills、skill candidates、experiences 和 diagnostics。Chat 页底部是发送区，顶部使用 session 下拉框切换会话，并提供 New / Clear / Restore 管理入口。
+
 请求示例：
 
 ```bash
 curl -X POST http://127.0.0.1:3000/chat \
   -H 'content-type: application/json' \
   -d '{"sessionId":"demo","message":"帮我设计一个 Node 多 agent 架构"}'
+
+curl http://127.0.0.1:3000/sessions
+
+curl -X POST http://127.0.0.1:3000/sessions/clear \
+  -H 'content-type: application/json' \
+  -d '{"sessionId":"demo","reason":"用户清空上下文"}'
 ```
 
 订阅事件流：
@@ -493,7 +511,7 @@ curl http://127.0.0.1:3000/events
 
 - `src/agents/MainAgent.ts`: 主 agent，负责用户沟通、记忆召回、角色路由、任务派发和结果汇总。
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
-- `src/tasks/TaskStore.ts`: SQLite task、agent、event、role queue、状态机、lease、retry/dead-letter。
+- `src/tasks/TaskStore.ts`: SQLite task、session、agent、event、role queue、状态机、lease、retry/dead-letter。
 - `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
 - `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛和 rolling 图扩展。
 - `src/tasks/TaskResult.ts`: 结构化 task result 序列化、解析和 summary 提取。
@@ -527,8 +545,9 @@ curl http://127.0.0.1:3000/events
 - `src/storage/SchemaMigrator.ts`: SQLite schema migration 版本记录。
 - `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
 - `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
-- `src/adapters/tui.ts`: 命令行交互入口。
-- `src/adapters/web.ts`: Web/API 入口，提供 `GET /health`、`GET /events`、`POST /chat`。
+- `src/adapters/tui.ts`: 命令行交互入口，提供 chat、health、provider、tool、skill、timeline、diagnostics 和 maintenance 命令。
+- `src/adapters/web.ts`: Web/API 入口，提供 `GET /` WebUI、`GET /health`、`GET /events`、`POST /chat`。
+- `src/adapters/webUi.ts`: Wiki.js 风格 WebUI HTML/CSS/JS。
 - `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
 - `skills/<skill>/skill.md`: 技能定义，描述可复用工作流、aliases、capabilities 和 tool hints。
 
@@ -562,6 +581,8 @@ npm run check
 - 多 provider registry、配置校验、fallback、health check、role-specific provider/model、动态新增 role。
 - tools/skills registry、role skill frontmatter、tool hint 权限过滤、worker 注入和审计事件。
 - skill candidate 生成、评分、审批写入、已有 skill 更新、拒绝和 schema migration。
+- session 生命周期：new、clear/hide、restore、trash 和 30 天后删除。
+- TUI/WebUI 静态渲染入口和 WebUI 基础结构。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。

@@ -1,4 +1,5 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
+import { webAppHtml } from "./webUi.ts";
 
 export async function startWebServer({
   runtime,
@@ -47,6 +48,12 @@ export async function startWebServer({
     }) => Promise<unknown>;
     updateRoleProvider: (name: string, input: { provider?: string; model?: string; temperature?: number }) => Promise<unknown>;
     initializeDefaultRoles: (options?: { overwrite?: boolean }) => Promise<unknown[]>;
+    listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
+    getSession: (sessionId: string) => unknown;
+    createSession: (options?: { title?: string; source?: string; metadata?: Record<string, unknown> }) => unknown;
+    clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
+    restoreSession: (sessionId: string) => unknown;
+    trashSession: (sessionId: string, options?: { deleteAfterDays?: number; reason?: string }) => unknown;
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
@@ -58,6 +65,7 @@ export async function startWebServer({
       maxFileMemoryRecords?: number;
       maxVectorMemoryRecords?: number;
       pruneArchivedExperienceVectorDays?: number;
+      sessionTrashDays?: number;
       skillLookbackDays?: number;
       skillMinOccurrences?: number;
       skillMinScore?: number;
@@ -72,8 +80,19 @@ export async function startWebServer({
     try {
       const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
 
+      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) {
+        return sendHtml(response, 200, webAppHtml());
+      }
+
       if (request.method === "GET" && url.pathname === "/health") {
         return sendJson(response, 200, { ok: true, runtime: runtime.health() });
+      }
+
+      if (request.method === "GET" && url.pathname === "/events-snapshot") {
+        return sendJson(response, 200, runtime.taskStore.getLatestEvents({
+          afterId: Number(url.searchParams.get("afterId") || 0),
+          limit: Number(url.searchParams.get("limit") || 50),
+        }));
       }
 
       if (request.method === "GET" && url.pathname === "/events") {
@@ -194,6 +213,47 @@ export async function startWebServer({
         }));
       }
 
+      if (request.method === "GET" && url.pathname === "/sessions") {
+        return sendJson(response, 200, runtime.listSessions({
+          status: parseSessionStatus(url.searchParams.get("status")),
+          includeHidden: url.searchParams.get("includeHidden") === "true",
+          includeTrashed: url.searchParams.get("includeTrashed") === "true",
+          includeDeleted: url.searchParams.get("includeDeleted") === "true",
+          limit: Number(url.searchParams.get("limit") || 50),
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/sessions/new") {
+        const body = await readJson(request);
+        return sendJson(response, 200, runtime.createSession({
+          title: typeof body.title === "string" ? body.title : "New session",
+          source: typeof body.source === "string" ? body.source : "web",
+          metadata: { createdBy: "web" },
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/sessions/clear") {
+        const body = await readJson(request);
+        return sendJson(response, 200, runtime.clearSession(String(body.sessionId || ""), {
+          source: "web",
+          reason: typeof body.reason === "string" ? body.reason : "cleared from web",
+          nextTitle: typeof body.nextTitle === "string" ? body.nextTitle : "New session",
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/sessions/restore") {
+        const body = await readJson(request);
+        return sendJson(response, 200, runtime.restoreSession(String(body.sessionId || body.id || "")));
+      }
+
+      if (request.method === "POST" && url.pathname === "/sessions/trash") {
+        const body = await readJson(request);
+        return sendJson(response, 200, runtime.trashSession(String(body.sessionId || body.id || ""), {
+          deleteAfterDays: typeof body.deleteAfterDays === "number" ? body.deleteAfterDays : 30,
+          reason: typeof body.reason === "string" ? body.reason : "trashed from web",
+        }));
+      }
+
       if (request.method === "POST" && url.pathname === "/roles/provider") {
         const body = await readJson(request);
         return sendJson(response, 200, await runtime.updateRoleProvider(String(body.name || ""), {
@@ -251,6 +311,7 @@ export async function startWebServer({
           maxFileMemoryRecords: typeof body.maxFileMemoryRecords === "number" ? body.maxFileMemoryRecords : undefined,
           maxVectorMemoryRecords: typeof body.maxVectorMemoryRecords === "number" ? body.maxVectorMemoryRecords : undefined,
           pruneArchivedExperienceVectorDays: typeof body.pruneArchivedExperienceVectorDays === "number" ? body.pruneArchivedExperienceVectorDays : undefined,
+          sessionTrashDays: typeof body.sessionTrashDays === "number" ? body.sessionTrashDays : undefined,
           skillLookbackDays: typeof body.skillLookbackDays === "number" ? body.skillLookbackDays : undefined,
           skillMinOccurrences: typeof body.skillMinOccurrences === "number" ? body.skillMinOccurrences : undefined,
           skillMinScore: typeof body.skillMinScore === "number" ? body.skillMinScore : undefined,
@@ -290,7 +351,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /health", "GET /events", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {
@@ -320,6 +381,12 @@ function parseSkillCandidateStatus(value: string | null): "proposed" | "approved
   if (!value) return undefined;
   if (value === "proposed" || value === "approved" || value === "merged" || value === "rejected") return value;
   throw new Error("Invalid skill candidate status");
+}
+
+function parseSessionStatus(value: string | null): "active" | "hidden" | "trashed" | "deleted" | undefined {
+  if (!value) return undefined;
+  if (value === "active" || value === "hidden" || value === "trashed" || value === "deleted") return value;
+  throw new Error("Invalid session status");
 }
 
 function parseDateParam(value: string | null): Date | undefined {
