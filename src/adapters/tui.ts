@@ -93,22 +93,22 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       printHelp();
       return;
     case "health":
-      printHealth(await runtime.runCommand("health"));
+      printText(await runtime.runCommand("health", { format: "text" }));
       return;
     case "doctor":
-      printJson(await runtime.runCommand("doctor", { args }));
+      printText(await runtime.runCommand("doctor", { args, format: "text" }));
       return;
     case "providers":
-      printProviders(await runtime.runCommand("providers"));
+      printText(await runtime.runCommand("providers", { format: "text" }));
       return;
     case "roles":
-      printRoles(await runtime.runCommand("roles"));
+      printText(await runtime.runCommand("roles", { format: "text" }));
       return;
     case "commands":
       printCommands(runtime.listCommands());
       return;
     case "sessions":
-      printSessions(await runtime.runCommand("session.list", { input: sessionListOptions(args[0]) }));
+      printText(await runtime.runCommand("session.list", { input: sessionListOptions(args[0]), format: "text" }));
       return;
     case "resume":
       await resumeLatest(runtime, state, args);
@@ -117,29 +117,33 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       await exportSession(runtime, args);
       return;
     case "compact-preview":
-      printJson(await runtime.runCommand("session.compact_preview", {
+      printText(await runtime.runCommand("session.compact_preview", {
         input: { sessionId: requiredArg(args[0], "session id"), maxMessages: numberArg(args[1], 20) },
+        format: "text",
       }));
       return;
     case "session-usage":
-      printJson(await runtime.runCommand("session.usage", {
+      printText(await runtime.runCommand("session.usage", {
         input: { sessionId: requiredArg(args[0], "session id") },
+        format: "text",
       }));
       return;
     case "tools":
-      printTools(await runtime.runCommand("tools"));
+      printText(await runtime.runCommand("tools", { format: "text" }));
       return;
     case "skills":
-      printSkills(await runtime.runCommand("skills"));
+      printText(await runtime.runCommand("skills", { format: "text" }));
       return;
     case "candidates":
-      printCandidates(await runtime.runCommand("skills.candidates.list", {
+      printText(await runtime.runCommand("skills.candidates.list", {
         input: { status: args[0] || undefined, limit: 50 },
+        format: "text",
       }));
       return;
     case "build-skills":
-      printJson(await runtime.runCommand("skills.candidates.build", {
+      printText(await runtime.runCommand("skills.candidates.build", {
         input: { minOccurrences: numberArg(args[0], 3), minScore: numberArg(args[1], 0.68) },
+        format: "text",
       }));
       return;
     case "approve-skill":
@@ -149,7 +153,10 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       await rejectSkill(runtime, args);
       return;
     case "experiences":
-      printExperiences(await searchExperiences(runtime, args.join(" ")));
+      printText(await runtime.runCommand("experiences.recall", {
+        input: { q: args.join(" ").trim() || undefined, limit: 8 },
+        format: "text",
+      }));
       return;
     case "timeline":
       await printTimeline(runtime, state, args[0]);
@@ -158,12 +165,12 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       await printTrace(runtime, args[0]);
       return;
     case "diagnostics":
-      printJson(args[0] === "repair" || args[0] === "true"
-        ? await runtime.runCommand("diagnostics.repair")
-        : await runtime.runCommand("diagnostics.run"));
+      printText(args[0] === "repair" || args[0] === "true"
+        ? await runtime.runCommand("diagnostics.repair", { format: "text" })
+        : await runtime.runCommand("diagnostics.run", { format: "text" }));
       return;
     case "maintenance":
-      printJson(await runtime.runCommand("maintenance.run"));
+      printText(await runtime.runCommand("maintenance.run", { format: "text" }));
       return;
     case "new":
       await startNewSession(runtime, state, args);
@@ -176,12 +183,13 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     case "session":
       if (!args[0]) throw new Error("session id is required");
-      selectSession(runtime, state, args[0]);
+      await selectSession(runtime, state, args[0]);
       output.write(`\nSession: ${state.sessionId}\n\n`);
       return;
     case "messages":
-      printSessionMessages(await runtime.runCommand("session.messages", {
+      printText(await runtime.runCommand("session.messages", {
         input: { sessionId: state.sessionId, limit: numberArg(args[0], 40) },
+        format: "text",
       }));
       return;
     case "clear":
@@ -216,49 +224,6 @@ async function sendChat(runtime, state, message: string): Promise<void> {
   if (response.needsUserInput?.questions?.length) {
     output.write(`Questions: ${response.needsUserInput.questions.join(" | ")}\n`);
   }
-  output.write("\n");
-}
-
-function printHealth(health): void {
-  output.write("\nRuntime Health\n");
-  printTable([
-    ["Metric", "Value"],
-    ...Object.entries(health).map(([key, value]) => [key, formatValue(value)]),
-  ]);
-  output.write("\n");
-}
-
-function printProviders(providers): void {
-  output.write("\nProviders\n");
-  printTable([
-    ["ID", "Type", "Model", "Enabled"],
-    ...providers.map((provider) => [provider.id, provider.type, provider.model || "", provider.enabled === false ? "false" : "true"]),
-  ]);
-  output.write("\n");
-}
-
-function printRoles(roles): void {
-  output.write("\nRoles\n");
-  printTable([
-    ["Name", "Provider", "Model", "Tools", "Skills"],
-    ...roles.map((role) => [role.name, role.provider || "", role.model || "", (role.allowedTools || []).join(","), (role.skills || []).join(",")]),
-  ]);
-  output.write("\n");
-}
-
-function printSessions(sessions): void {
-  output.write("\nSessions\n");
-  printTable([
-    ["ID", "Title", "Status", "Runs", "Last Active", "Delete After"],
-    ...sessions.map((session) => [
-      session.id.slice(0, 12),
-      truncate(session.title || session.id, 34),
-      session.status,
-      String(session.runCount || 0),
-      session.lastActiveAt || session.updatedAt || "",
-      session.deleteAfter || "",
-    ]),
-  ]);
   output.write("\n");
 }
 
@@ -325,17 +290,6 @@ async function selectSession(runtime, state, sessionId: string): Promise<void> {
   state.lastRunId = latest?.runId || "";
 }
 
-function printSessionMessages(messages): void {
-  output.write("\nMessages\n");
-  for (const message of messages) {
-    const who = message.role === "user" ? "You" : "Emily";
-    const run = message.runId ? ` ${message.runId.slice(0, 8)}` : "";
-    output.write(`\n[${who}${run}] ${message.content}\n`);
-  }
-  if (!messages.length) output.write("\n(no messages)\n");
-  output.write("\n");
-}
-
 async function clearCurrentSession(runtime, state): Promise<void> {
   const result = await runtime.runCommand("session.clear", {
     input: {
@@ -370,74 +324,22 @@ async function trashSession(runtime, args: string[]): Promise<void> {
   output.write(`\nTrashed session: ${session.id}\nDelete after: ${session.deleteAfter || "(not scheduled)"}\n\n`);
 }
 
-function printTools(tools): void {
-  output.write("\nTools\n");
-  printTable([
-    ["Name", "Category", "Side Effects", "Approval", "Description"],
-    ...tools.map((tool) => [tool.name, tool.category, tool.sideEffects, tool.requiresApproval ? "yes" : "no", truncate(tool.description, 52)]),
-  ]);
-  output.write("\n");
-}
-
-function printSkills(skills): void {
-  output.write("\nSkills\n");
-  printTable([
-    ["Name", "Source", "Tools", "Description"],
-    ...skills.map((skill) => [skill.name, skill.source, (skill.toolHints || []).join(","), truncate(skill.description, 60)]),
-  ]);
-  output.write("\n");
-}
-
-function printCandidates(candidates): void {
-  output.write("\nSkill Candidates\n");
-  printTable([
-    ["ID", "Name", "Status", "Type", "Score", "Freq"],
-    ...candidates.map((candidate) => [
-      candidate.id.slice(0, 8),
-      candidate.name,
-      candidate.status,
-      candidate.proposalType,
-      Number(candidate.score || 0).toFixed(3),
-      String(candidate.frequency || 0),
-    ]),
-  ]);
-  output.write("\n");
-}
-
 async function approveSkill(runtime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("candidate id is required");
   const reason = args.slice(1).join(" ") || "approved from TUI";
-  printJson(await runtime.runCommand("skills.candidates.approve", {
+  printText(await runtime.runCommand("skills.candidates.approve", {
     input: { candidateId: args[0], reason },
+    format: "text",
   }));
 }
 
 async function rejectSkill(runtime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("candidate id is required");
   const reason = args.slice(1).join(" ") || "rejected from TUI";
-  printJson(await runtime.runCommand("skills.candidates.reject", {
+  printText(await runtime.runCommand("skills.candidates.reject", {
     input: { candidateId: args[0], reason },
+    format: "text",
   }));
-}
-
-async function searchExperiences(runtime, query: string): Promise<unknown[]> {
-  return await runtime.runCommand("experiences.recall", {
-    input: { q: query.trim() || undefined, limit: 8 },
-  });
-}
-
-function printExperiences(experiences): void {
-  output.write("\nExperiences\n");
-  printTable([
-    ["Topic", "Type", "Score", "Summary"],
-    ...experiences.map((experience) => [
-      experience.topicKey || experience.id,
-      experience.type || "",
-      experience.score === undefined ? "" : Number(experience.score).toFixed(3),
-      truncate(experience.summary || experience.problemPattern || "", 72),
-    ]),
-  ]);
-  output.write("\n");
 }
 
 async function printTimeline(runtime, state, runId?: string): Promise<void> {
@@ -472,6 +374,10 @@ async function printTrace(runtime, taskId?: string): Promise<void> {
 
 function printJson(value): void {
   output.write(`\n${JSON.stringify(value, null, 2)}\n\n`);
+}
+
+function printText(value): void {
+  output.write(`\n${String(value)}\n\n`);
 }
 
 function printTable(rows: string[][]): void {
@@ -515,12 +421,6 @@ function numberArg(value: string | undefined, fallback: number): number {
 function requiredArg(value: string | undefined, label: string): string {
   if (!value) throw new Error(`${label} is required`);
   return value;
-}
-
-function formatValue(value: unknown): string {
-  if (Array.isArray(value)) return value.join(",");
-  if (typeof value === "object" && value) return JSON.stringify(value);
-  return String(value);
 }
 
 function truncate(value: string, maxLength: number): string {

@@ -30,19 +30,33 @@ export type GatewayMethod =
   | "sessions.create"
   | "sessions.clear"
   | "sessions.restore"
+  | "sessions.trash"
   | "tasks.cancel"
   | "runs.cancel"
   | "providers.list"
+  | "providers.add"
+  | "providers.enable"
+  | "providers.disable"
+  | "providers.remove"
   | "providers.health"
   | "providers.usage"
   | "roles.list"
   | "roles.add"
+  | "roles.update_provider"
+  | "roles.defaults"
   | "tools.list"
+  | "tools.execute"
   | "skills.list"
   | "skills.candidates.list"
+  | "skills.candidates.build"
+  | "skills.candidates.approve"
+  | "skills.candidates.reject"
   | "experiences.recall"
+  | "experiences.build_daily"
+  | "experiences.feedback"
   | "timeline.get"
   | "diagnostics.run"
+  | "diagnostics.repair"
   | "doctor.run"
   | "maintenance.run"
   | "security.audit"
@@ -61,19 +75,33 @@ export const GATEWAY_METHODS: GatewayMethod[] = [
   "sessions.create",
   "sessions.clear",
   "sessions.restore",
+  "sessions.trash",
   "tasks.cancel",
   "runs.cancel",
   "providers.list",
+  "providers.add",
+  "providers.enable",
+  "providers.disable",
+  "providers.remove",
   "providers.health",
   "providers.usage",
   "roles.list",
   "roles.add",
+  "roles.update_provider",
+  "roles.defaults",
   "tools.list",
+  "tools.execute",
   "skills.list",
   "skills.candidates.list",
+  "skills.candidates.build",
+  "skills.candidates.approve",
+  "skills.candidates.reject",
   "experiences.recall",
+  "experiences.build_daily",
+  "experiences.feedback",
   "timeline.get",
   "diagnostics.run",
+  "diagnostics.repair",
   "doctor.run",
   "maintenance.run",
   "security.audit",
@@ -193,6 +221,14 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
       return runtime.runCommand("session.restore", {
         input: { sessionId: String(params.sessionId || params.id || "") },
       });
+    case "sessions.trash":
+      return runtime.runCommand("session.trash", {
+        input: {
+          sessionId: String(params.sessionId || params.id || ""),
+          deleteAfterDays: parseLimit(params.deleteAfterDays, 30, 365),
+          reason: typeof params.reason === "string" ? params.reason : "trashed from gateway",
+        },
+      });
     case "tasks.cancel":
       return runtime.runCommand("task.cancel", {
         input: {
@@ -209,6 +245,20 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
       });
     case "providers.list":
       return runtime.runCommand("providers");
+    case "providers.add":
+      return runtime.runCommand("provider.add", { input: params });
+    case "providers.enable":
+      return runtime.runCommand("provider.enable", {
+        input: { providerId: String(params.providerId || params.id || "") },
+      });
+    case "providers.disable":
+      return runtime.runCommand("provider.disable", {
+        input: { providerId: String(params.providerId || params.id || "") },
+      });
+    case "providers.remove":
+      return runtime.runCommand("provider.remove", {
+        input: { providerId: String(params.providerId || params.id || "") },
+      });
     case "providers.health":
       return runtime.runCommand("provider.health", { input: { deep: params.deep === true } });
     case "providers.usage":
@@ -222,8 +272,23 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
       return runtime.runCommand("roles");
     case "roles.add":
       return runtime.runCommand("role.add", { input: params });
+    case "roles.update_provider":
+      return runtime.runCommand("role.update_provider", {
+        input: {
+          name: String(params.name || ""),
+          provider: typeof params.provider === "string" ? params.provider : undefined,
+          model: typeof params.model === "string" ? params.model : undefined,
+          temperature: typeof params.temperature === "number" ? params.temperature : undefined,
+        },
+      });
+    case "roles.defaults":
+      return runtime.runCommand("role.initialize_defaults", {
+        input: { overwrite: params.overwrite === true },
+      });
     case "tools.list":
       return runtime.runCommand("tools");
+    case "tools.execute":
+      return runtime.runCommand("tool.execute", { input: params });
     case "skills.list":
       return runtime.runCommand("skills");
     case "skills.candidates.list":
@@ -231,6 +296,22 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         input: {
           status: typeof params.status === "string" ? params.status : undefined,
           limit: parseLimit(params.limit, 50, 500),
+        },
+      });
+    case "skills.candidates.build":
+      return runtime.runCommand("skills.candidates.build", { input: params });
+    case "skills.candidates.approve":
+      return runtime.runCommand("skills.candidates.approve", {
+        input: {
+          candidateId: String(params.candidateId || params.id || ""),
+          reason: typeof params.reason === "string" ? params.reason : undefined,
+        },
+      });
+    case "skills.candidates.reject":
+      return runtime.runCommand("skills.candidates.reject", {
+        input: {
+          candidateId: String(params.candidateId || params.id || ""),
+          reason: typeof params.reason === "string" ? params.reason : "rejected from gateway",
         },
       });
     case "experiences.recall":
@@ -241,6 +322,16 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
           limit: parseLimit(params.limit, 5, 100),
         },
       });
+    case "experiences.build_daily":
+      return runtime.runCommand("experiences.build_daily", { input: params });
+    case "experiences.feedback":
+      return runtime.runCommand("experiences.feedback", {
+        input: {
+          experienceId: String(params.experienceId || params.id || ""),
+          rating: String(params.rating || ""),
+          comment: typeof params.comment === "string" ? params.comment : undefined,
+        },
+      });
     case "timeline.get":
       return runtime.runCommand("timeline.get", {
         input: { runId: String(params.runId || "") },
@@ -248,6 +339,8 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
       });
     case "diagnostics.run":
       return params.repair === true ? runtime.runCommand("diagnostics.repair") : runtime.runCommand("diagnostics.run");
+    case "diagnostics.repair":
+      return runtime.runCommand("diagnostics.repair");
     case "doctor.run":
       return runtime.runCommand("doctor", { input: { deep: params.deep === true, repair: params.repair === true } });
     case "maintenance.run":

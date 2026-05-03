@@ -1,47 +1,110 @@
 [
   {
     "name": "production-app-timeout",
+    "domain": "production",
     "status": "failed",
     "error": "Task timed out while running full production verification after 120000ms.",
     "deliveryLevel": "production",
     "expectedCluster": "timeout",
+    "expectedWeightMin": 0.6,
+    "expectedWeightMax": 0.7,
     "expectedBudgetMin": 3,
     "expectedBudgetMax": 4
   },
   {
     "name": "uat-regression-verification",
+    "domain": "production",
     "status": "failed",
     "error": "npm run check failed: assertion failed in dynamic task graph replan test.",
     "deliveryLevel": "uat",
     "expectedCluster": "verification",
+    "expectedWeightMin": 0.5,
+    "expectedWeightMax": 0.6,
     "expectedBudgetMin": 4,
     "expectedBudgetMax": 4
   },
   {
     "name": "approval-template-blocker",
+    "domain": "production",
     "status": "blocked",
     "error": "Tool github requires explicit approval using approval template github_write.",
     "deliveryLevel": "poc",
     "expectedCluster": "permission_or_policy",
+    "expectedWeightMin": 0.9,
+    "expectedWeightMax": 1,
     "expectedBudgetMin": 2,
     "expectedBudgetMax": 2
   },
   {
     "name": "dynamic-budget-exhausted",
+    "domain": "production",
     "status": "failed",
     "error": "task graph budget exhausted: max dynamic tasks reached before downstream modules completed.",
     "deliveryLevel": "production",
     "expectedCluster": "resource_budget",
+    "expectedWeightMin": 0.8,
+    "expectedWeightMax": 0.85,
     "expectedBudgetMin": 2,
     "expectedBudgetMax": 3
   },
   {
     "name": "upstream-dependency-failed",
+    "domain": "production",
     "status": "blocked",
     "error": "Dependency api-contract finished with status failed, downstream tests are blocked.",
     "deliveryLevel": "uat",
     "expectedCluster": "dependency",
+    "expectedWeightMin": 0.8,
+    "expectedWeightMax": 0.9,
     "expectedBudgetMin": 3,
     "expectedBudgetMax": 3
+  },
+  {
+    "name": "research-stale-source-synthesis",
+    "domain": "research",
+    "status": "failed",
+    "error": "Research quality gate failed: stale source freshness and uncited claims in final synthesis.",
+    "deliveryLevel": "uat",
+    "expectedCluster": "research_quality",
+    "expectedWeightMin": 0.65,
+    "expectedWeightMax": 0.75,
+    "expectedBudgetMin": 3,
+    "expectedBudgetMax": 3
+  },
+  {
+    "name": "research-conflicting-evidence",
+    "domain": "research",
+    "status": "blocked",
+    "error": "Conflicting evidence across primary sources; synthesis needs contradiction checks before continuing.",
+    "deliveryLevel": "production",
+    "expectedCluster": "research_quality",
+    "expectedWeightMin": 0.65,
+    "expectedWeightMax": 0.75,
+    "expectedBudgetMin": 4,
+    "expectedBudgetMax": 4
+  },
+  {
+    "name": "data-schema-drift",
+    "domain": "data",
+    "status": "failed",
+    "error": "ETL pipeline validation failed: schema drift, column missing, and type mismatch in daily partition.",
+    "deliveryLevel": "production",
+    "expectedCluster": "data_quality",
+    "expectedWeightMin": 0.75,
+    "expectedWeightMax": 0.82,
+    "expectedBudgetMin": 5,
+    "expectedBudgetMax": 5
+  },
+  {
+    "name": "data-quality-null-duplicates",
+    "domain": "data",
+    "status": "failed",
+    "error": "Data quality checks failed: null values and duplicate rows exceeded acceptance threshold.",
+    "deliveryLevel": "uat",
+    "expectedCluster": "data_quality",
+    "expectedWeightMin": 0.75,
+    "expectedWeightMax": 0.82,
+    "expectedBudgetMin": 4,
+    "expectedBudgetMax": 4
   }
 ]

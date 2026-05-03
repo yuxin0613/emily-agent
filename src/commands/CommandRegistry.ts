@@ -160,6 +160,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["health"] },
       run: () => runtime.health(),
+      renderText: (result) => renderKeyValues("Runtime Health", result),
     },
     {
       name: "tools",
@@ -168,6 +169,13 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["tools"] },
       run: () => runtime.listTools(),
+      renderText: (result) => renderTable("Tools", result, [
+        ["Name", "name"],
+        ["Category", "category"],
+        ["Side Effects", "sideEffects"],
+        ["Approval", (item) => item.requiresApproval ? "yes" : "no"],
+        ["Description", "description"],
+      ]),
     },
     {
       name: "skills",
@@ -176,6 +184,12 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["skills"] },
       run: () => runtime.listSkills(),
+      renderText: (result) => renderTable("Skills", result, [
+        ["Name", "name"],
+        ["Source", "source"],
+        ["Tools", (item) => Array.isArray(item.toolHints) ? item.toolHints.join(",") : ""],
+        ["Description", "description"],
+      ]),
     },
     {
       name: "skills.candidates.list",
@@ -191,6 +205,14 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         status: parseSkillCandidateStatus(input.status ?? args[0]),
         limit: numberInput(input.limit, args[1], 50),
       }),
+      renderText: (result) => renderTable("Skill Candidates", result, [
+        ["ID", (item) => shortId(item.id)],
+        ["Name", "name"],
+        ["Status", "status"],
+        ["Type", "proposalType"],
+        ["Score", (item) => formatNumber(item.score, 3)],
+        ["Freq", "frequency"],
+      ]),
     },
     {
       name: "providers",
@@ -199,6 +221,12 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["providers"] },
       run: () => runtime.listProviders(),
+      renderText: (result) => renderTable("Providers", result, [
+        ["ID", "id"],
+        ["Type", "type"],
+        ["Model", "model"],
+        ["Enabled", (item) => item.enabled === false ? "false" : "true"],
+      ]),
     },
     {
       name: "provider.health",
@@ -211,6 +239,12 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { deep: "boolean" },
       },
       run: ({ args, input }) => runtime.checkProviders({ deep: input.deep === true || args.includes("--deep") || args.includes("deep") }),
+      renderText: (result) => renderTable("Provider Health", result, [
+        ["ID", "id"],
+        ["Status", "status"],
+        ["Latency", (item) => item.latencyMs === undefined ? "" : `${item.latencyMs}ms`],
+        ["Error", "error"],
+      ]),
     },
     {
       name: "provider.usage",
@@ -228,6 +262,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         providerId: stringOptional(input.providerId) || args[0],
         limit: numberInput(input.limit, undefined, 20),
       }),
+      renderText: (result) => renderProviderUsage(result),
     },
     {
       name: "roles",
@@ -236,6 +271,13 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["roles"] },
       run: () => runtime.listRoles(),
+      renderText: (result) => renderTable("Roles", result, [
+        ["Name", "name"],
+        ["Provider", "provider"],
+        ["Model", "model"],
+        ["Tools", (item) => Array.isArray(item.allowedTools) ? item.allowedTools.join(",") : ""],
+        ["Skills", (item) => Array.isArray(item.skills) ? item.skills.join(",") : ""],
+      ]),
     },
     {
       name: "experiences.recall",
@@ -250,6 +292,12 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ args, input }) => runtime.recallExperiences(stringOptional(input.q) || stringOptional(input.query) || args.join(" "), {
         limit: numberInput(input.limit, undefined, 8),
       }),
+      renderText: (result) => renderTable("Experiences", result, [
+        ["Topic", (item) => item.topicKey || item.id],
+        ["Type", "type"],
+        ["Score", (item) => item.score === undefined ? "" : formatNumber(item.score, 3)],
+        ["Summary", (item) => item.summary || item.problemPattern || ""],
+      ]),
     },
     {
       name: "timeline.get",
@@ -280,6 +328,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { taskId: "string" },
       },
       run: ({ args, input }) => runtime.getTaskTrace(stringInput(input.taskId, args[0], "taskId")),
+      renderText: (result) => renderJson(result),
     },
     {
       name: "diagnostics.run",
@@ -288,6 +337,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["diagnostics.run"] },
       run: () => runtime.diagnostics({ repair: false }),
+      renderText: (result) => renderDiagnostics(result),
     },
     {
       name: "security.audit",
@@ -296,6 +346,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "read",
       inputSchema: { args: [], examples: ["security.audit"] },
       run: () => runtime.securityAudit(),
+      renderText: (result) => renderSecurityAudit(result),
     },
     {
       name: "context.build",
@@ -314,6 +365,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         role: stringOptional(input.role),
         mode: input.mode === "deep" ? "deep" : "active",
       }),
+      renderText: (result) => renderContext(result),
     },
     {
       name: "router.route",
@@ -326,6 +378,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { input: "string", message: "string" },
       },
       run: ({ args, input }) => runtime.routeMessage(stringOptional(input.input) || stringOptional(input.message) || args.join(" ")),
+      renderText: (result) => renderRoute(result),
     },
   ];
 }
@@ -349,6 +402,14 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         includeDeleted: input.includeDeleted === true,
         limit: numberInput(input.limit, undefined, 50),
       }),
+      renderText: (result) => renderTable("Sessions", result, [
+        ["ID", (item) => shortId(item.id, 12)],
+        ["Title", "title"],
+        ["Status", "status"],
+        ["Runs", "runCount"],
+        ["Last Active", (item) => item.lastActiveAt || item.updatedAt || ""],
+        ["Delete After", "deleteAfter"],
+      ]),
     },
     {
       name: "session.messages",
@@ -365,6 +426,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         sessionId: stringInput(input.sessionId, args[0], "sessionId"),
         limit: numberInput(input.limit, args[1], 100),
       }),
+      renderText: (result) => renderSessionMessages(result),
     },
     {
       name: "session.resume_latest",
@@ -377,6 +439,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { includeHidden: "boolean" },
       },
       run: ({ args, input }) => runtime.resumeLatestSession({ includeHidden: input.includeHidden === true || args.includes("--hidden") || args.includes("hidden") }),
+      renderText: (result) => result ? renderKeyValues("Latest Session", result) : "No resumable session.",
     },
     {
       name: "session.export",
@@ -408,6 +471,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ args, input }) => runtime.previewSessionCompaction(stringInput(input.sessionId, args[0], "sessionId"), {
         maxMessages: numberInput(input.maxMessages, args[1], 20),
       }),
+      renderText: (result) => renderKeyValues("Session Compaction Preview", result),
     },
     {
       name: "session.usage",
@@ -421,6 +485,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { sessionId: "string" },
       },
       run: ({ args, input }) => runtime.sessionUsage(stringInput(input.sessionId, args[0], "sessionId")),
+      renderText: (result) => renderSessionUsage(result),
     },
     {
       name: "session.create",
@@ -440,6 +505,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
           ...objectInput(input.metadata),
         },
       }),
+      renderText: (result) => renderKeyValues("Created Session", result),
     },
     {
       name: "session.clear",
@@ -457,6 +523,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         reason: stringOptional(input.reason) || "cleared from command registry",
         nextTitle: stringOptional(input.nextTitle) || "New session",
       }),
+      renderText: (result) => renderClearSession(result),
     },
     {
       name: "session.restore",
@@ -470,6 +537,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { sessionId: "string" },
       },
       run: ({ args, input }) => runtime.restoreSession(stringInput(input.sessionId, args[0], "sessionId")),
+      renderText: (result) => renderKeyValues("Restored Session", result),
     },
     {
       name: "session.trash",
@@ -486,6 +554,7 @@ function sessionCommands(runtime: CommandRuntime): RuntimeCommand[] {
         deleteAfterDays: numberInput(input.deleteAfterDays, undefined, 30),
         reason: stringOptional(input.reason) || "trashed from command registry",
       }),
+      renderText: (result) => renderKeyValues("Trashed Session", result),
     },
   ];
 }
@@ -510,6 +579,7 @@ function providerCommands(runtime: CommandRuntime): RuntimeCommand[] {
         model: stringOptional(input.model),
         config: objectInput(input.config),
       }),
+      renderText: (result) => renderKeyValues("Provider Added", result),
     },
     simpleProviderCommand(runtime, "provider.enable", ["enable-provider"], "Enable a provider.", (target, providerId) => target.enableProvider(providerId)),
     simpleProviderCommand(runtime, "provider.disable", ["disable-provider"], "Disable a provider.", (target, providerId) => target.disableProvider(providerId)),
@@ -557,6 +627,7 @@ function roleCommands(runtime: CommandRuntime): RuntimeCommand[] {
         outputContract: stringOptional(input.outputContract),
         instructions: requiredString(input.instructions, "instructions"),
       }),
+      renderText: (result) => renderKeyValues("Role Saved", result),
     },
     {
       name: "role.update_provider",
@@ -574,6 +645,7 @@ function roleCommands(runtime: CommandRuntime): RuntimeCommand[] {
         model: stringOptional(input.model),
         temperature: typeof input.temperature === "number" ? input.temperature : undefined,
       }),
+      renderText: (result) => renderKeyValues("Role Provider Updated", result),
     },
     {
       name: "role.initialize_defaults",
@@ -586,6 +658,11 @@ function roleCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { overwrite: "boolean" },
       },
       run: ({ args, input }) => runtime.initializeDefaultRoles({ overwrite: input.overwrite === true || args.includes("--overwrite") }),
+      renderText: (result) => renderTable("Default Roles", result, [
+        ["Name", "name"],
+        ["Provider", "provider"],
+        ["Model", "model"],
+      ]),
     },
   ];
 }
@@ -603,6 +680,7 @@ function skillCandidateCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { day: "string", lookbackDays: "number", minOccurrences: "number", minScore: "number", dailyLimit: "number" },
       },
       run: ({ input }) => runtime.buildSkillCandidates(normalizeDatedOptions(input)),
+      renderText: (result) => renderSkillCandidateBuild(result),
     },
     {
       name: "skills.candidates.approve",
@@ -618,6 +696,7 @@ function skillCandidateCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ args, input }) => runtime.approveSkillCandidate(stringInput(input.candidateId, args[0], "candidateId"), {
         reason: stringOptional(input.reason),
       }),
+      renderText: (result) => renderKeyValues("Skill Candidate Approved", result),
     },
     {
       name: "skills.candidates.reject",
@@ -631,6 +710,7 @@ function skillCandidateCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { candidateId: "string", reason: "string" },
       },
       run: ({ args, input }) => runtime.rejectSkillCandidate(stringInput(input.candidateId, args[0], "candidateId"), stringOptional(input.reason) || "rejected from command registry"),
+      renderText: (result) => renderKeyValues("Skill Candidate Rejected", result),
     },
   ];
 }
@@ -644,6 +724,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
       permission: "write",
       inputSchema: { args: [], examples: ["diagnostics.repair"] },
       run: () => runtime.diagnostics({ repair: true }),
+      renderText: (result) => renderDiagnostics(result),
     },
     {
       name: "maintenance.run",
@@ -669,6 +750,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         },
       },
       run: ({ input }) => runtime.maintenance(normalizeDatedOptions(input)),
+      renderText: (result) => renderMaintenance(result),
     },
     {
       name: "experiences.build_daily",
@@ -683,6 +765,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
       run: ({ input }) => runtime.buildDailyExperiences({
         day: dateInput(input.day) || new Date(),
       }),
+      renderText: (result) => renderKeyValues("Daily Experiences", result),
     },
     {
       name: "experiences.feedback",
@@ -700,6 +783,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         rating: parseFeedbackRating(input.rating ?? args[1]),
         comment: stringOptional(input.comment),
       }),
+      renderText: (result) => renderKeyValues("Experience Feedback", result),
     },
     {
       name: "task.cancel",
@@ -713,6 +797,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { taskId: "string", reason: "string" },
       },
       run: ({ args, input }) => runtime.cancelTask(stringInput(input.taskId, args[0], "taskId"), stringOptional(input.reason) || "cancelled from command registry"),
+      renderText: (result) => renderKeyValues("Task Cancelled", result),
     },
     {
       name: "run.cancel",
@@ -726,6 +811,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         properties: { runId: "string", reason: "string" },
       },
       run: ({ args, input }) => runtime.cancelRun(stringInput(input.runId, args[0], "runId"), stringOptional(input.reason) || "cancelled from command registry"),
+      renderText: (result) => renderKeyValues("Run Cancelled", result),
     },
     {
       name: "tool.execute",
@@ -748,6 +834,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         runId: stringOptional(input.runId),
         sessionId: stringOptional(input.sessionId),
       }),
+      renderText: (result) => renderToolExecution(result),
     },
   ];
 }
@@ -771,6 +858,7 @@ function simpleProviderCommand(
       properties: { providerId: "string" },
     },
     run: ({ args, input }) => handler(runtime, stringInput(input.providerId, args[0], "providerId")),
+    renderText: (result) => renderKeyValues(description.replace(/\.$/, ""), result),
   };
 }
 
@@ -817,6 +905,220 @@ function renderDoctor(result: unknown): string {
     `Vector memory: ${report.vectorMemory?.kind || "unknown"} ok=${report.vectorMemory?.ok !== false}`,
     `Skill candidates proposed: ${report.skillCandidates?.proposed || 0}`,
   ].join("\n");
+}
+
+type ColumnSpec = [string, string | ((item: Record<string, unknown>) => unknown)];
+
+function renderJson(result: unknown): string {
+  return JSON.stringify(result, null, 2);
+}
+
+function renderKeyValues(title: string, result: unknown): string {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return `${title}\n${String(result ?? "")}`;
+  const lines = [title];
+  for (const [key, value] of Object.entries(result as Record<string, unknown>)) {
+    if (value && typeof value === "object") continue;
+    lines.push(`${key}: ${formatCell(value)}`);
+  }
+  return lines.join("\n");
+}
+
+function renderTable(title: string, result: unknown, columns: ColumnSpec[]): string {
+  const rows = asRecordArray(result);
+  if (!rows.length) return `${title}\n(no rows)`;
+  const table = [
+    columns.map(([label]) => label),
+    ...rows.map((row) => columns.map(([, getter]) => formatCell(typeof getter === "function" ? getter(row) : row[getter]))),
+  ];
+  return `${title}\n${formatTable(table)}`;
+}
+
+function renderProviderUsage(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const usage = result as {
+    totals?: { calls?: number; success?: number; totalTokens?: number; costUsd?: number };
+    providers?: unknown[];
+    recent?: unknown[];
+  };
+  return [
+    "Provider Usage",
+    `calls: ${usage.totals?.calls || 0}`,
+    `success: ${usage.totals?.success || 0}`,
+    `tokens: ${usage.totals?.totalTokens || 0}`,
+    `costUsd: ${formatNumber(usage.totals?.costUsd, 6)}`,
+    "",
+    renderTable("By Provider", usage.providers || [], [
+      ["Provider", "providerId"],
+      ["Model", "model"],
+      ["Calls", "calls"],
+      ["Tokens", "totalTokens"],
+      ["Cost", (item) => formatNumber(item.costUsd, 6)],
+      ["Blocked", "blocked"],
+    ]),
+  ].join("\n");
+}
+
+function renderSessionMessages(result: unknown): string {
+  const messages = asRecordArray(result);
+  if (!messages.length) return "Messages\n(no messages)";
+  return [
+    "Messages",
+    ...messages.map((message) => {
+      const role = message.role === "user" ? "You" : String(message.role || "assistant");
+      const run = typeof message.runId === "string" && message.runId ? ` ${shortId(message.runId, 8)}` : "";
+      return `[${role}${run}] ${formatCell(message.content)}`;
+    }),
+  ].join("\n");
+}
+
+function renderSessionUsage(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const usage = result as { sessionId?: string; runIds?: unknown[]; providerUsage?: unknown };
+  return [
+    `Session Usage: ${usage.sessionId || ""}`,
+    `runs: ${Array.isArray(usage.runIds) ? usage.runIds.length : 0}`,
+    renderProviderUsage(usage.providerUsage || {}),
+  ].join("\n");
+}
+
+function renderClearSession(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const value = result as { hidden?: { id?: string } | null; next?: { id?: string } | null };
+  return [
+    "Session Cleared",
+    `hidden: ${value.hidden?.id || "(none)"}`,
+    `next: ${value.next?.id || "(none)"}`,
+  ].join("\n");
+}
+
+function renderDiagnostics(result: unknown): string {
+  const items = asRecordArray(result);
+  if (!items.length) return "Diagnostics\n(no anomalies)";
+  return renderTable("Diagnostics", items, [
+    ["Code", "code"],
+    ["Severity", "severity"],
+    ["Repaired", (item) => item.repaired === true ? "yes" : "no"],
+    ["Message", "message"],
+  ]);
+}
+
+function renderSecurityAudit(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const audit = result as { status?: string; summary?: Record<string, unknown>; findings?: unknown[] };
+  return [
+    `Security Audit: ${audit.status || "unknown"}`,
+    renderKeyValues("Summary", audit.summary || {}),
+    renderTable("Findings", audit.findings || [], [
+      ["Severity", "severity"],
+      ["Code", "code"],
+      ["Message", "message"],
+    ]),
+  ].join("\n");
+}
+
+function renderContext(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const context = result as {
+    metadata?: Record<string, unknown>;
+    sessionMessages?: unknown[];
+    memory?: { shortTerm?: unknown[]; files?: unknown[]; experiences?: unknown[] };
+  };
+  return [
+    "Context",
+    `mode: ${formatCell(context.metadata?.mode)}`,
+    `sessionMessages: ${context.sessionMessages?.length || 0}`,
+    `shortMemory: ${context.memory?.shortTerm?.length || 0}`,
+    `fileMemory: ${context.memory?.files?.length || 0}`,
+    `experiences: ${context.memory?.experiences?.length || 0}`,
+  ].join("\n");
+}
+
+function renderRoute(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const route = result as { selectedRoles?: unknown[]; capabilities?: unknown[]; reason?: string };
+  return [
+    "Route",
+    `roles: ${Array.isArray(route.selectedRoles) ? route.selectedRoles.join(", ") : ""}`,
+    `capabilities: ${Array.isArray(route.capabilities) ? route.capabilities.join(", ") : ""}`,
+    `reason: ${route.reason || ""}`,
+  ].join("\n");
+}
+
+function renderSkillCandidateBuild(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const value = result as { created?: unknown[]; updated?: unknown[]; skipped?: unknown[] };
+  return [
+    "Skill Candidate Build",
+    `created: ${Array.isArray(value.created) ? value.created.length : 0}`,
+    `updated: ${Array.isArray(value.updated) ? value.updated.length : 0}`,
+    `skipped: ${Array.isArray(value.skipped) ? value.skipped.length : 0}`,
+  ].join("\n");
+}
+
+function renderMaintenance(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const value = result as Record<string, unknown>;
+  return [
+    "Maintenance",
+    ...Object.entries(value).map(([key, item]) => `${key}: ${formatCell(item)}`),
+  ].join("\n");
+}
+
+function renderToolExecution(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const value = result as { tool?: string; ok?: boolean; durationMs?: number; error?: string; output?: unknown };
+  return [
+    `Tool Execution: ${value.tool || ""}`,
+    `ok: ${value.ok === true}`,
+    `durationMs: ${value.durationMs ?? ""}`,
+    value.error ? `error: ${value.error}` : "",
+    value.output === undefined ? "" : `output: ${formatCell(value.output)}`,
+  ].filter(Boolean).join("\n");
+}
+
+function asRecordArray(result: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(result)) return [];
+  return result.filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)));
+}
+
+function formatTable(rows: string[][]): string {
+  const widths = rows[0].map((_, index) => Math.min(36, Math.max(...rows.map((row) => visibleLength(row[index] || "")))));
+  return rows.map((row, rowIndex) => {
+    const line = row.map((cell, index) => pad(truncate(String(cell || ""), widths[index]), widths[index])).join("  ");
+    if (rowIndex === 0) return `${line}\n${widths.map((width) => "-".repeat(width)).join("  ")}`;
+    return line;
+  }).join("\n");
+}
+
+function formatCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(formatCell).join(",");
+  return JSON.stringify(value);
+}
+
+function formatNumber(value: unknown, digits: number): string {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toFixed(digits) : "";
+}
+
+function shortId(value: unknown, length = 8): string {
+  return typeof value === "string" ? value.slice(0, length) : "";
+}
+
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function visibleLength(value: string): number {
+  return value.length;
+}
+
+function pad(value: string, width: number): string {
+  return value + " ".repeat(Math.max(0, width - visibleLength(value)));
 }
 
 function stringInput(input: unknown, arg: string | undefined, label: string): string {

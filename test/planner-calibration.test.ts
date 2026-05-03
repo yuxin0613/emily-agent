@@ -1,24 +1,36 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { calibratedReplanBudget, classifyFailure } from "../src/tasks/TaskGraphExecutor.ts";
+import { calibratedReplanBudget, classifyFailure, failureClusterWeight } from "../src/tasks/TaskGraphExecutor.ts";
 import type { Task, TaskStatus } from "../src/types.ts";
 
 const fixturePath = path.join(process.cwd(), "test", "fixtures", "planner", "long-task-samples.json");
 const samples = JSON.parse(await readFile(fixturePath, "utf8")) as Array<{
   name: string;
+  domain: "production" | "research" | "data";
   status: TaskStatus;
   error: string;
   deliveryLevel: string;
   expectedCluster: string;
+  expectedWeightMin: number;
+  expectedWeightMax: number;
   expectedBudgetMin: number;
   expectedBudgetMax: number;
 }>;
+
+assert.ok(samples.some((sample) => sample.domain === "production"), "production samples are required");
+assert.ok(samples.some((sample) => sample.domain === "research"), "research samples are required");
+assert.ok(samples.some((sample) => sample.domain === "data"), "data samples are required");
 
 for (const sample of samples) {
   const task = makeTask(sample);
   const cluster = classifyFailure(task);
   assert.equal(cluster, sample.expectedCluster, sample.name);
+  const weight = failureClusterWeight(cluster);
+  assert.ok(
+    weight >= sample.expectedWeightMin && weight <= sample.expectedWeightMax,
+    `${sample.name} weight ${weight} should be ${sample.expectedWeightMin}-${sample.expectedWeightMax}`,
+  );
   const budget = calibratedReplanBudget({
     availableSlots: 40,
     failureCluster: cluster,
@@ -35,6 +47,15 @@ assert.equal(calibratedReplanBudget({
   availableSlots: 40,
   failureCluster: "verification",
   attempt: 5,
+  deliveryLevel: "production",
+}), 2);
+
+assert.ok(failureClusterWeight("permission_or_policy") > failureClusterWeight("verification"));
+assert.ok(failureClusterWeight("data_quality") > failureClusterWeight("research_quality"));
+assert.equal(calibratedReplanBudget({
+  availableSlots: 2,
+  failureCluster: "data_quality",
+  attempt: 1,
   deliveryLevel: "production",
 }), 2);
 

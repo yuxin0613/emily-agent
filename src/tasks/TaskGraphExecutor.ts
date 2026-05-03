@@ -1057,6 +1057,8 @@ function assessGraphQuality({
   if (failureClusters.verification) recommendations.push("create a targeted fix plus verification branch before final review");
   if (failureClusters.dependency) recommendations.push("repair or bypass failed upstream dependencies before scheduling downstream tasks");
   if (failureClusters.resource_budget) recommendations.push("lower concurrency or scope before adding more dynamic tasks");
+  if (failureClusters.data_quality) recommendations.push("add data profiling, schema checks, and a validation branch before downstream analysis");
+  if (failureClusters.research_quality) recommendations.push("narrow the research question, require citations, and add contradiction checks before synthesis");
   if (blockedCount) recommendations.push("surface blocked dependencies before adding more dynamic work");
   const terminalRatio = tasks.length ? completed.length / tasks.length : 0;
   const acceptancePenalty = tasks.length ? missingAcceptance / tasks.length : 0;
@@ -1114,6 +1116,12 @@ function assessPatchQuality(
   if (failureCluster === "resource_budget" && patch.tasks.length > 1) {
     issues.push("resource budget recovery should prefer one narrow unblocker");
   }
+  if (failureCluster === "data_quality" && patch.tasks.length && !patch.tasks.some((task) => /schema|profile|quality|validate|sample|null|duplicate/i.test(`${task.title}\n${task.input}`))) {
+    issues.push("data quality recovery lacks profiling or validation work");
+  }
+  if (failureCluster === "research_quality" && patch.tasks.length && !patch.tasks.some((task) => /source|citation|evidence|contradict|verify|fresh/i.test(`${task.title}\n${task.input}`))) {
+    issues.push("research recovery lacks source or evidence validation");
+  }
   const narrowed = patch.tasks.some((task) => !sameText(task.input, failedTask.input) || task.role !== failedTask.role);
   if (patch.tasks.length && !narrowed) issues.push("recovery tasks look identical to the failed task");
   const sizePenalty = Math.max(0, patch.tasks.length - Math.max(1, Math.ceil(maxNewTasks * 0.7))) * 0.04;
@@ -1140,7 +1148,9 @@ const FAILURE_CLUSTER_WEIGHTS: Record<string, number> = {
   permission_or_policy: 0.95,
   dependency: 0.85,
   resource_budget: 0.82,
+  data_quality: 0.78,
   provider: 0.75,
+  research_quality: 0.7,
   needs_user_input: 0.72,
   timeout: 0.65,
   verification: 0.55,
@@ -1153,6 +1163,8 @@ export function classifyFailure(task: Task): string {
   if (task.status === "cancelled" || /cancel/.test(text)) return "cancelled";
   if (/budget exhausted|max dynamic|quota|too many|resource|out of memory|oom/.test(text)) return "resource_budget";
   if (/dependency|upstream|downstream|depends on|blocked by/.test(text)) return "dependency";
+  if (/schema drift|schema mismatch|bad row|data quality|null value|missing value|duplicate row|invalid csv|invalid parquet|column missing|type mismatch|etl|pipeline validation/.test(text)) return "data_quality";
+  if (/insufficient source|citation|uncited|stale source|contradict|conflicting evidence|research quality|source freshness|hallucinat|unverified claim/.test(text)) return "research_quality";
   if (/timed out|timeout|lease expired|stale/.test(text)) return "timeout";
   if (/provider|model|llm|rate limit|json|parse/.test(text)) return "provider";
   if (/not allowed|permission|forbidden|approval|policy|tool/.test(text)) return "permission_or_policy";
@@ -1163,6 +1175,10 @@ export function classifyFailure(task: Task): string {
 
 function failureRiskForTasks(tasks: Task[]): number {
   return tasks.reduce((sum, task) => sum + (FAILURE_CLUSTER_WEIGHTS[classifyFailure(task)] || FAILURE_CLUSTER_WEIGHTS.unknown), 0);
+}
+
+export function failureClusterWeight(cluster: string): number {
+  return FAILURE_CLUSTER_WEIGHTS[cluster] || FAILURE_CLUSTER_WEIGHTS.unknown;
 }
 
 function isReplanSupersededTerminal(task: Task): boolean {
@@ -1184,11 +1200,13 @@ export function calibratedReplanBudget({
     ? 2
     : failureCluster === "dependency"
       ? 3
-      : failureCluster === "timeout" || failureCluster === "provider"
+      : failureCluster === "research_quality"
         ? 3
-        : failureCluster === "verification"
-          ? 4
-          : 5;
+        : failureCluster === "timeout" || failureCluster === "provider"
+          ? 3
+          : failureCluster === "verification" || failureCluster === "data_quality"
+            ? 4
+            : 5;
   const deliveryBoost = deliveryLevel === "production" || deliveryLevel === "prod" ? 1 : 0;
   const attemptDampener = Math.max(1, 7 - attempt);
   return Math.max(1, Math.min(availableSlots, base + deliveryBoost, attemptDampener));

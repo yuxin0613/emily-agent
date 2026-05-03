@@ -178,7 +178,7 @@ flowchart LR
 - 自适应拆解优先走 planner 生成的 `GraphPatchSpec` 严格 JSON；如果模型输出不是 JSON、依赖非法、task key 冲突或超出上限，会记录 `runtime.anomaly` 并使用保守 fallback patch。
 - Planner 执行带预算护栏：`TaskGraphExecutor` 会限制并行 ready task、动态追加 task 总量和重规划次数；预算耗尽会记录 `task_graph.budget_exhausted`，失败/blocked 增多时会记录 `task_graph.budget_adjusted` 并降低并发。
 - 每个 graph 结束时会记录 `task_graph.quality`，包含 score、active/recovered 失败数、blocked 数、动态 task 数、失败聚类、失败风险、预算状态和调参建议；已被 replan recovery 覆盖的旧失败会保留审计但降低质量扣分。
-- 当 `PlanSpec.failureStrategy` 为 `replan` 时，失败 task 会触发内部 replan planner task，仍要求返回 `GraphPatchSpec`，不会替换现有协议；replan 会记录 `task_graph.failure_clustered` 和 `task_graph.replan_quality`，用于判断是 timeout、provider、permission/policy、dependency、resource_budget、verification 还是需要用户输入，并据此调节 recovery task 预算。
+- 当 `PlanSpec.failureStrategy` 为 `replan` 时，失败 task 会触发内部 replan planner task，仍要求返回 `GraphPatchSpec`，不会替换现有协议；replan 会记录 `task_graph.failure_clustered` 和 `task_graph.replan_quality`，用于判断是 timeout、provider、permission/policy、dependency、resource_budget、verification、data_quality、research_quality 还是需要用户输入，并据此调节 recovery task 预算。
 - 如果 `PlanSpec` 或 `GraphPatchSpec` 要求用户补充信息，run 会进入 `waiting_user`，记录 `task_graph.waiting_user`，并把问题交还给主 agent 而不是继续执行。
 - 动态追加的 task 会带上 `expandedFromTaskId`、`parentKey`、`expansionDepth` 和原 graph 的准出标准，timeline 可以复盘任务图是如何从粗到细长出来的。
 - 如果上游 success dependency 失败，下游 task 会被标记为 `blocked`，不会一直等待到超时。
@@ -344,6 +344,7 @@ await runtime.executeTool({
 
 - `ContextEngine`: 构建有预算的上下文包。默认 `active` 模式只带短期内存和长期语义印象；需要追溯时用 `deep` 模式再搜索文件记忆和 session 历史，避免每轮把长历史全塞给模型。
 - `Gateway Protocol`: Web adapter 提供 `/gateway` WebSocket。消息是严格 typed request/response/event，适合其它业务应用接入，而不是只依赖 WebUI。
+- `CommandRegistry` 是 Gateway/TUI/Web 的控制面复用层。Gateway 除 chat 外已经暴露 provider、role、session、skill candidate、experience、tool execution、diagnostics、maintenance、cancel 等结构化写类方法；TUI 优先使用 command text renderer 输出，adapter 只保留输入读取和少量状态展示。
 - `AgentRouter`: 主 agent 的初始路由使用确定性规则，返回 selected roles、命中规则和 fallback role，planner 仍负责后续结构化任务图。
 - `AgentProfile`: 每个 worker 运行前生成 profile，记录 role、workspace、stateDir、sessionScope、memoryScope、provider fallback、tool policy 和 skill allowlist，并写入 `agent.profile.created` 事件。
 - `LifecycleHooks`: runtime 暴露 `addLifecycleHook()`，可订阅 `beforeRun`、`afterRun`、`beforeTaskRun`、`afterTaskRun`、`beforeMemoryCommit`、`afterMemoryCommit`、`beforeContextBuild`、`afterContextBuild`。
@@ -684,14 +685,14 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/runtime/LifecycleHooks.ts`: runtime 生命周期 hook 注册和触发。
 - `src/runtime/Doctor.ts`: 聚合 health、diagnostics、provider health、security audit、session 和候选项状态的 runtime doctor 报告。
 - `src/runtime/SessionOps.ts`: resume latest、session export、compaction preview 和 per-session usage 汇总。
-- `src/commands/CommandRegistry.ts`: 统一注册可复用 runtime command，覆盖 doctor、health、provider/role/tool/skill/session/experience/timeline/context/router 查询、provider/role/skill/session/experience 写命令、maintenance/cancel 和 tool execution，并带 input schema 与权限声明。
+- `src/commands/CommandRegistry.ts`: 统一注册可复用 runtime command，覆盖 doctor、health、provider/role/tool/skill/session/experience/timeline/context/router 查询、provider/role/skill/session/experience 写命令、maintenance/cancel 和 tool execution，并带 input schema、权限声明和文本 renderer。
 - `src/security/SecurityAudit.ts`: 底座安全审计报告。
 - `src/agents/AgentProfile.ts`: subagent profile 隔离描述和 prompt 渲染。
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
 - `src/agents/RoleWorkProduct.ts`: developer / researcher / reviewer 的本地工作产物增强层，补充代码库上下文、研究结构和 JSON review verdict。
 - `src/tasks/TaskStore.ts`: SQLite task、session、agent、event、role queue、状态机、lease、retry/dead-letter。
 - `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
-- `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛、rolling 图扩展、replan quality 评分、失败聚类和预算自适应。
+- `src/tasks/TaskGraphExecutor.ts`: 按依赖自动执行 task graph，处理 ready task、失败依赖、blocked 收敛、rolling 图扩展、replan quality 评分、生产/研究/数据类失败聚类和预算自适应。
 - `src/tasks/TaskResult.ts`: 结构化 task result 序列化、解析和 summary 提取。
 - `src/planning/PlanSpec.ts`: PlanSpec / GraphPatchSpec 类型、解析、fallback 计划、准出标准识别和 validator。
 - `src/tasks/errors.ts`: 状态机错误类型。
@@ -726,8 +727,8 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/storage/SchemaMigrator.ts`: SQLite schema migration 版本记录。
 - `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
 - `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
-- `src/adapters/tui.ts`: 命令行交互入口，提供 chat、health、provider、tool、skill、timeline、diagnostics 和 maintenance 命令。
-- `src/adapters/web.ts`: Web/API/Gateway 入口，提供 `GET /` WebUI、`GET /health`、`GET /doctor`、session ops、commands、`GET /events`、`POST /chat` 和 `/gateway` WebSocket。
+- `src/adapters/tui.ts`: 命令行交互入口，提供 chat 和 command renderer 驱动的 health、provider、tool、skill、timeline、diagnostics、maintenance 等命令。
+- `src/adapters/web.ts`: Web/API/Gateway 入口，提供 `GET /` WebUI、`GET /health`、`GET /doctor`、session ops、commands、`POST /tools/execute`、`GET /events`、`POST /chat` 和 `/gateway` WebSocket。
 - `src/adapters/webUi.ts`: Wiki.js 风格 WebUI HTML/CSS/JS。
 - `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
 - `skills/<skill>/skill.md`: 技能定义，描述可复用工作流、aliases、capabilities 和 tool hints。
@@ -765,8 +766,8 @@ npm run check
 - skill candidate 生成、评分、审批写入、已有 skill 更新、拒绝和 schema migration。
 - session 生命周期和消息隔离：new、clear/hide、restore、trash、session 内消息历史和 30 天后删除。
 - TUI/WebUI 静态渲染入口和 WebUI 基础结构。
-- WebSocket Gateway、ContextEngine active/deep 召回、确定性路由、LifecycleHooks 和 security audit。
-- doctor、CommandRegistry、session 运维 API 和 permission mode 的基础接线。
+- WebSocket Gateway、ContextEngine active/deep 召回、确定性路由、LifecycleHooks、security audit 和结构化写类控制入口。
+- doctor、CommandRegistry、session 运维 API、permission mode、command text renderer 和 TUI/Web/Gateway command 复用。
 - 外部向量库 adapter factory、pgvector host-injected driver、ToolExecutor 审计链、精细 approval template、轻量浏览器交互、GitHub PR/issue 结构化动作、planner graph quality/replan/budget/failure-cluster 校准和 mock parity harness。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
@@ -775,7 +776,7 @@ npm run check
 - memory 压缩向量索引、内容去重、compact 和混合召回。
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
 - 经验相似匹配、applicability/contraindications、feedback/reuse、索引重建和 schema migration 记录。
-- mock parity 覆盖 provider/doctor、command registry、真实工具执行、动态 task、worker crash、cancel、gateway、memory candidate 审批和多轮 replan 长链路基准；planner calibration 额外使用真实长任务样本校验失败聚类和预算参数，外部 provider/vector parity 可通过环境变量启用。
+- mock parity 覆盖 provider/doctor、command registry、真实工具执行、动态 task、worker crash、cancel、gateway、memory candidate 审批和多轮 replan 长链路基准；planner calibration 额外使用生产、研究、数据处理长任务样本校验失败聚类、风险权重和预算参数，外部 provider/vector parity 可通过环境变量启用。
 
 ## 下一阶段建议
 
@@ -784,5 +785,5 @@ npm run check
 - Provider：补原生 Anthropic、Gemini provider；OpenAI-compatible 私有网关可先通过 `openai` provider 的兼容配置承载，再按需要沉淀专用 adapter。
 - Memory：继续补真实 Milvus/Chroma/Qdrant collection bootstrap 和 pgvector driver 包装示例，方便宿主应用少写样板。
 - Tools：继续把真实浏览器驱动、GitHub GraphQL thread 操作和宿主应用确认弹窗接入为可选 executor，而不是扩大默认权限。
-- Planner：沉淀更多生产/研究/数据处理类长任务样本，继续校准质量评分和预算参数。
-- CommandRegistry：下一步迁移更多写类控制入口和文本 renderer，让 adapter 更薄。
+- Planner：继续沉淀安全审计、迁移、跨仓库重构和数据回填类长任务样本，校准 replan patch quality 的领域规则。
+- CommandRegistry：继续补更多命令的专用 text renderer 和审计字段，让 adapter 中的手写展示逻辑继续减少。
