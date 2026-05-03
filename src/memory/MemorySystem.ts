@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import type { MemoryRecord, MemoryRecallResult, Metadata } from "../types.ts";
+import { ScalarQuantCompressor, type CompressedVector, type VectorCompressor } from "../experience/VectorCompressor.ts";
 import { MemoryCurator } from "./MemoryCurator.ts";
 
 export class MemorySystem {
@@ -21,6 +22,8 @@ export class MemorySystem {
       }),
       vectorLayer: new VectorMemoryLayer({
         filePath: path.join(memoryDir, "vector-index.json"),
+        compressor: new ScalarQuantCompressor(),
+        maxItems: 500,
       }),
       curator: new MemoryCurator(),
     });
@@ -72,6 +75,15 @@ export class MemorySystem {
       semantic,
     };
   }
+
+  async compact(options: { maxFileRecords?: number; maxVectorRecords?: number } = {}): Promise<{
+    file: { before: number; after: number; removed: number };
+    vector: { before: number; after: number; removed: number; algorithm: string };
+  }> {
+    const file = await this.fileLayer.compact({ maxRecords: options.maxFileRecords ?? 1000 });
+    const vector = await this.vectorLayer.compact({ maxItems: options.maxVectorRecords ?? 500 });
+    return { file, vector };
+  }
 }
 
 class InMemoryLayer {
@@ -115,40 +127,119 @@ class FileMemoryLayer {
 
     return scoreTextRecords(records, query, scope).slice(0, limit);
   }
+
+  async compact({ maxRecords }: { maxRecords: number }): Promise<{ before: number; after: number; removed: number }> {
+    const content = await readTextIfExists(this.filePath);
+    const records = content
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as MemoryRecord);
+    const before = records.length;
+    const deduped = dedupeRecords(records)
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))
+      .slice(0, maxRecords)
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+    await writeFile(this.filePath, deduped.map((record) => JSON.stringify(record)).join("\n") + (deduped.length ? "\n" : ""), "utf8");
+    return {
+      before,
+      after: deduped.length,
+      removed: before - deduped.length,
+    };
+  }
 }
 
 class VectorMemoryLayer {
   filePath: string;
-  items: Array<{ record: MemoryRecord; embedding: number[] }>;
+  compressor: VectorCompressor;
+  maxItems: number;
+  items: Array<{ record: MemoryRecord; vector: CompressedVector; contentHash: string; updatedAt: string; hits: number }>;
 
-  constructor({ filePath }: { filePath: string }) {
+  constructor({ filePath, compressor, maxItems }: { filePath: string; compressor: VectorCompressor; maxItems: number }) {
     this.filePath = filePath;
+    this.compressor = compressor;
+    this.maxItems = maxItems;
     this.items = [];
   }
 
   async load(): Promise<void> {
     const content = await readTextIfExists(this.filePath);
-    this.items = content ? JSON.parse(content) : [];
+    const parsed = content ? JSON.parse(content) as unknown : [];
+    const items = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === "object" && Array.isArray((parsed as { items?: unknown[] }).items)
+        ? (parsed as { items: unknown[] }).items
+        : [];
+    this.items = items.map((item) => normalizeVectorItem(item, this.compressor)).filter((item): item is VectorMemoryLayer["items"][number] => Boolean(item));
   }
 
   async add(record: MemoryRecord): Promise<void> {
+    const contentHash = memoryHash(record);
+    const existing = this.items.find((item) => item.contentHash === contentHash);
+    if (existing) {
+      existing.record = mergeMemoryRecord(existing.record, record);
+      existing.updatedAt = new Date().toISOString();
+      await this.save();
+      return;
+    }
     this.items.push({
       record,
-      embedding: embedText(record.content),
+      vector: this.compressor.compress(this.compressor.embed(record.content)),
+      contentHash,
+      updatedAt: new Date().toISOString(),
+      hits: 0,
     });
-    await writeFile(this.filePath, JSON.stringify(this.items, null, 2), "utf8");
+    await this.compact({ maxItems: this.maxItems });
   }
 
   async search(query: string, { scope, limit }: { scope: string; limit: number }): Promise<Array<MemoryRecord & { score: number }>> {
-    const queryEmbedding = embedText(query);
-    return this.items
+    const queryEmbedding = this.compressor.embed(query);
+    const scored = this.items
       .filter((item) => item.record.scope === scope)
       .map((item) => ({
+        item,
         ...item.record,
-        score: cosineSimilarity(queryEmbedding, item.embedding),
+        score: blendedMemoryScore({
+          semantic: this.compressor.similarity(queryEmbedding, item.vector),
+          lexical: lexicalScore(tokenize(query), tokenize(item.record.content)),
+          record: item.record,
+          hits: item.hits,
+        }),
       }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+    for (const result of scored) {
+      result.item.hits += 1;
+      result.item.updatedAt = new Date().toISOString();
+    }
+    if (scored.length) await this.save();
+    return scored.map(({ item: _item, ...record }) => record);
+  }
+
+  async compact({ maxItems }: { maxItems: number }): Promise<{ before: number; after: number; removed: number; algorithm: string }> {
+    const before = this.items.length;
+    const byHash = new Map<string, VectorMemoryLayer["items"][number]>();
+    for (const item of this.items) {
+      const existing = byHash.get(item.contentHash);
+      byHash.set(item.contentHash, existing ? mergeVectorItem(existing, item) : item);
+    }
+    this.items = [...byHash.values()]
+      .sort((a, b) => memoryRetentionScore(b) - memoryRetentionScore(a))
+      .slice(0, maxItems);
+    await this.save();
+    return {
+      before,
+      after: this.items.length,
+      removed: before - this.items.length,
+      algorithm: this.compressor.name,
+    };
+  }
+
+  private async save(): Promise<void> {
+    await writeFile(this.filePath, JSON.stringify({
+      version: 2,
+      algorithm: this.compressor.name,
+      items: this.items,
+    }, null, 2), "utf8");
   }
 }
 
@@ -197,23 +288,78 @@ function tokenize(text: string): string[] {
     .filter(Boolean);
 }
 
-function embedText(text: string): number[] {
-  const vector = new Array(64).fill(0);
-  for (const token of tokenize(text)) {
-    const hash = createHash("sha256").update(token).digest();
-    for (let index = 0; index < vector.length; index += 1) {
-      vector[index] += (hash[index % hash.length] - 128) / 128;
-    }
+function normalizeVectorItem(item: unknown, compressor: VectorCompressor): VectorMemoryLayer["items"][number] | null {
+  if (!item || typeof item !== "object") return null;
+  const value = item as {
+    record?: MemoryRecord;
+    vector?: CompressedVector;
+    embedding?: number[];
+    contentHash?: string;
+    updatedAt?: string;
+    hits?: number;
+    items?: unknown[];
+  };
+  if (Array.isArray(value.items)) return null;
+  if (!value.record) return null;
+  return {
+    record: value.record,
+    vector: value.vector || compressor.compress(value.embedding || compressor.embed(value.record.content)),
+    contentHash: value.contentHash || memoryHash(value.record),
+    updatedAt: value.updatedAt || value.record.createdAt || new Date().toISOString(),
+    hits: typeof value.hits === "number" ? value.hits : 0,
+  };
+}
+
+function memoryHash(record: MemoryRecord): string {
+  return createHash("sha256").update([record.scope, record.kind, normalizeText(record.content)].join("\n")).digest("hex");
+}
+
+function dedupeRecords(records: MemoryRecord[]): MemoryRecord[] {
+  const byHash = new Map<string, MemoryRecord>();
+  for (const record of records) {
+    const hash = memoryHash(record);
+    const existing = byHash.get(hash);
+    byHash.set(hash, existing ? mergeMemoryRecord(existing, record) : record);
   }
-  return normalizeVector(vector);
+  return [...byHash.values()];
 }
 
-function normalizeVector(vector: number[]): number[] {
-  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
-  if (!magnitude) return vector;
-  return vector.map((value) => value / magnitude);
+function mergeMemoryRecord(left: MemoryRecord, right: MemoryRecord): MemoryRecord {
+  return {
+    ...left,
+    metadata: {
+      ...left.metadata,
+      ...right.metadata,
+      duplicateCount: Number(left.metadata.duplicateCount || 1) + 1,
+      lastSeenAt: right.createdAt,
+    },
+  };
 }
 
-function cosineSimilarity(a: number[], b: number[]): number {
-  return a.reduce((sum, value, index) => sum + value * b[index], 0);
+function mergeVectorItem(left: VectorMemoryLayer["items"][number], right: VectorMemoryLayer["items"][number]): VectorMemoryLayer["items"][number] {
+  return {
+    ...left,
+    record: mergeMemoryRecord(left.record, right.record),
+    updatedAt: Date.parse(left.updatedAt) > Date.parse(right.updatedAt) ? left.updatedAt : right.updatedAt,
+    hits: left.hits + right.hits,
+  };
+}
+
+function blendedMemoryScore({ semantic, lexical, record, hits }: { semantic: number; lexical: number; record: MemoryRecord; hits: number }): number {
+  const importance = typeof record.metadata.importance === "number" ? record.metadata.importance : 0;
+  const confidence = typeof record.metadata.confidence === "number" ? record.metadata.confidence : 0;
+  const reuse = Math.min(0.08, hits * 0.01);
+  return semantic * 0.72 + lexical * 0.18 + importance * 0.06 + confidence * 0.04 + reuse;
+}
+
+function memoryRetentionScore(item: VectorMemoryLayer["items"][number]): number {
+  const ageDays = Math.max(0, (Date.now() - Date.parse(item.updatedAt || item.record.createdAt)) / (24 * 60 * 60 * 1000));
+  const recency = Math.max(0, 1 - ageDays / 30);
+  const importance = typeof item.record.metadata.importance === "number" ? item.record.metadata.importance : 0.5;
+  const confidence = typeof item.record.metadata.confidence === "number" ? item.record.metadata.confidence : 0.5;
+  return importance * 0.35 + confidence * 0.2 + recency * 0.25 + Math.min(0.2, item.hits * 0.02);
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
 }

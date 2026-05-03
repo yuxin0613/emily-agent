@@ -274,6 +274,11 @@ export interface ExperienceRevision {
 
 export interface ExperienceRecallResult extends Experience {
   score: number;
+  vectorScore?: number;
+  lexicalScore?: number;
+  applicabilityScore?: number;
+  feedbackScore?: number;
+  recallReason?: string;
 }
 
 export type ExperienceFeedbackRating = "useful" | "wrong" | "outdated" | "duplicate";

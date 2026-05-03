@@ -11,6 +11,7 @@ interface BuildResult {
     experienceId: string;
     revision: number;
   }>;
+  indexMaintenance?: ReturnType<ExperienceStore["maintenance"]>;
 }
 
 export class ExperienceBuilder {
@@ -55,7 +56,11 @@ export class ExperienceBuilder {
       };
     });
 
-    return { candidates, updates };
+    return {
+      candidates,
+      updates,
+      indexMaintenance: this.experienceStore.maintenance({ rebuildVectors: true }),
+    };
   }
 
   selectHighValueCandidates(tasks: Task[]): ExperienceCandidate[] {

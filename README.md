@@ -300,7 +300,9 @@ curl -X POST http://127.0.0.1:3000/roles/defaults \
 - 同一类经验使用稳定 `topicKey`，只保留一个 `active` 当前最佳实践；如果 `topicKey` 不完全一致，会再用 scope/type、向量相似度和关键词重合做相似匹配。
 - 旧版本进入 `experience_revisions`，用于审计、回滚和解释，不参与默认召回。
 - 经验向量只索引 active 当前版本，避免新旧经验同时命中。
-- 召回排序会考虑相似度、重要性、置信度、reuse count 和用户反馈。
+- 普通 memory 的长期向量层使用压缩向量索引，并按内容 hash 去重；maintenance 会压缩文件层和向量层，避免流水账无限膨胀。
+- 经验索引会在每日构建和 runtime maintenance 时自动重建缺失/过期/算法变化的 active vector，并归档 stale vector。
+- 召回排序会混合压缩向量相似度、关键词重合、适用条件、重要性、置信度、reuse count 和用户反馈。
 - 每条经验记录适用条件 `applicability` 和禁用条件 `contraindications`，避免相似但场景不同的经验被误用。
 - `conflict` / `split` 更新会创建新的 active topic，`deprecated` 会归档旧版本并从默认召回移除。
 - 召回流程是“先有印象，再查细节”：先命中压缩经验向量，再读取 active experience 和 evidence task。
@@ -322,6 +324,11 @@ curl -X POST http://127.0.0.1:3000/roles/defaults \
 
 ```ts
 runtime.buildDailyExperiences({ day: new Date() })
+await runtime.maintenance({
+  maxFileMemoryRecords: 1000,
+  maxVectorMemoryRecords: 500,
+  pruneArchivedExperienceVectorDays: 90
+})
 ```
 
 Web API：
@@ -394,8 +401,8 @@ curl http://127.0.0.1:3000/events
 - `src/experience/ExperienceBuilder.ts`: 每日经验提炼，最多保留 3 条高价值更新。
 - `src/experience/ExperienceMatcher.ts`: 稳定 topicKey、相似经验匹配和合并判断。
 - `src/experience/VectorCompressor.ts`: 向量压缩接口和当前 int8 实现。
+- `src/memory/MemorySystem.ts`: 三层记忆统一入口，长期向量层使用压缩索引和自动 compact。
 - `src/storage/SchemaMigrator.ts`: SQLite schema migration 版本记录。
-- `src/memory/MemorySystem.ts`: 三层记忆统一入口。
 - `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
 - `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
 - `src/adapters/tui.ts`: 命令行交互入口。
@@ -434,8 +441,9 @@ npm run check
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。
 - diagnostics invariant 和 database retention maintenance。
+- memory 压缩向量索引、内容去重、compact 和混合召回。
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
-- 经验相似匹配、applicability/contraindications、feedback/reuse 和 schema migration 记录。
+- 经验相似匹配、applicability/contraindications、feedback/reuse、索引重建和 schema migration 记录。
 
 ## 后续扩展
 

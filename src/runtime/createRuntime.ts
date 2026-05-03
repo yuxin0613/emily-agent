@@ -199,7 +199,15 @@ export async function createRuntime(options: {
       return renderTimeline(taskStore.getTimeline({ runId }));
     },
     health,
-    async maintenance(options: { day?: Date; staleRunMs?: number; maxEvents?: number; pruneMemoryCandidateDays?: number } = {}) {
+    async maintenance(options: {
+      day?: Date;
+      staleRunMs?: number;
+      maxEvents?: number;
+      pruneMemoryCandidateDays?: number;
+      maxFileMemoryRecords?: number;
+      maxVectorMemoryRecords?: number;
+      pruneArchivedExperienceVectorDays?: number;
+    } = {}) {
       const reconcile = await roleAgentManager.reconcile();
       const taskGraphs = taskStore.refreshTaskGraphStatuses();
       const staleRuns = taskStore.recoverStaleRuns({
@@ -209,6 +217,14 @@ export async function createRuntime(options: {
       const memoryCandidates = await approvePendingMemoryCandidates();
       const experiences = experienceBuilder.buildDailyExperiences({
         day: options.day || new Date(),
+      });
+      const memoryCompaction = await memory.compact({
+        maxFileRecords: options.maxFileMemoryRecords,
+        maxVectorRecords: options.maxVectorMemoryRecords,
+      });
+      const experienceIndex = experienceStore.maintenance({
+        rebuildVectors: true,
+        pruneArchivedVectorDays: options.pruneArchivedExperienceVectorDays,
       });
       const database = taskStore.maintenance({
         maxEvents: options.maxEvents,
@@ -232,6 +248,8 @@ export async function createRuntime(options: {
         },
         memoryCandidates,
         experiences,
+        memoryCompaction,
+        experienceIndex,
         database,
         health: health(),
       };

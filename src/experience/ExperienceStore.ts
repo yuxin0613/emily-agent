@@ -192,6 +192,16 @@ export class ExperienceStore {
           this.ensureColumn("experience_revisions", "contraindications", "TEXT NOT NULL DEFAULT '[]'");
         },
       },
+      {
+        version: 4,
+        name: "add_experience_index_maintenance",
+        up: () => {
+          this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_experience_vectors_exp_status ON experience_vectors(experience_id, status, revision);
+            CREATE INDEX IF NOT EXISTS idx_experiences_scope_status ON experiences(scope, status, updated_at DESC);
+          `);
+        },
+      },
     ]);
   }
 
@@ -230,11 +240,16 @@ export class ExperienceStore {
   recall(query: string, {
     scope,
     limit = 5,
+    minScore = 0.08,
+    includeContraindicated = false,
   }: {
     scope?: Experience["scope"];
     limit?: number;
+    minScore?: number;
+    includeContraindicated?: boolean;
   } = {}): ExperienceRecallResult[] {
     const queryVector = this.compressor.embed(query);
+    const queryTokens = tokenize(query);
     const rows = this.db
       .prepare(`
         SELECT e.*, v.algorithm, v.dimensions, v.payload
@@ -247,12 +262,72 @@ export class ExperienceStore {
       .all(scope ?? null, scope ?? null) as Array<ExperienceRow & ExperienceVectorRow>;
 
     return rows
-      .map((row) => ({
-        ...parseExperience(row),
-        score: this.compressor.similarity(queryVector, JSON.parse(row.payload) as CompressedVector),
-      }))
-      .sort((a, b) => scoreRecall(b, this.feedbackScore(b.id)) - scoreRecall(a, this.feedbackScore(a.id)))
+      .map((row) => {
+        const experience = parseExperience(row);
+        const vectorScore = this.compressor.similarity(queryVector, JSON.parse(row.payload) as CompressedVector);
+        const lexical = tokenOverlap(queryTokens, tokenize(formatExperienceForEmbedding(experience)));
+        const applicability = applicabilityScore(queryTokens, experience);
+        const contraindication = contraindicationScore(queryTokens, experience.contraindications);
+        const feedback = this.feedbackScore(experience.id);
+        const score = scoreRecall({
+          ...experience,
+          score: vectorScore,
+          vectorScore,
+          lexicalScore: lexical,
+          applicabilityScore: applicability,
+          feedbackScore: feedback,
+          recallReason: recallReason({ vectorScore, lexical, applicability, contraindication }),
+        }, feedback, {
+          lexical,
+          applicability,
+          contraindication: includeContraindicated ? 0 : contraindication,
+        });
+        return {
+          ...experience,
+          score,
+          vectorScore,
+          lexicalScore: lexical,
+          applicabilityScore: applicability,
+          feedbackScore: feedback,
+          recallReason: recallReason({ vectorScore, lexical, applicability, contraindication }),
+        };
+      })
+      .filter((experience) => experience.score >= minScore)
+      .filter((experience) => includeContraindicated || contraindicationScore(queryTokens, experience.contraindications) < 0.5)
+      .sort((a, b) => b.score - a.score)
       .slice(0, limit);
+  }
+
+  maintenance({ rebuildVectors = true, pruneArchivedVectorDays = 90 }: { rebuildVectors?: boolean; pruneArchivedVectorDays?: number } = {}): {
+    rebuiltVectors: number;
+    archivedStaleVectors: number;
+    prunedArchivedVectors: number;
+    stats: Array<{ status: string; algorithm: string; count: number }>;
+  } {
+    const archivedStaleVectors = this.archiveStaleVectors();
+    let rebuiltVectors = 0;
+    if (rebuildVectors) {
+      for (const experience of this.listActive()) {
+        if (this.needsVectorRebuild(experience)) {
+          this.writeActiveVector(experience);
+          rebuiltVectors += 1;
+        }
+      }
+    }
+    const prunedArchivedVectors = this.pruneArchivedVectors(pruneArchivedVectorDays);
+    return {
+      rebuiltVectors,
+      archivedStaleVectors,
+      prunedArchivedVectors,
+      stats: this.vectorStats(),
+    };
+  }
+
+  vectorStats(): Array<{ status: string; algorithm: string; count: number }> {
+    const rows = this.db
+      .prepare("SELECT status, algorithm, COUNT(*) AS count FROM experience_vectors GROUP BY status, algorithm ORDER BY status, algorithm")
+      .all() as Array<{ status: string; algorithm: string; count: number }>;
+    return rows;
   }
 
   recordUse(experienceId: string): void {
@@ -497,6 +572,12 @@ export class ExperienceStore {
       .prepare(`
         INSERT INTO experience_vectors (experience_id, revision, status, algorithm, dimensions, payload, created_at)
         VALUES (?, ?, 'active', ?, ?, ?, ?)
+        ON CONFLICT(experience_id, revision) DO UPDATE SET
+          status = 'active',
+          algorithm = excluded.algorithm,
+          dimensions = excluded.dimensions,
+          payload = excluded.payload,
+          created_at = excluded.created_at
       `)
       .run(
         experience.id,
@@ -512,6 +593,39 @@ export class ExperienceStore {
     this.db
       .prepare("UPDATE experience_vectors SET status = 'archived' WHERE experience_id = ? AND revision = ?")
       .run(experienceId, revision);
+  }
+
+  private needsVectorRebuild(experience: Experience): boolean {
+    const row = this.db
+      .prepare("SELECT algorithm, status FROM experience_vectors WHERE experience_id = ? AND revision = ?")
+      .get(experience.id, experience.revision) as { algorithm: string; status: string } | undefined;
+    return !row || row.status !== "active" || row.algorithm !== this.compressor.name;
+  }
+
+  private archiveStaleVectors(): number {
+    const result = this.db
+      .prepare(`
+        UPDATE experience_vectors
+        SET status = 'archived'
+        WHERE status = 'active'
+          AND NOT EXISTS (
+            SELECT 1 FROM experiences e
+            WHERE e.id = experience_vectors.experience_id
+              AND e.revision = experience_vectors.revision
+              AND e.status = 'active'
+          )
+      `)
+      .run();
+    return Number(result.changes);
+  }
+
+  private pruneArchivedVectors(olderThanDays: number): number {
+    if (olderThanDays <= 0) return 0;
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    const result = this.db
+      .prepare("DELETE FROM experience_vectors WHERE status = 'archived' AND created_at < ?")
+      .run(cutoff);
+    return Number(result.changes);
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
@@ -591,12 +705,19 @@ function parseFeedback(row: ExperienceFeedbackRow): ExperienceFeedback {
   };
 }
 
-function scoreRecall(experience: ExperienceRecallResult, feedbackScore: number): number {
-  return experience.score
+function scoreRecall(
+  experience: ExperienceRecallResult,
+  feedbackScore: number,
+  { lexical = 0, applicability = 0, contraindication = 0 }: { lexical?: number; applicability?: number; contraindication?: number } = {},
+): number {
+  return experience.score * 0.62
+    + lexical * 0.16
+    + applicability * 0.12
     + experience.importance * 0.2
     + experience.confidence * 0.1
     + Math.min(0.15, experience.reuseCount * 0.02)
-    + Math.max(-0.4, Math.min(0.25, feedbackScore * 0.08));
+    + Math.max(-0.4, Math.min(0.25, feedbackScore * 0.08))
+    - contraindication * 0.75;
 }
 
 function mergeText(left: string, right: string): string {
@@ -626,4 +747,51 @@ function unique(values: string[]): string[] {
 
 function uniqueNumbers(values: number[]): number[] {
   return [...new Set(values)];
+}
+
+function tokenize(text: string): string[] {
+  return String(text)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1);
+}
+
+function tokenOverlap(leftTokens: string[], rightTokens: string[]): number {
+  const left = new Set(leftTokens);
+  const right = new Set(rightTokens);
+  if (!left.size || !right.size) return 0;
+  const hits = [...left].filter((token) => right.has(token)).length;
+  return hits / Math.min(left.size, right.size);
+}
+
+function applicabilityScore(queryTokens: string[], experience: Experience): number {
+  return Math.max(
+    tokenOverlap(queryTokens, tokenize(experience.applicability)),
+    tokenOverlap(queryTokens, tokenize(experience.problemPattern)),
+  );
+}
+
+function contraindicationScore(queryTokens: string[], contraindications: string[]): number {
+  if (!contraindications.length) return 0;
+  return Math.max(...contraindications.map((item) => tokenOverlap(queryTokens, tokenize(item))));
+}
+
+function recallReason({
+  vectorScore,
+  lexical,
+  applicability,
+  contraindication,
+}: {
+  vectorScore: number;
+  lexical: number;
+  applicability: number;
+  contraindication: number;
+}): string {
+  if (contraindication >= 0.5) return "contraindicated";
+  if (applicability >= 0.35) return "applicability";
+  if (lexical >= 0.35) return "lexical";
+  if (vectorScore >= 0.45) return "semantic";
+  return "low-confidence";
 }

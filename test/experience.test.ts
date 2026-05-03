@@ -59,6 +59,8 @@ const recalled = experienceStore.recall("worker exits and sqlite lease expires",
 });
 assert.equal(recalled[0].id, active[0].id);
 assert.equal(recalled[0].revision, 2);
+assert.ok((recalled[0].vectorScore || 0) > 0);
+assert.ok((recalled[0].lexicalScore || 0) > 0);
 
 const similar = experienceStore.upsertExperience({
   scope: "project",
@@ -80,6 +82,25 @@ assert.equal(similar.action, "replace");
 assert.equal(similar.experience.id, active[0].id);
 assert.equal(similar.experience.revision, 3);
 assert.match(similar.experience.applicability, /worker exits/);
+
+const contraindicated = experienceStore.recall("worker produced no persisted state and no inspector is available", {
+  scope: "project",
+  limit: 3,
+});
+assert.ok(!contraindicated.some((item) => item.id === similar.experience.id));
+const includeContraindicated = experienceStore.recall("worker produced no persisted state and no inspector is available", {
+  scope: "project",
+  limit: 3,
+  includeContraindicated: true,
+});
+assert.ok(includeContraindicated.some((item) => item.id === similar.experience.id && item.recallReason === "contraindicated"));
+
+experienceStore.db
+  .prepare("UPDATE experience_vectors SET status = 'archived' WHERE experience_id = ? AND revision = ?")
+  .run(similar.experience.id, similar.experience.revision);
+const maintenance = experienceStore.maintenance();
+assert.ok(maintenance.rebuiltVectors >= 1);
+assert.ok(maintenance.stats.some((item) => item.status === "active" && item.count >= 1));
 
 const feedback = experienceStore.addFeedback({
   experienceId: similar.experience.id,

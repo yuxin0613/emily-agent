@@ -43,7 +43,15 @@ export async function startWebServer({
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
-    maintenance: (options?: { day?: Date; staleRunMs?: number; maxEvents?: number; pruneMemoryCandidateDays?: number }) => Promise<unknown>;
+    maintenance: (options?: {
+      day?: Date;
+      staleRunMs?: number;
+      maxEvents?: number;
+      pruneMemoryCandidateDays?: number;
+      maxFileMemoryRecords?: number;
+      maxVectorMemoryRecords?: number;
+      pruneArchivedExperienceVectorDays?: number;
+    }) => Promise<unknown>;
     roleAgentManager: NodeJS.EventEmitter;
   };
   port: number;
@@ -190,6 +198,9 @@ export async function startWebServer({
           staleRunMs: typeof body.staleRunMs === "number" ? body.staleRunMs : undefined,
           maxEvents: typeof body.maxEvents === "number" ? body.maxEvents : undefined,
           pruneMemoryCandidateDays: typeof body.pruneMemoryCandidateDays === "number" ? body.pruneMemoryCandidateDays : undefined,
+          maxFileMemoryRecords: typeof body.maxFileMemoryRecords === "number" ? body.maxFileMemoryRecords : undefined,
+          maxVectorMemoryRecords: typeof body.maxVectorMemoryRecords === "number" ? body.maxVectorMemoryRecords : undefined,
+          pruneArchivedExperienceVectorDays: typeof body.pruneArchivedExperienceVectorDays === "number" ? body.pruneArchivedExperienceVectorDays : undefined,
         });
         return sendJson(response, 200, result);
       }
