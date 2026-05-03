@@ -30,6 +30,7 @@ export class RoleManager {
     forbiddenTools?: RoleDefinition["forbiddenTools"];
     maxConcurrentTasks?: number;
     capabilities?: string[];
+    skills?: string[];
     outputContract?: string;
     instructions: string;
   }): Promise<RoleDefinition> {
@@ -44,6 +45,7 @@ export class RoleManager {
       forbiddenTools: input.forbiddenTools,
       maxConcurrentTasks: input.maxConcurrentTasks,
       capabilities: input.capabilities,
+      skills: input.skills,
       outputContract: input.outputContract,
       instructions: input.instructions,
     }, { roleDir: this.roleDir });
@@ -100,6 +102,7 @@ export class RoleManager {
     allowedTools?: RoleDefinition["allowedTools"];
     forbiddenTools?: RoleDefinition["forbiddenTools"];
     capabilities?: string[];
+    skills?: string[];
     outputContract?: string;
     instructions: string;
   }): void {
@@ -119,6 +122,11 @@ export class RoleManager {
     const allowed = new Set(input.allowedTools || []);
     for (const tool of input.forbiddenTools || []) {
       if (allowed.has(tool)) throw new Error(`Tool cannot be both allowed and forbidden: ${tool}`);
+    }
+    for (const skill of input.skills || []) {
+      if (!/^[A-Za-z0-9._-]+$/.test(skill)) {
+        throw new Error(`Skill name must contain only letters, numbers, dot, underscore, or dash: ${skill}`);
+      }
     }
   }
 
@@ -156,6 +164,7 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
     allowedTools: ["read_file"],
     forbiddenTools: ["write_file", "shell", "network"],
     capabilities: ["planning", "task decomposition", "risk spotting"],
+    skills: ["planning"],
     instructions: [
       "## Workflow",
       "1. Read the task input and any provided memory.",
@@ -177,6 +186,7 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
     allowedTools: ["read_file", "write_file", "run_tests"],
     forbiddenTools: ["git_reset", "delete_file"],
     capabilities: ["coding", "debugging", "architecture"],
+    skills: ["coding"],
     instructions: "Implement the assigned task carefully, keep edits scoped, and return important verification steps.",
   },
   {
@@ -188,6 +198,7 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
     allowedTools: ["read_file"],
     forbiddenTools: ["write_file", "shell"],
     capabilities: ["summarization", "context gathering", "comparison"],
+    skills: ["research"],
     instructions: "Gather relevant context, separate facts from assumptions, and return a concise research summary.",
   },
   {
@@ -199,6 +210,7 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
     allowedTools: ["read_file"],
     forbiddenTools: ["write_file", "shell", "network"],
     capabilities: ["validation", "result review", "quality gate"],
+    skills: ["review"],
     instructions: "Review the result against the user request and return pass/fail/needs_user_input guidance.",
   },
   {
@@ -210,6 +222,7 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
     allowedTools: ["read_file", "inspect_task"],
     forbiddenTools: ["write_file", "shell", "network"],
     capabilities: ["recovery", "verification", "task inspection"],
+    skills: ["recovery"],
     instructions: "Inspect task state and report whether the target task has a usable persisted result.",
   },
   {
@@ -221,6 +234,7 @@ const DEFAULT_ROLE_PRESETS: Array<Parameters<RoleManager["addRole"]>[0]> = [
     allowedTools: ["read_file", "inspect_task"],
     forbiddenTools: ["write_file", "shell", "network"],
     capabilities: ["experience extraction", "memory curation", "best-practice revision"],
+    skills: ["memory-curation"],
     instructions: "Promote only high-value reusable lessons, update existing topics when appropriate, and keep evidence IDs.",
   },
 ];

@@ -16,6 +16,8 @@ capabilities:
   - experience extraction
   - memory curation
   - best-practice revision
+skills:
+  - memory-curation
 output_contract: "Return at most three concise reusable experience updates with evidence IDs."
 ---
 

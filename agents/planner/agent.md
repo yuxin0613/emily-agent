@@ -15,6 +15,8 @@ capabilities:
   - planning
   - task decomposition
   - risk spotting
+skills:
+  - planning
 output_contract: "Return concise steps, blockers, and recommended subagent roles."
 ---
 

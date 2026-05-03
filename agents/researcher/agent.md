@@ -14,6 +14,8 @@ capabilities:
   - summarization
   - context gathering
   - comparison
+skills:
+  - research
 output_contract: "Return facts, assumptions, and decision-relevant context."
 ---
 

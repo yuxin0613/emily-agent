@@ -15,6 +15,8 @@ capabilities:
   - validation
   - result review
   - quality gate
+skills:
+  - review
 output_contract: "Return JSON verdict with verdict, reasons, retrySuggested, and confidence."
 ---
 

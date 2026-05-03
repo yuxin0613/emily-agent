@@ -9,8 +9,12 @@ import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { RoleManager } from "../roles/RoleManager.ts";
+import { SkillBuilder } from "../skills/SkillBuilder.ts";
+import { SkillCandidateStore } from "../skills/SkillCandidateStore.ts";
+import { SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
+import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import { renderTimeline } from "../timeline/renderTimeline.ts";
 
 export async function createRuntime(options: {
@@ -22,9 +26,11 @@ export async function createRuntime(options: {
   providerFallbackMode?: ProviderFallbackMode;
   mainProviderId?: string;
   workerPath?: string;
+  skillDir?: string;
 } = {}) {
   const dataDir = options.dataDir || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
+  const skillDir = options.skillDir || process.env.EMILY_SKILL_DIR || path.join(process.cwd(), "skills");
   await mkdir(dataDir, { recursive: true });
 
   const requestedMainProviderId = options.mainProviderId || options.defaultProviderId;
@@ -59,16 +65,25 @@ export async function createRuntime(options: {
   const memory = await MemorySystem.create({ dataDir });
   const taskStore = await TaskStore.create({ dataDir });
   const experienceStore = ExperienceStore.create({ dataDir });
+  const toolRegistry = createDefaultToolRegistry();
+  const skillRegistry = await SkillRegistry.create({ skillDir });
+  const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });
   const roleManager = new RoleManager({ roleDir, providerRegistry });
   const experienceBuilder = new ExperienceBuilder({
     taskStore,
     experienceStore,
+  });
+  const skillBuilder = new SkillBuilder({
+    taskStore,
+    skillCandidateStore,
+    skillRegistry,
   });
   const roleAgentManager = new RoleAgentManager({
     dataDir,
     taskStore,
     workerPath: options.workerPath || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "workers", "subagentWorker.ts"),
     roleDir,
+    skillDir,
   });
   await roleAgentManager.start();
 
@@ -115,21 +130,32 @@ export async function createRuntime(options: {
     return {
       ...taskStore.health(),
       activeExperiences: experienceStore.listActive().length,
+      proposedSkillCandidates: skillCandidateStore.countByStatus("proposed"),
     };
   }
 
   return {
     dataDir,
     memory,
+    toolRegistry,
+    skillRegistry,
+    skillCandidateStore,
     providerRegistry,
     providerUsageStore,
     roleManager,
     experienceStore,
     experienceBuilder,
+    skillBuilder,
     model,
     taskStore,
     roleAgentManager,
     mainAgent,
+    listTools() {
+      return toolRegistry.list();
+    },
+    listSkills() {
+      return skillRegistry.list();
+    },
     listProviders() {
       return providerRegistry.list();
     },
@@ -181,6 +207,21 @@ export async function createRuntime(options: {
     buildDailyExperiences(options = {}) {
       return experienceBuilder.buildDailyExperiences(options);
     },
+    buildSkillCandidates(options: Parameters<SkillBuilder["buildSkillCandidates"]>[0] = {}) {
+      return skillBuilder.buildSkillCandidates(options);
+    },
+    listSkillCandidates(options: Parameters<SkillCandidateStore["listCandidates"]>[0] = {}) {
+      return skillCandidateStore.listCandidates(options);
+    },
+    approveSkillCandidate(candidateId: string, options: { reason?: string } = {}) {
+      return skillCandidateStore.approveCandidate(candidateId, {
+        reason: options.reason,
+        registry: skillRegistry,
+      });
+    },
+    rejectSkillCandidate(candidateId: string, reason?: string) {
+      return skillCandidateStore.rejectCandidate(candidateId, reason);
+    },
     getTimeline(options: { runId: string }) {
       return taskStore.getTimeline(options);
     },
@@ -209,6 +250,10 @@ export async function createRuntime(options: {
       maxFileMemoryRecords?: number;
       maxVectorMemoryRecords?: number;
       pruneArchivedExperienceVectorDays?: number;
+      skillLookbackDays?: number;
+      skillMinOccurrences?: number;
+      skillMinScore?: number;
+      skillDailyLimit?: number;
     } = {}) {
       const reconcile = await roleAgentManager.reconcile();
       const taskGraphs = taskStore.refreshTaskGraphStatuses();
@@ -219,6 +264,13 @@ export async function createRuntime(options: {
       const memoryCandidates = await approvePendingMemoryCandidates();
       const experiences = experienceBuilder.buildDailyExperiences({
         day: options.day || new Date(),
+      });
+      const skillCandidates = skillBuilder.buildSkillCandidates({
+        day: options.day || new Date(),
+        lookbackDays: options.skillLookbackDays,
+        minOccurrences: options.skillMinOccurrences,
+        minScore: options.skillMinScore,
+        dailyLimit: options.skillDailyLimit,
       });
       const memoryCompaction = await memory.compact({
         maxFileRecords: options.maxFileMemoryRecords,
@@ -250,6 +302,7 @@ export async function createRuntime(options: {
         },
         memoryCandidates,
         experiences,
+        skillCandidates,
         memoryCompaction,
         experienceIndex,
         database,
@@ -260,6 +313,7 @@ export async function createRuntime(options: {
       await roleAgentManager.shutdown();
       providerUsageStore.close();
       experienceStore.close();
+      skillCandidateStore.close();
       taskStore.close();
     },
   };

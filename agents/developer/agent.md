@@ -16,6 +16,8 @@ capabilities:
   - coding
   - debugging
   - architecture
+skills:
+  - coding
 output_contract: "Return summary, implementation notes, risks, and verification steps."
 ---
 

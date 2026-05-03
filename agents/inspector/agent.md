@@ -16,6 +16,8 @@ capabilities:
   - recovery
   - verification
   - task inspection
+skills:
+  - recovery
 output_contract: "Return whether the target task has usable persisted result and what recovery action is needed."
 ---
 

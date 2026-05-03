@@ -27,6 +27,8 @@ flowchart LR
   Main <--> Experience["ExperienceStore: active best practices"]
   Experience --> Revisions["experience_revisions: archived versions"]
   Experience --> Compressed["experience_vectors: compressed active index"]
+  Main <--> SkillCandidates["SkillCandidateStore: proposed skills"]
+  SkillCandidates --> SkillFiles["skills/<skill>/skill.md"]
   Memory --> RAM["短期内存"]
   Memory --> File["文件记忆: .emily/memory/events.jsonl"]
   Memory --> Vector["长期语义索引: .emily/memory/vector-index.json"]
@@ -47,10 +49,10 @@ flowchart LR
    每个角色的任务队列存入 SQLite `role_queues` 表。主进程重启后可以继续 drain 队列，而不是依赖内存队列。
 
 5. **结构化 `agent.md`**
-   `agents/<role>/agent.md` 支持 frontmatter，定义 `role`、`provider`、`model`、`singleton`、`allowed_tools`、`forbidden_tools`、`max_concurrent_tasks` 和 `capabilities`。
+   `agents/<role>/agent.md` 支持 frontmatter，定义 `role`、`provider`、`model`、`singleton`、`allowed_tools`、`forbidden_tools`、`max_concurrent_tasks`、`capabilities` 和 `skills`。
 
 6. **硬权限 ToolGateway**
-   subagent 不直接假定自己能用工具，必须经过 `ToolGateway.assertAllowed()`。现在先接入权限校验骨架，后续真实文件、shell、浏览器工具都应从这里走。
+   subagent 不直接假定自己能用工具，必须经过 `ToolGateway.assertAllowed()`。`ToolRegistry` 负责工具定义、别名和副作用说明；task 的 tool hints 会被解析、过滤并写入审计事件。
 
 7. **事件订阅**
    Web adapter 提供 `GET /events` SSE。TUI/WebUI 可以订阅 `task.changed`、`task.finished`、`agent.heartbeat` 等运行事件。
@@ -86,7 +88,7 @@ flowchart LR
 - `diagnostics({ repair })`: 检查 queued task、running lease、terminal queue、task graph 和 run 状态不变量，可选择修复。
 - `renderTimeline(runId)`: 把结构化 timeline 渲染成人类可读 replay 文本。
 - `health()`: 返回 pending/running task、过期 lease、未 ack 终态 task、待处理记忆候选和 active experience 数量。
-- `maintenance()`: 执行 reconcile、刷新 task graph、收敛孤儿 run、处理遗留 memory candidates、生成每日经验，并返回维护后的健康状态。
+- `maintenance()`: 执行 reconcile、刷新 task graph、收敛孤儿 run、处理遗留 memory candidates、生成每日经验和 skill candidates，并返回维护后的健康状态。
 - 状态机更新使用 `WHERE id = ? AND status = ?` 做乐观并发防护，晚到的写入会失败。
 - 状态机错误分成 `IllegalTaskTransitionError` 和 `TaskTransitionConflictError`。
 - runtime event payload 统一通过 `RuntimeEventFactory` 生成，避免事件结构散落在各处。
@@ -96,6 +98,10 @@ flowchart LR
 - 普通记忆的长期向量索引用文件锁和临时文件原子替换保存；多进程 subagent 同时写入时会先 reload / merge 再落盘。
 - `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
 - `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
+- `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
+- `SkillRegistry`: 内置并可从 `skills/<skill>/skill.md` 加载技能 prompt，task 的 `skillHints` 和 role 的 `skills` 会合并后注入 subagent prompt。
+- `SkillCandidateStore` / `SkillBuilder`: 从重复成功 workflow 中生成 `proposed` skill candidate；默认不会自动启用，审批后才写入 skill 文件，已有相似 skill 优先走 update。
+- `tool.hints.resolved` / `skill.hints.resolved`: 每个 worker 会记录工具/技能解析结果；未知或被拒绝的 hints 会额外记录 `runtime.anomaly`。
 
 ## 第二轮核心优化
 
@@ -230,8 +236,68 @@ allowed_tools:
   - write_file
 capabilities:
   - coding
+skills:
+  - coding
 output_contract: "Return summary, implementation notes, risks, and verification steps."
 ---
+```
+
+## Tools / Skills
+
+Tools 和 skills 是两层不同的能力描述：
+
+- `ToolRegistry`: 声明工具名、别名、类别、副作用、是否需要 approval 和使用说明。当前是权限与提示词层，不让模型绕过 `ToolGateway`。
+- `ToolGateway`: 按 role 的 `allowed_tools` / `forbidden_tools` 做硬过滤；task 的 `toolHints` 和 skill 自带 `tool_hints` 只会影响提示词，不会自动授予权限。
+- `SkillRegistry`: 内置常用技能，也会加载 `skills/<name>/skill.md`。skill 是可复用工作流 prompt，可以声明 `capabilities`、`aliases` 和需要的 `tool_hints`。
+- worker 执行前会合并 `agent.md` 的 `skills` 与 task metadata 的 `skillHints`，解析后注入 `Skill context`；工具解析结果注入 `Tool context`。
+- 每次解析都会写入 `tool.hints.resolved` 和 `skill.hints.resolved` 事件；被拒绝或未知的 hint 会写入 `runtime.anomaly`。
+- `SkillBuilder`: 在 maintenance 或手动触发时扫描近 1-2 天 terminal task，按 workflow key 聚类，只把高频、成功率高、流程相似、有验证步骤的操作提议为 skill。
+- `SkillCandidateStore`: skill 先进入 `proposed`，审批后才写入 `skills/<name>/skill.md`；如果已有 file skill 相似度高，候选会标记为 `update` 并合并到旧 skill。
+
+skill candidate 评分会鼓励：
+
+- 重复次数足够。
+- 成功率高。
+- workflow 相似。
+- 有明确验证步骤。
+- 能减少重复操作成本。
+
+同时会惩罚：
+
+- 临时或一次性任务。
+- 与已有 skill 高度重叠却没有更新价值。
+- 过度项目私有的细节。
+
+skill 文件格式：
+
+```yaml
+---
+name: "coding"
+title: "Coding"
+description: "Implement scoped code changes with verification notes."
+capabilities:
+  - coding
+  - implementation
+tool_hints:
+  - read_file
+  - write_file
+  - run_tests
+aliases:
+  - developer
+---
+
+Inspect existing patterns, keep edits scoped, and return verification notes.
+```
+
+runtime API：
+
+```ts
+runtime.listTools()
+runtime.listSkills()
+runtime.buildSkillCandidates({ minOccurrences: 3 })
+runtime.listSkillCandidates({ status: "proposed" })
+await runtime.approveSkillCandidate("candidate-id")
+runtime.rejectSkillCandidate("candidate-id", "too narrow")
 ```
 
 provider / role 护栏：
@@ -255,6 +321,12 @@ runtime API：
 
 ```ts
 runtime.listProviders()
+runtime.listTools()
+runtime.listSkills()
+runtime.buildSkillCandidates({ minOccurrences: 3 })
+runtime.listSkillCandidates({ status: "proposed" })
+await runtime.approveSkillCandidate("candidate-id", { reason: "repeated workflow" })
+runtime.rejectSkillCandidate("candidate-id", "too narrow")
 await runtime.checkProviders()
 runtime.providerUsage()
 await runtime.addProvider({ id: "reviewer-fast", type: "echo", model: "echo-review" })
@@ -268,6 +340,7 @@ await runtime.addRole({
   model: "echo-review",
   allowedTools: ["read_file"],
   capabilities: ["quality", "verification"],
+  skills: ["review"],
   instructions: "Review the assigned task and return a concise QA result."
 })
 await runtime.updateRoleProvider("qa", { provider: "reviewer-fast", model: "echo-review-v2" })
@@ -278,6 +351,18 @@ Web API：
 
 ```bash
 curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/tools'
+curl 'http://127.0.0.1:3000/skills'
+curl 'http://127.0.0.1:3000/skill-candidates?status=proposed'
+curl -X POST http://127.0.0.1:3000/skill-candidates/build \
+  -H 'content-type: application/json' \
+  -d '{"lookbackDays":2,"minOccurrences":3,"minScore":0.68}'
+curl -X POST http://127.0.0.1:3000/skill-candidates/approve \
+  -H 'content-type: application/json' \
+  -d '{"candidateId":"...","reason":"重复成功 workflow"}'
+curl -X POST http://127.0.0.1:3000/skill-candidates/reject \
+  -H 'content-type: application/json' \
+  -d '{"candidateId":"...","reason":"太窄，保留为 memory/experience"}'
 curl 'http://127.0.0.1:3000/providers'
 curl 'http://127.0.0.1:3000/providers/health?deep=false'
 curl 'http://127.0.0.1:3000/providers/usage'
@@ -356,7 +441,9 @@ runtime.buildDailyExperiences({ day: new Date() })
 await runtime.maintenance({
   maxFileMemoryRecords: 1000,
   maxVectorMemoryRecords: 500,
-  pruneArchivedExperienceVectorDays: 90
+  pruneArchivedExperienceVectorDays: 90,
+  skillLookbackDays: 2,
+  skillMinOccurrences: 3
 })
 ```
 
@@ -427,7 +514,11 @@ curl http://127.0.0.1:3000/events
 - `src/llm/EchoModelProvider.ts`: 本地假模型 provider，用于离线跑通架构。
 - `src/llm/OpenAIModelProvider.ts`: OpenAI-compatible provider。
 - `src/llm/OllamaModelProvider.ts`: Ollama provider。
-- `src/tools/ToolGateway.ts`: 工具权限校验入口。
+- `src/tools/ToolRegistry.ts`: 工具声明注册表，包含别名、副作用、approval 和提示词说明。
+- `src/tools/ToolGateway.ts`: 工具权限校验入口，解析 tool hints 并过滤 role 不允许的工具。
+- `src/skills/SkillRegistry.ts`: 技能注册表，加载内置技能和 `skills/<skill>/skill.md`。
+- `src/skills/SkillCandidateStore.ts`: skill candidate SQLite 存储、审批、拒绝和 skill 文件写入。
+- `src/skills/SkillBuilder.ts`: 从重复 task workflow 生成 proposed skill candidate，优先更新已有 skill。
 - `src/experience/ExperienceStore.ts`: active experience、版本归档和压缩索引。
 - `src/experience/ExperienceBuilder.ts`: 每日经验提炼，最多保留 3 条高价值更新。
 - `src/experience/ExperienceMatcher.ts`: 稳定 topicKey、相似经验匹配和合并判断。
@@ -439,6 +530,7 @@ curl http://127.0.0.1:3000/events
 - `src/adapters/tui.ts`: 命令行交互入口。
 - `src/adapters/web.ts`: Web/API 入口，提供 `GET /health`、`GET /events`、`POST /chat`。
 - `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
+- `skills/<skill>/skill.md`: 技能定义，描述可复用工作流、aliases、capabilities 和 tool hints。
 
 ## 任务与通知
 
@@ -468,6 +560,8 @@ npm run check
 - Task 状态机、非法跳转、retry 和 dead-letter。
 - task/run 取消、worker 超时、结构化 TaskResult。
 - 多 provider registry、配置校验、fallback、health check、role-specific provider/model、动态新增 role。
+- tools/skills registry、role skill frontmatter、tool hint 权限过滤、worker 注入和审计事件。
+- skill candidate 生成、评分、审批写入、已有 skill 更新、拒绝和 schema migration。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。

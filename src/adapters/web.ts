@@ -25,6 +25,12 @@ export async function startWebServer({
     enableProvider: (providerId: string) => Promise<unknown>;
     disableProvider: (providerId: string) => Promise<unknown>;
     removeProvider: (providerId: string) => Promise<unknown>;
+    listTools: () => unknown[];
+    listSkills: () => unknown[];
+    listSkillCandidates: (options?: { status?: "proposed" | "approved" | "merged" | "rejected"; limit?: number }) => unknown[];
+    buildSkillCandidates: (options?: { day?: Date; lookbackDays?: number; minOccurrences?: number; minScore?: number; dailyLimit?: number }) => unknown;
+    approveSkillCandidate: (candidateId: string, options?: { reason?: string }) => Promise<unknown>;
+    rejectSkillCandidate: (candidateId: string, reason?: string) => unknown;
     listRoles: () => Promise<unknown[]>;
     addRole: (input: {
       name: string;
@@ -35,6 +41,7 @@ export async function startWebServer({
       allowedTools?: string[];
       forbiddenTools?: string[];
       capabilities?: string[];
+      skills?: string[];
       outputContract?: string;
       instructions: string;
     }) => Promise<unknown>;
@@ -51,6 +58,10 @@ export async function startWebServer({
       maxFileMemoryRecords?: number;
       maxVectorMemoryRecords?: number;
       pruneArchivedExperienceVectorDays?: number;
+      skillLookbackDays?: number;
+      skillMinOccurrences?: number;
+      skillMinScore?: number;
+      skillDailyLimit?: number;
     }) => Promise<unknown>;
     roleAgentManager: NodeJS.EventEmitter;
   };
@@ -117,6 +128,44 @@ export async function startWebServer({
         return sendJson(response, 200, await runtime.removeProvider(String(url.searchParams.get("id") || url.searchParams.get("providerId") || "")));
       }
 
+      if (request.method === "GET" && url.pathname === "/tools") {
+        return sendJson(response, 200, runtime.listTools());
+      }
+
+      if (request.method === "GET" && url.pathname === "/skills") {
+        return sendJson(response, 200, runtime.listSkills());
+      }
+
+      if (request.method === "GET" && url.pathname === "/skill-candidates") {
+        return sendJson(response, 200, runtime.listSkillCandidates({
+          status: parseSkillCandidateStatus(url.searchParams.get("status")),
+          limit: Number(url.searchParams.get("limit") || 50),
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/skill-candidates/build") {
+        const body = await readJson(request);
+        return sendJson(response, 200, runtime.buildSkillCandidates({
+          day: typeof body.day === "string" ? new Date(body.day) : new Date(),
+          lookbackDays: typeof body.lookbackDays === "number" ? body.lookbackDays : undefined,
+          minOccurrences: typeof body.minOccurrences === "number" ? body.minOccurrences : undefined,
+          minScore: typeof body.minScore === "number" ? body.minScore : undefined,
+          dailyLimit: typeof body.dailyLimit === "number" ? body.dailyLimit : undefined,
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/skill-candidates/approve") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.approveSkillCandidate(String(body.candidateId || body.id || ""), {
+          reason: typeof body.reason === "string" ? body.reason : undefined,
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/skill-candidates/reject") {
+        const body = await readJson(request);
+        return sendJson(response, 200, runtime.rejectSkillCandidate(String(body.candidateId || body.id || ""), String(body.reason || "rejected")));
+      }
+
       if (request.method === "GET" && url.pathname === "/roles") {
         return sendJson(response, 200, await runtime.listRoles());
       }
@@ -132,6 +181,7 @@ export async function startWebServer({
           allowedTools: Array.isArray(body.allowedTools) ? body.allowedTools.map(String) : undefined,
           forbiddenTools: Array.isArray(body.forbiddenTools) ? body.forbiddenTools.map(String) : undefined,
           capabilities: Array.isArray(body.capabilities) ? body.capabilities.map(String) : undefined,
+          skills: Array.isArray(body.skills) ? body.skills.map(String) : undefined,
           outputContract: typeof body.outputContract === "string" ? body.outputContract : undefined,
           instructions: String(body.instructions || "Follow the task requirements and return a concise result."),
         }));
@@ -201,6 +251,10 @@ export async function startWebServer({
           maxFileMemoryRecords: typeof body.maxFileMemoryRecords === "number" ? body.maxFileMemoryRecords : undefined,
           maxVectorMemoryRecords: typeof body.maxVectorMemoryRecords === "number" ? body.maxVectorMemoryRecords : undefined,
           pruneArchivedExperienceVectorDays: typeof body.pruneArchivedExperienceVectorDays === "number" ? body.pruneArchivedExperienceVectorDays : undefined,
+          skillLookbackDays: typeof body.skillLookbackDays === "number" ? body.skillLookbackDays : undefined,
+          skillMinOccurrences: typeof body.skillMinOccurrences === "number" ? body.skillMinOccurrences : undefined,
+          skillMinScore: typeof body.skillMinScore === "number" ? body.skillMinScore : undefined,
+          skillDailyLimit: typeof body.skillDailyLimit === "number" ? body.skillDailyLimit : undefined,
         });
         return sendJson(response, 200, result);
       }
@@ -236,7 +290,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /health", "GET /events", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /roles", "POST /roles", "POST /roles/defaults", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /health", "GET /events", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {
@@ -260,6 +314,12 @@ function parseFeedbackRating(value: unknown): "useful" | "wrong" | "outdated" | 
 function parseProviderType(value: unknown): "echo" | "openai" | "ollama" {
   if (value === "echo" || value === "openai" || value === "ollama") return value;
   throw new Error("Invalid provider type");
+}
+
+function parseSkillCandidateStatus(value: string | null): "proposed" | "approved" | "merged" | "rejected" | undefined {
+  if (!value) return undefined;
+  if (value === "proposed" || value === "approved" || value === "merged" || value === "rejected") return value;
+  throw new Error("Invalid skill candidate status");
 }
 
 function parseDateParam(value: string | null): Date | undefined {

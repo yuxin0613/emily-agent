@@ -4,11 +4,13 @@ import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
+import { SkillRegistry } from "../skills/SkillRegistry.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "../tasks/errors.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
 import { ToolGateway } from "../tools/ToolGateway.ts";
-import type { Task, TaskResult } from "../types.ts";
+import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
+import type { SkillHintResolution, Task, TaskResult, ToolHintResolution } from "../types.ts";
 
 interface StartMessage {
   type: "task.start";
@@ -144,7 +146,24 @@ async function runRoleTask({
       },
     });
   }
-  const toolGateway = new ToolGateway(definition);
+  const toolGateway = new ToolGateway(definition, { registry: createDefaultToolRegistry() });
+  const skillRegistry = await SkillRegistry.create({ skillDir: process.env.EMILY_SKILL_DIR });
+  const skillHints = unique([
+    ...definition.skills,
+    ...readStringArray(task.metadata.skillHints),
+  ]);
+  const skillResolution = skillRegistry.resolveHints(skillHints);
+  const toolHints = unique([
+    ...readStringArray(task.metadata.toolHints),
+    ...skillResolution.matched.flatMap((skill) => skill.toolHints),
+  ]);
+  const toolResolution = toolGateway.resolveHints(toolHints);
+  recordToolSkillResolution({
+    taskStore,
+    task,
+    toolResolution,
+    skillResolution,
+  });
   toolGateway.assertAllowed("read_file");
   if (typeof task.metadata.forceDelayMs === "number") {
     await sleep(task.metadata.forceDelayMs);
@@ -170,7 +189,11 @@ async function runRoleTask({
       "Output contract:",
       definition.outputContract || "Return a concise result that the main agent can summarize.",
       "",
-      `Allowed tools: ${toolGateway.listAllowed().join(", ") || "(none)"}`,
+      "Tool context:",
+      ...toolGateway.renderToolContext(toolResolution),
+      "",
+      "Skill context:",
+      ...skillRegistry.renderSkillContext(skillResolution),
       "",
       "Task:",
       task.input,
@@ -213,6 +236,17 @@ async function runRoleTask({
         usageRecordId: response.provider.usageRecordId,
         jsonFormat: response.provider.jsonFormat,
         jsonWarnings: response.provider.jsonWarnings,
+        tools: {
+          requested: toolResolution.requested,
+          allowed: toolResolution.allowed.map((tool) => tool.name),
+          denied: toolResolution.denied,
+          unknown: toolResolution.unknown,
+        },
+        skills: {
+          requested: skillResolution.requested,
+          matched: skillResolution.matched.map((skill) => skill.name),
+          unknown: skillResolution.unknown,
+        },
       },
     }],
     memoryCandidates: [{
@@ -352,6 +386,76 @@ function readNumber(value: unknown, fallback: number): number {
 
 function readNonNegativeNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
+  return [];
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function recordToolSkillResolution({
+  taskStore,
+  task,
+  toolResolution,
+  skillResolution,
+}: {
+  taskStore: TaskStore;
+  task: Task;
+  toolResolution: ToolHintResolution;
+  skillResolution: SkillHintResolution;
+}): void {
+  taskStore.addEvent({
+    type: "tool.hints.resolved",
+    taskId: task.id,
+    payload: {
+      requested: toolResolution.requested,
+      allowed: toolResolution.allowed.map((tool) => tool.name),
+      denied: toolResolution.denied,
+      unknown: toolResolution.unknown,
+    },
+  });
+  taskStore.addEvent({
+    type: "skill.hints.resolved",
+    taskId: task.id,
+    payload: {
+      requested: skillResolution.requested,
+      matched: skillResolution.matched.map((skill) => skill.name),
+      unknown: skillResolution.unknown,
+    },
+  });
+
+  if (toolResolution.denied.length || toolResolution.unknown.length) {
+    taskStore.addEvent({
+      type: "runtime.anomaly",
+      taskId: task.id,
+      payload: {
+        severity: "warning",
+        code: "tool_hints_rejected",
+        message: "Some requested tool hints are unavailable for this role.",
+        denied: toolResolution.denied,
+        unknown: toolResolution.unknown,
+        repaired: true,
+      },
+    });
+  }
+  if (skillResolution.unknown.length) {
+    taskStore.addEvent({
+      type: "runtime.anomaly",
+      taskId: task.id,
+      payload: {
+        severity: "warning",
+        code: "skill_hints_unknown",
+        message: "Some requested skill hints are not registered.",
+        unknown: skillResolution.unknown,
+        repaired: true,
+      },
+    });
+  }
 }
 
 function limitTaskResult(result: TaskResult, maxChars: number): TaskResult {

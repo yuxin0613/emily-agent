@@ -22,6 +22,96 @@ export type ToolPermission =
   | "git_reset"
   | "delete_file";
 
+export interface ToolDefinition {
+  name: ToolPermission;
+  description: string;
+  permission: ToolPermission;
+  category: "filesystem" | "process" | "network" | "task" | "vcs";
+  sideEffects: "none" | "read" | "write" | "execute" | "network" | "destructive";
+  requiresApproval: boolean;
+  aliases: string[];
+  instructions: string;
+}
+
+export interface ToolHintResolution {
+  requested: string[];
+  allowed: ToolDefinition[];
+  denied: string[];
+  unknown: string[];
+}
+
+export interface SkillDefinition {
+  name: string;
+  title: string;
+  description: string;
+  capabilities: string[];
+  toolHints: ToolPermission[];
+  aliases: string[];
+  instructions: string;
+  source: "builtin" | "file";
+}
+
+export type SkillCandidateStatus = "proposed" | "approved" | "merged" | "rejected";
+export type SkillProposalType = "create" | "update";
+
+export interface SkillCandidate {
+  id: string;
+  status: SkillCandidateStatus;
+  proposalType: SkillProposalType;
+  workflowKey: string;
+  name: string;
+  title: string;
+  description: string;
+  trigger: string[];
+  antiTrigger: string[];
+  toolHints: ToolPermission[];
+  body: string;
+  targetSkillName: string | null;
+  evidenceTaskIds: string[];
+  evidenceEventIds: number[];
+  frequency: number;
+  successRate: number;
+  workflowSimilarity: number;
+  verificationQuality: number;
+  volatility: number;
+  overlapWithExisting: number;
+  projectSpecificity: number;
+  score: number;
+  createdAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decisionReason: string | null;
+}
+
+export interface SkillCandidateProposal {
+  proposalType: SkillProposalType;
+  workflowKey: string;
+  name: string;
+  title: string;
+  description: string;
+  trigger: string[];
+  antiTrigger: string[];
+  toolHints: ToolPermission[];
+  body: string;
+  targetSkillName?: string | null;
+  evidenceTaskIds: string[];
+  evidenceEventIds?: number[];
+  frequency: number;
+  successRate: number;
+  workflowSimilarity: number;
+  verificationQuality: number;
+  volatility: number;
+  overlapWithExisting: number;
+  projectSpecificity: number;
+  score: number;
+}
+
+export interface SkillHintResolution {
+  requested: string[];
+  matched: SkillDefinition[];
+  unknown: string[];
+}
+
 export type JsonValue =
   | string
   | number
@@ -152,6 +242,8 @@ export type RuntimeEventType =
   | "task_graph.expansion_planned"
   | "task_graph.expanded"
   | "task_graph.waiting_user"
+  | "tool.hints.resolved"
+  | "skill.hints.resolved"
   | "memory.candidate.created"
   | "memory.candidate.approved"
   | "memory.candidate.rejected"
@@ -176,6 +268,7 @@ export interface RoleDefinition {
   forbiddenTools: ToolPermission[];
   maxConcurrentTasks: number;
   capabilities: string[];
+  skills: string[];
   outputContract?: string;
   instructions: string;
 }

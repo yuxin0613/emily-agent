@@ -16,6 +16,7 @@ export async function readRoleDefinition(role: string, { roleDir = defaultRoleDi
     forbiddenTools: [],
     maxConcurrentTasks: 1,
     capabilities: [role],
+    skills: [],
     outputContract: undefined,
     instructions: "Follow the task requirements and return a concise result.",
   };
@@ -48,6 +49,7 @@ export function parseAgentMarkdown(content: string, fallback: RoleDefinition): R
     capabilities: listValue(frontmatter.capabilities, legacyCapabilities
       ? legacyCapabilities.split(",").map((item) => item.trim()).filter(Boolean)
       : fallback.capabilities),
+    skills: listValue(frontmatter.skills, fallback.skills),
     outputContract: stringValue(frontmatter.output_contract) || fallback.outputContract,
     instructions: body.trim() || fallback.instructions,
   };
@@ -81,6 +83,7 @@ export async function writeRoleDefinition(
     forbiddenTools: definition.forbiddenTools || [],
     maxConcurrentTasks: definition.maxConcurrentTasks || 1,
     capabilities: definition.capabilities || [name],
+    skills: definition.skills || [],
     outputContract: definition.outputContract,
     instructions: definition.instructions,
   };
@@ -189,6 +192,8 @@ function renderAgentMarkdown(definition: RoleDefinition): string {
     `max_concurrent_tasks: ${definition.maxConcurrentTasks}`,
     "capabilities:",
     ...definition.capabilities.map((capability) => `  - ${capability}`),
+    "skills:",
+    ...definition.skills.map((skill) => `  - ${skill}`),
     definition.outputContract ? `output_contract: "${definition.outputContract}"` : null,
     "---",
   ].filter((line): line is string => Boolean(line));
