@@ -8,6 +8,7 @@ export class OllamaModelProvider implements ModelProvider {
   baseUrl: string;
   temperature: number | undefined;
   timeoutMs: number;
+  strictJson: boolean;
 
   constructor(config: ProviderConfig) {
     this.id = config.id;
@@ -15,6 +16,7 @@ export class OllamaModelProvider implements ModelProvider {
     this.baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
     this.temperature = config.config?.temperature;
     this.timeoutMs = config.config?.timeoutMs || 60000;
+    this.strictJson = config.config?.strictJson !== false;
   }
 
   async complete({ agent, role, prompt }: ModelCompleteInput): Promise<ModelCompleteResult> {
@@ -29,6 +31,7 @@ export class OllamaModelProvider implements ModelProvider {
         body: JSON.stringify({
           model: this.model,
           stream: false,
+          ...(this.strictJson ? { format: "json" } : {}),
           options: {
             temperature: this.temperature,
           },

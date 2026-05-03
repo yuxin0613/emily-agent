@@ -1,5 +1,7 @@
 import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderConfig, ProviderErrorCode } from "./ModelProvider.ts";
 import { ProviderCallError } from "./ModelProvider.ts";
+import { jsonInstruction, normalizeProviderJsonOutput } from "./ProviderJson.ts";
+import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 
 interface CircuitState {
   failures: number;
@@ -13,15 +15,24 @@ export class ResilientModelProvider implements ModelProvider {
   model: string;
   private inner: ModelProvider;
   private config: ProviderConfig;
+  private usageStore?: ProviderUsageStore;
 
-  constructor(inner: ModelProvider, config: ProviderConfig) {
+  constructor(inner: ModelProvider, config: ProviderConfig, { usageStore }: { usageStore?: ProviderUsageStore } = {}) {
     this.inner = inner;
     this.config = config;
+    this.usageStore = usageStore;
     this.id = inner.id;
     this.model = inner.model;
   }
 
   async complete(input: ModelCompleteInput): Promise<ModelCompleteResult> {
+    const strictJson = this.config.config?.strictJson !== false;
+    const callInput = strictJson ? {
+      ...input,
+      prompt: `${input.prompt}${jsonInstruction()}`,
+    } : input;
+    const startedAt = Date.now();
+
     if (this.config.enabled === false) {
       throw new ProviderCallError({
         providerId: this.id,
@@ -30,20 +41,29 @@ export class ResilientModelProvider implements ModelProvider {
       });
     }
 
+    try {
+      this.usageStore?.assertWithinLimits(this.config, callInput);
+    } catch (error) {
+      const quotaError = normalizeProviderError(error, this.id);
+      this.usageStore?.recordFailure(this.config, callInput, quotaError, Date.now() - startedAt, 0);
+      throw quotaError;
+    }
+
     const state = getCircuitState(this.id);
     const now = Date.now();
     if (state.openedUntil > now) {
-      throw new ProviderCallError({
+      const error = new ProviderCallError({
         providerId: this.id,
         code: "circuit_open",
         message: `Provider ${this.id} circuit is open until ${new Date(state.openedUntil).toISOString()}.`,
       });
+      this.usageStore?.recordFailure(this.config, callInput, error, Date.now() - startedAt, 0);
+      throw error;
     }
     if (state.openedUntil && state.openedUntil <= now) {
       state.openedUntil = 0;
     }
 
-    const startedAt = Date.now();
     const maxRetries = boundedNumber(this.config.config?.maxRetries, 1, 0, 5);
     const retryBaseMs = boundedNumber(this.config.config?.retryBaseMs, 200, 1, 60000);
     const retryMaxMs = boundedNumber(this.config.config?.retryMaxMs, 5000, retryBaseMs, 120000);
@@ -51,7 +71,7 @@ export class ResilientModelProvider implements ModelProvider {
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       try {
-        const result = normalizeModelCompleteResult(await this.inner.complete(input), this.inner);
+        const result = normalizeModelCompleteResult(await this.inner.complete(callInput), this.inner);
         if (!result.content.trim()) {
           throw new ProviderCallError({
             providerId: this.id,
@@ -60,17 +80,29 @@ export class ResilientModelProvider implements ModelProvider {
           });
         }
         recordProviderSuccess(this.id);
-        return {
+        const finalResult = withJsonOutput({
           ...result,
           latencyMs: result.latencyMs ?? Date.now() - startedAt,
           attempts: attempt + 1,
           providerId: this.id,
           model: this.model,
+        }, strictJson);
+        const usageRecord = this.usageStore?.recordSuccess(this.config, callInput, finalResult);
+        return {
+          ...finalResult,
+          usage: finalResult.usage || (usageRecord ? {
+            inputTokens: usageRecord.inputTokens,
+            outputTokens: usageRecord.outputTokens,
+            totalTokens: usageRecord.totalTokens,
+          } : undefined),
+          usageRecordId: usageRecord?.id,
+          costUsd: usageRecord?.costUsd,
         };
       } catch (error) {
         lastError = normalizeProviderError(error, this.id);
         if (!lastError.retryable || attempt >= maxRetries) {
           recordProviderFailure(this.id, this.config);
+          this.usageStore?.recordFailure(this.config, callInput, lastError, Date.now() - startedAt, attempt + 1);
           throw lastError;
         }
         await sleep(backoffMs(attempt, retryBaseMs, retryMaxMs));
@@ -97,6 +129,20 @@ export function normalizeModelCompleteResult(result: string | ModelCompleteResul
     ...result,
     providerId: result.providerId || provider.id,
     model: result.model || provider.model,
+  };
+}
+
+function withJsonOutput(result: ModelCompleteResult, strictJson: boolean): ModelCompleteResult {
+  if (!strictJson) return result;
+  const rawContent = result.rawContent || result.content;
+  const normalized = normalizeProviderJsonOutput(rawContent);
+  return {
+    ...result,
+    rawContent,
+    content: normalized.content,
+    json: normalized.json,
+    jsonFormat: normalized.format,
+    jsonWarnings: normalized.warnings,
   };
 }
 

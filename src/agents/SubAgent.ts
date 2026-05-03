@@ -9,7 +9,7 @@ export class SubAgent {
     this.memory = memory;
   }
 
-  async run({ input, sessionId, relevantMemory }) {
+  async run({ input, sessionId, relevantMemory, taskId, runId, source }) {
     const prompt = [
       "# System",
       `You are ${this.name}.`,
@@ -32,6 +32,9 @@ export class SubAgent {
       agent: this.name,
       role: this.role,
       prompt,
+      taskId,
+      runId,
+      source,
     }), this.model);
     const content = result.content;
     const latencyMs = Date.now() - startedAt;
@@ -43,6 +46,10 @@ export class SubAgent {
       finishReason: result.finishReason,
       rawProvider: result.rawProvider,
       usage: result.usage,
+      costUsd: result.costUsd,
+      usageRecordId: result.usageRecordId,
+      jsonFormat: result.jsonFormat,
+      jsonWarnings: result.jsonWarnings,
     };
 
     await this.memory.remember({
@@ -59,6 +66,10 @@ export class SubAgent {
         finishReason: provider.finishReason,
         rawProvider: provider.rawProvider,
         usage: provider.usage,
+        costUsd: provider.costUsd,
+        usageRecordId: provider.usageRecordId,
+        jsonFormat: provider.jsonFormat,
+        jsonWarnings: provider.jsonWarnings,
       },
     });
 

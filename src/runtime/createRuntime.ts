@@ -5,6 +5,7 @@ import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
+import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { RoleManager } from "../roles/RoleManager.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
@@ -28,11 +29,13 @@ export async function createRuntime(options: {
   if (options.model && !requestedMainProviderId) {
     throw new Error("Injected main model requires mainProviderId/defaultProviderId so subagent fallback is explicit.");
   }
+  const providerUsageStore = await ProviderUsageStore.create({ dataDir });
   const providerRegistry = await ProviderRegistry.create({
     dataDir,
     providers: options.providers,
     defaultProviderId: requestedMainProviderId || "echo",
     fallbackMode: options.providerFallbackMode || "strict",
+    usageStore: providerUsageStore,
   });
   const mainProviderId = requestedMainProviderId || providerRegistry.defaultProviderId;
   if (options.model && options.model.id !== mainProviderId) {
@@ -117,6 +120,7 @@ export async function createRuntime(options: {
     dataDir,
     memory,
     providerRegistry,
+    providerUsageStore,
     roleManager,
     experienceStore,
     experienceBuilder,
@@ -129,6 +133,9 @@ export async function createRuntime(options: {
     },
     checkProviders(options: { deep?: boolean } = {}) {
       return providerRegistry.health(options);
+    },
+    providerUsage(options: { since?: Date; until?: Date; providerId?: string; limit?: number } = {}) {
+      return providerUsageStore.summary(options);
     },
     async addProvider(config: ProviderConfig) {
       providerRegistry.add(config);
@@ -231,6 +238,7 @@ export async function createRuntime(options: {
     },
     async shutdown() {
       await roleAgentManager.shutdown();
+      providerUsageStore.close();
       experienceStore.close();
       taskStore.close();
     },

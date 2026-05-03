@@ -111,6 +111,8 @@ export class MainAgent {
 
       const content = await this.synthesizeResponse({
         input: normalizedInput,
+        runId: run.id,
+        sessionId,
         relevantMemory,
         relevantExperiences,
         subResults,
@@ -318,11 +320,15 @@ export class MainAgent {
 
   async synthesizeResponse({
     input,
+    runId,
+    sessionId,
     relevantMemory,
     relevantExperiences,
     subResults,
   }: {
     input: string;
+    runId?: string;
+    sessionId?: string;
     relevantMemory: MemoryRecallResult;
     relevantExperiences: ExperienceRecallResult[];
     subResults: Array<{ agent: string; content: string }>;
@@ -342,6 +348,8 @@ export class MainAgent {
       agent: this.name,
       role: "Communicate with the user and coordinate sub-agents.",
       prompt,
+      runId,
+      source: sessionId ? `session:${sessionId}` : "main-agent",
     }), this.model);
     return result.content;
   }

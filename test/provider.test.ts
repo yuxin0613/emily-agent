@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { EchoModelProvider } from "../src/llm/EchoModelProvider.ts";
 import { ProviderCallError, type ModelCompleteInput, type ModelCompleteResult, type ModelProvider } from "../src/llm/ModelProvider.ts";
+import { normalizeProviderJsonOutput } from "../src/llm/ProviderJson.ts";
 import { normalizeModelCompleteResult, resetProviderCircuit, ResilientModelProvider } from "../src/llm/ProviderRuntime.ts";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
@@ -75,6 +76,10 @@ const runtime = await createRuntime({
       id: "qa-echo",
       type: "echo",
       model: "qa-base-model",
+      config: {
+        costPer1KInputTokens: 0.001,
+        costPer1KOutputTokens: 0.002,
+      },
     },
   ],
   defaultProviderId: "main-echo",
@@ -207,6 +212,45 @@ assert.match(result.summary, /Model: qa-partial-model/);
 assert.equal(result.artifacts[0]?.metadata?.providerId, "qa-echo");
 assert.equal(typeof result.artifacts[0]?.metadata?.latencyMs, "number");
 assert.equal(typeof result.artifacts[0]?.metadata?.attempts, "number");
+assert.equal(result.artifacts[0]?.metadata?.jsonFormat, "wrapped_text");
+assert.equal(typeof result.artifacts[0]?.metadata?.costUsd, "number");
+
+const usage = runtime.providerUsage({ providerId: "qa-echo" });
+assert.ok(usage.totals.calls >= 1);
+assert.ok(usage.totals.totalTokens > 0);
+assert.ok(usage.totals.costUsd > 0);
+assert.ok(usage.recent.some((item) => item.providerId === "qa-echo" && item.status === "success"));
+
+await runtime.addProvider({
+  id: "limited-echo",
+  type: "echo",
+  model: "limit-model",
+  config: {
+    maxCallsPerDay: 1,
+    strictJson: false,
+  },
+});
+const limitedModel = runtime.providerRegistry.createProvider("limited-echo");
+await limitedModel.complete({
+  agent: "qa",
+  role: "quota",
+  prompt: "first call is allowed",
+});
+await assert.rejects(() => limitedModel.complete({
+  agent: "qa",
+  role: "quota",
+  prompt: "second call is blocked",
+}), (error: unknown) => error instanceof ProviderCallError && error.code === "quota_exceeded");
+const limitedUsage = runtime.providerUsage({ providerId: "limited-echo" });
+assert.equal(limitedUsage.totals.success, 1);
+assert.equal(limitedUsage.totals.blocked, 1);
+
+const directJson = normalizeProviderJsonOutput("prefix ```json\n{\"summary\":\"json ok\",\"metadata\":{\"source\":\"test\"}}\n``` suffix");
+assert.equal(directJson.content, "json ok");
+assert.equal(directJson.format, "json_extracted");
+const fallbackJson = normalizeProviderJsonOutput("plain text only");
+assert.equal(fallbackJson.content, "plain text only");
+assert.equal(fallbackJson.format, "wrapped_text");
 
 const flakyProvider = new FlakyProvider("flaky-provider");
 const retryModel = new ResilientModelProvider(flakyProvider, {

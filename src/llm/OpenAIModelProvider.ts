@@ -9,6 +9,7 @@ export class OpenAIModelProvider implements ModelProvider {
   apiKeyEnv: string;
   temperature: number | undefined;
   timeoutMs: number;
+  strictJson: boolean;
 
   constructor(config: ProviderConfig) {
     this.id = config.id;
@@ -17,6 +18,7 @@ export class OpenAIModelProvider implements ModelProvider {
     this.apiKeyEnv = config.config?.apiKeyEnv || "OPENAI_API_KEY";
     this.temperature = config.config?.temperature;
     this.timeoutMs = config.config?.timeoutMs || 60000;
+    this.strictJson = config.config?.strictJson !== false;
   }
 
   async complete({ agent, role, prompt }: ModelCompleteInput): Promise<ModelCompleteResult> {
@@ -41,6 +43,7 @@ export class OpenAIModelProvider implements ModelProvider {
         body: JSON.stringify({
           model: this.model,
           temperature: this.temperature,
+          ...(this.strictJson ? { response_format: { type: "json_object" } } : {}),
           messages: [
             {
               role: "system",

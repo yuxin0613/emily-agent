@@ -1,6 +1,7 @@
 import { SubAgent } from "../agents/SubAgent.ts";
 import type { ModelProvider } from "../llm/ModelProvider.ts";
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
+import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
@@ -34,7 +35,8 @@ process.on("message", (message: unknown) => {
 async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: StartMessage): Promise<void> {
   const taskStore = await TaskStore.create({ dataDir });
   const memory = await MemorySystem.create({ dataDir });
-  const providerRegistry = await ProviderRegistry.create({ dataDir, persist: false });
+  const providerUsageStore = await ProviderUsageStore.create({ dataDir });
+  const providerRegistry = await ProviderRegistry.create({ dataDir, persist: false, usageStore: providerUsageStore });
   let eventId: number | null = null;
 
   const heartbeat = setInterval(() => {
@@ -97,6 +99,7 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: Star
     await taskStore.writeTaskMarkdown(taskId);
     notify("task.changed", { taskId, eventId });
     notify("task.finished", { taskId, eventId });
+    providerUsageStore.close();
     taskStore.close();
   }
 }
@@ -167,6 +170,9 @@ async function runRoleTask({
     ].join("\n"),
     sessionId: String(task.metadata.sessionId || "default"),
     relevantMemory,
+    taskId: task.id,
+    runId: typeof task.metadata.runId === "string" ? task.metadata.runId : undefined,
+    source: "subagent-worker",
   });
   throwIfCancelled(task.id);
 
@@ -196,6 +202,10 @@ async function runRoleTask({
         finishReason: response.provider.finishReason,
         rawProvider: response.provider.rawProvider,
         usage: response.provider.usage,
+        costUsd: response.provider.costUsd,
+        usageRecordId: response.provider.usageRecordId,
+        jsonFormat: response.provider.jsonFormat,
+        jsonWarnings: response.provider.jsonWarnings,
       },
     }],
     memoryCandidates: [{

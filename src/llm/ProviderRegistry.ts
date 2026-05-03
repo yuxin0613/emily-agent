@@ -5,6 +5,7 @@ import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealt
 import { OllamaModelProvider } from "./OllamaModelProvider.ts";
 import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
 import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
+import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 import type { RoleDefinition } from "../types.ts";
 
 interface ProviderFile {
@@ -17,6 +18,7 @@ export class ProviderRegistry {
   providers: Map<string, ProviderConfig>;
   defaultProviderId: string;
   fallbackMode: ProviderFallbackMode;
+  usageStore?: ProviderUsageStore;
 
   static async create({
     dataDir,
@@ -24,12 +26,14 @@ export class ProviderRegistry {
     defaultProviderId = "echo",
     fallbackMode = "strict",
     persist = true,
+    usageStore,
   }: {
     dataDir: string;
     providers?: ProviderConfig[];
     defaultProviderId?: string;
     fallbackMode?: ProviderFallbackMode;
     persist?: boolean;
+    usageStore?: ProviderUsageStore;
   }): Promise<ProviderRegistry> {
     const filePath = providerConfigPath(dataDir);
     const loaded = providers
@@ -39,19 +43,21 @@ export class ProviderRegistry {
       providers: loaded.providers,
       defaultProviderId: loaded.defaultProviderId || defaultProviderId,
       fallbackMode: loaded.fallbackMode || fallbackMode,
+      usageStore,
     });
     registry.ensureDefault();
     if (persist) await registry.write(dataDir);
     return registry;
   }
 
-  constructor({ providers, defaultProviderId = "echo", fallbackMode = "strict" }: { providers: ProviderConfig[]; defaultProviderId?: string; fallbackMode?: ProviderFallbackMode }) {
+  constructor({ providers, defaultProviderId = "echo", fallbackMode = "strict", usageStore }: { providers: ProviderConfig[]; defaultProviderId?: string; fallbackMode?: ProviderFallbackMode; usageStore?: ProviderUsageStore }) {
     this.providers = new Map(providers.map((provider) => {
       validateProviderConfig(provider);
       return [provider.id, cloneProviderConfig(provider)];
     }));
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
+    this.usageStore = usageStore;
   }
 
   ensureDefault(): void {
@@ -115,7 +121,7 @@ export class ProviderRegistry {
     else if (config.type === "openai") provider = new OpenAIModelProvider(config);
     else if (config.type === "ollama") provider = new OllamaModelProvider(config);
     else throw new Error(`Unsupported provider type: ${(config as ProviderConfig).type}`);
-    return new ResilientModelProvider(provider, config);
+    return new ResilientModelProvider(provider, config, { usageStore: this.usageStore });
   }
 
   createForRole(definition: RoleDefinition, options: {
@@ -387,6 +393,13 @@ function validateProviderConfigObject(config: ProviderConfig): void {
     "retryMaxMs",
     "circuitBreakerFailureThreshold",
     "circuitBreakerCooldownMs",
+    "strictJson",
+    "costPer1KInputTokens",
+    "costPer1KOutputTokens",
+    "maxCallsPerMinute",
+    "maxCallsPerDay",
+    "maxTokensPerDay",
+    "maxCostUsdPerDay",
   ]);
   for (const key of Object.keys(value)) {
     if (!allowedKeys.has(key)) throw new Error(`Unknown provider config key: ${key}`);
@@ -402,6 +415,15 @@ function validateProviderConfigObject(config: ProviderConfig): void {
   assertNumberRange(value.retryMaxMs, "retryMaxMs", 1, 120000);
   assertNumberRange(value.circuitBreakerFailureThreshold, "circuitBreakerFailureThreshold", 1, 100);
   assertNumberRange(value.circuitBreakerCooldownMs, "circuitBreakerCooldownMs", 1000, 60 * 60 * 1000);
+  if (value.strictJson !== undefined && typeof value.strictJson !== "boolean") {
+    throw new Error("Provider strictJson must be a boolean when provided.");
+  }
+  assertNumberRange(value.costPer1KInputTokens, "costPer1KInputTokens", 0, 1000);
+  assertNumberRange(value.costPer1KOutputTokens, "costPer1KOutputTokens", 0, 1000);
+  assertNumberRange(value.maxCallsPerMinute, "maxCallsPerMinute", 1, 100000);
+  assertNumberRange(value.maxCallsPerDay, "maxCallsPerDay", 1, 10000000);
+  assertNumberRange(value.maxTokensPerDay, "maxTokensPerDay", 1, 1000000000);
+  assertNumberRange(value.maxCostUsdPerDay, "maxCostUsdPerDay", 0, 1000000);
 }
 
 function assertNumberRange(value: unknown, key: string, min: number, max: number): void {

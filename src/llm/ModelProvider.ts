@@ -2,6 +2,9 @@ export interface ModelCompleteInput {
   agent: string;
   role: string;
   prompt: string;
+  taskId?: string;
+  runId?: string;
+  source?: string;
 }
 
 export interface ModelUsage {
@@ -20,10 +23,25 @@ export type ProviderErrorCode =
   | "network_error"
   | "circuit_open"
   | "provider_disabled"
+  | "quota_exceeded"
   | "unknown_error";
+
+export type JsonData =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonData[]
+  | { [key: string]: JsonData };
+
+export type JsonOutputFormat = "json" | "json_extracted" | "wrapped_text";
 
 export interface ModelCompleteResult {
   content: string;
+  rawContent?: string;
+  json?: JsonData;
+  jsonFormat?: JsonOutputFormat;
+  jsonWarnings?: string[];
   usage?: ModelUsage;
   latencyMs?: number;
   finishReason?: string;
@@ -32,6 +50,8 @@ export interface ModelCompleteResult {
   providerId?: string;
   model?: string;
   errorCode?: ProviderErrorCode;
+  costUsd?: number;
+  usageRecordId?: string;
 }
 
 export interface ModelProvider {
@@ -58,6 +78,13 @@ export interface ProviderConfig {
     retryMaxMs?: number;
     circuitBreakerFailureThreshold?: number;
     circuitBreakerCooldownMs?: number;
+    strictJson?: boolean;
+    costPer1KInputTokens?: number;
+    costPer1KOutputTokens?: number;
+    maxCallsPerMinute?: number;
+    maxCallsPerDay?: number;
+    maxTokensPerDay?: number;
+    maxCostUsdPerDay?: number;
   };
 }
 

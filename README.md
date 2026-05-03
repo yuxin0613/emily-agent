@@ -166,7 +166,14 @@ provider 配置保存在 `.emily/providers.json`，默认会写入一个本地 `
         "retryBaseMs": 200,
         "retryMaxMs": 5000,
         "circuitBreakerFailureThreshold": 5,
-        "circuitBreakerCooldownMs": 60000
+        "circuitBreakerCooldownMs": 60000,
+        "strictJson": true,
+        "costPer1KInputTokens": 0.00015,
+        "costPer1KOutputTokens": 0.0006,
+        "maxCallsPerMinute": 60,
+        "maxCallsPerDay": 5000,
+        "maxTokensPerDay": 2000000,
+        "maxCostUsdPerDay": 25
       }
     },
     {
@@ -204,8 +211,10 @@ provider / role 护栏：
 - `openai` provider 必须显式配置 `config.apiKeyEnv`。
 - `baseUrl` 只允许 `http/https`，不能携带用户名密码；未知 config key 会被拒绝。
 - `temperature` 必须在 `0..2`，`timeoutMs` 不能超过 10 分钟；retry 和 circuit breaker 参数有上限校验。
-- provider 调用会返回结构化元数据：`content`、`usage`、`latencyMs`、`finishReason`、`rawProvider`、`attempts`。
-- provider 错误会归类为 `auth_error`、`timeout`、`rate_limited`、`server_error`、`bad_request`、`empty_response`、`network_error`、`circuit_open` 等。
+- provider 调用会返回结构化元数据：`content`、`usage`、`latencyMs`、`finishReason`、`rawProvider`、`attempts`、`costUsd`、`usageRecordId`。
+- `strictJson` 默认开启，会要求 LLM 只返回 JSON；如果返回散文本，会自动提取 JSON 或包装成 `{ "content": "...", "metadata": { "fallback": true } }` 兜底。
+- provider 错误会归类为 `auth_error`、`timeout`、`rate_limited`、`server_error`、`bad_request`、`empty_response`、`network_error`、`circuit_open`、`quota_exceeded` 等。
+- `costPer1KInputTokens` / `costPer1KOutputTokens` 用于估算成本；`maxCallsPerMinute`、`maxCallsPerDay`、`maxTokensPerDay`、`maxCostUsdPerDay` 用于限额控制。
 - `enabled: false` 可禁用 provider；禁用/删除 default provider 或仍被 role 引用的 provider 会失败。
 - role 的 `allowed_tools` 和 `forbidden_tools` 不能冲突。
 - `runtime.updateRoleProvider()` 是部分更新，未传字段会保留原值。
@@ -218,6 +227,7 @@ runtime API：
 ```ts
 runtime.listProviders()
 await runtime.checkProviders()
+runtime.providerUsage()
 await runtime.addProvider({ id: "reviewer-fast", type: "echo", model: "echo-review" })
 await runtime.disableProvider("reviewer-fast")
 await runtime.enableProvider("reviewer-fast")
@@ -241,6 +251,8 @@ Web API：
 curl 'http://127.0.0.1:3000/health'
 curl 'http://127.0.0.1:3000/providers'
 curl 'http://127.0.0.1:3000/providers/health?deep=false'
+curl 'http://127.0.0.1:3000/providers/usage'
+curl 'http://127.0.0.1:3000/providers/dashboard'
 curl 'http://127.0.0.1:3000/roles'
 curl 'http://127.0.0.1:3000/timeline?runId=...'
 curl 'http://127.0.0.1:3000/timeline?runId=...&format=text'
@@ -371,6 +383,9 @@ curl http://127.0.0.1:3000/events
 - `src/roles/RoleDefinitionLoader.ts`: 解析 `agents/<role>/agent.md` frontmatter。
 - `src/roles/RoleManager.ts`: 列出、创建和更新 role 定义。
 - `src/llm/ProviderRegistry.ts`: provider 注册、持久化和 role-specific model selection。
+- `src/llm/ProviderRuntime.ts`: provider 结构化返回、JSON 兜底、retry/backoff 和 circuit breaker。
+- `src/llm/ProviderUsageStore.ts`: provider 调用记录、成本估算、限额检查和 usage summary。
+- `src/llm/ProviderJson.ts`: LLM JSON 返回提取、解析和散文本兜底包装。
 - `src/llm/EchoModelProvider.ts`: 本地假模型 provider，用于离线跑通架构。
 - `src/llm/OpenAIModelProvider.ts`: OpenAI-compatible provider。
 - `src/llm/OllamaModelProvider.ts`: Ollama provider。
