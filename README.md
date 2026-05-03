@@ -17,6 +17,8 @@ flowchart LR
   Manager --> Researcher["Process: researcher"]
   Manager --> Reviewer["Process: reviewer"]
   Manager --> Inspector["Process: inspector"]
+  Main --> Providers["ProviderRegistry: echo / openai / ollama"]
+  Manager --> Providers
   Planner -. "IPC task.changed" .-> Manager
   Developer -. "IPC task.finished" .-> Manager
   Inspector -. "IPC recovery result" .-> Manager
@@ -45,7 +47,7 @@ flowchart LR
    每个角色的任务队列存入 SQLite `role_queues` 表。主进程重启后可以继续 drain 队列，而不是依赖内存队列。
 
 5. **结构化 `agent.md`**
-   `agents/<role>/agent.md` 支持 frontmatter，定义 `role`、`singleton`、`allowed_tools`、`forbidden_tools`、`max_concurrent_tasks` 和 `capabilities`。
+   `agents/<role>/agent.md` 支持 frontmatter，定义 `role`、`provider`、`model`、`singleton`、`allowed_tools`、`forbidden_tools`、`max_concurrent_tasks` 和 `capabilities`。
 
 6. **硬权限 ToolGateway**
    subagent 不直接假定自己能用工具，必须经过 `ToolGateway.assertAllowed()`。现在先接入权限校验骨架，后续真实文件、shell、浏览器工具都应从这里走。
@@ -88,6 +90,7 @@ flowchart LR
 - `RoleAgentManager` 会从 `role_queues` 动态发现角色，不要求所有角色预先写死在主进程。
 - memory candidate 审批使用 `WHERE status = 'pending'` 条件更新，避免 main agent 和 maintenance 并发重复写入长期记忆。
 - `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
+- `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
 
 ## 第二轮核心优化
 
@@ -132,10 +135,98 @@ flowchart LR
 9. Web API 增加 diagnostics、cancel-task、cancel-run 控制入口。
 10. 增加 core hardening / chaos 类测试，覆盖取消、worker 超时、graph metadata、diagnostics 和 maintenance。
 
+## 多模型 Provider
+
+provider 配置保存在 `.emily/providers.json`，默认会写入一个本地 `echo` provider。配置只保存 `apiKeyEnv`，不要保存真实 API key；Web API 也会拒绝 `apiKey`、`authorization`、`token`、`secret` 这类字段。当前内置三类：
+
+- `echo`: 离线假模型，用于测试和架构跑通。
+- `openai`: OpenAI-compatible chat completions provider，通过 `apiKeyEnv` 读取 API key。
+- `ollama`: 本地 Ollama `/api/generate` provider。
+
+示例：
+
+```json
+{
+  "defaultProviderId": "main-echo",
+  "providers": [
+    {
+      "id": "main-echo",
+      "type": "echo",
+      "model": "echo-main"
+    },
+    {
+      "id": "developer-openai",
+      "type": "openai",
+      "model": "gpt-4.1-mini",
+      "config": {
+        "apiKeyEnv": "OPENAI_API_KEY",
+        "temperature": 0.2
+      }
+    },
+    {
+      "id": "researcher-ollama",
+      "type": "ollama",
+      "model": "qwen2.5",
+      "config": {
+        "baseUrl": "http://127.0.0.1:11434"
+      }
+    }
+  ]
+}
+```
+
+`agent.md` 可以绑定 role 默认 provider/model：
+
+```yaml
+---
+role: "Solve implementation tasks and produce technical next actions."
+provider: "developer-openai"
+model: "gpt-4.1-mini"
+temperature: 0.2
+allowed_tools:
+  - read_file
+  - write_file
+capabilities:
+  - coding
+output_contract: "Return summary, implementation notes, risks, and verification steps."
+---
+```
+
+provider / role 护栏：
+
+- provider id 和 role name 只能包含字母、数字、`.`、`_`、`-`。
+- `openai` provider 必须显式配置 `config.apiKeyEnv`。
+- `temperature` 必须在 `0..2`，`timeoutMs` 不能超过 10 分钟。
+- role 的 `allowed_tools` 和 `forbidden_tools` 不能冲突。
+- `providerFallbackMode` 默认为 `strict`；设置为 `fallback` 时，缺失 provider 会回退到 main agent 的 provider，并记录 `runtime.anomaly`。
+- `runtime.checkProviders({ deep })` 可检查 provider 健康；`deep: true` 时会 ping Ollama `/api/tags`。
+
+runtime API：
+
+```ts
+runtime.listProviders()
+await runtime.checkProviders()
+await runtime.addProvider({ id: "reviewer-fast", type: "echo", model: "echo-review" })
+await runtime.addRole({
+  name: "qa",
+  role: "Check runtime behavior and return concise quality notes.",
+  provider: "reviewer-fast",
+  model: "echo-review",
+  allowedTools: ["read_file"],
+  capabilities: ["quality", "verification"],
+  instructions: "Review the assigned task and return a concise QA result."
+})
+await runtime.updateRoleProvider("qa", { provider: "reviewer-fast", model: "echo-review-v2" })
+await runtime.initializeDefaultRoles()
+```
+
 Web API：
 
 ```bash
 curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/providers'
+curl 'http://127.0.0.1:3000/providers/health?deep=false'
+curl 'http://127.0.0.1:3000/roles'
 curl 'http://127.0.0.1:3000/timeline?runId=...'
 curl 'http://127.0.0.1:3000/timeline?runId=...&format=text'
 curl 'http://127.0.0.1:3000/task-trace?taskId=...'
@@ -148,6 +239,18 @@ curl -X POST http://127.0.0.1:3000/maintenance \
 curl -X POST http://127.0.0.1:3000/cancel-run \
   -H 'content-type: application/json' \
   -d '{"runId":"...","reason":"用户取消"}'
+
+curl -X POST http://127.0.0.1:3000/providers \
+  -H 'content-type: application/json' \
+  -d '{"id":"qa-echo","type":"echo","model":"qa-model"}'
+
+curl -X POST http://127.0.0.1:3000/roles \
+  -H 'content-type: application/json' \
+  -d '{"name":"qa","role":"Quality agent","provider":"qa-echo","model":"qa-model","allowedTools":["read_file"],"capabilities":["quality"],"instructions":"Review the task result."}'
+
+curl -X POST http://127.0.0.1:3000/roles/defaults \
+  -H 'content-type: application/json' \
+  -d '{"overwrite":false}'
 ```
 
 ## 经验记忆
@@ -241,6 +344,11 @@ curl http://127.0.0.1:3000/events
 - `src/tasks/RoleAgentManager.ts`: 每个角色最多一个独立 worker 进程，负责持久队列 drain、IPC、heartbeat、reconcile 和崩溃恢复。
 - `src/workers/subagentWorker.ts`: subagent 独立进程入口，使用 `try/catch/finally` 兜底标记最终状态。
 - `src/roles/RoleDefinitionLoader.ts`: 解析 `agents/<role>/agent.md` frontmatter。
+- `src/roles/RoleManager.ts`: 列出、创建和更新 role 定义。
+- `src/llm/ProviderRegistry.ts`: provider 注册、持久化和 role-specific model selection。
+- `src/llm/EchoModelProvider.ts`: 本地假模型 provider，用于离线跑通架构。
+- `src/llm/OpenAIModelProvider.ts`: OpenAI-compatible provider。
+- `src/llm/OllamaModelProvider.ts`: Ollama provider。
 - `src/tools/ToolGateway.ts`: 工具权限校验入口。
 - `src/experience/ExperienceStore.ts`: active experience、版本归档和压缩索引。
 - `src/experience/ExperienceBuilder.ts`: 每日经验提炼，最多保留 3 条高价值更新。
@@ -252,7 +360,6 @@ curl http://127.0.0.1:3000/events
 - `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
 - `src/adapters/tui.ts`: 命令行交互入口。
 - `src/adapters/web.ts`: Web/API 入口，提供 `GET /health`、`GET /events`、`POST /chat`。
-- `src/llm/EchoModelProvider.ts`: 本地假模型 provider，用于离线跑通架构。
 - `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
 
 ## 任务与通知
@@ -282,6 +389,7 @@ npm run check
 - runtime 重启后继续 drain 已持久化 queued task，包括动态角色。
 - Task 状态机、非法跳转、retry 和 dead-letter。
 - task/run 取消、worker 超时、结构化 TaskResult。
+- 多 provider registry、配置校验、fallback、health check、role-specific provider/model、动态新增 role。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。
@@ -291,7 +399,7 @@ npm run check
 
 ## 后续扩展
 
-- 替换 `EchoModelProvider`，接入 OpenAI、Ollama 或其他模型服务。
+- 给 `ProviderRegistry` 增加更多 provider，例如 Anthropic、Gemini 或 OpenAI-compatible 私有网关。
 - 替换 `VectorMemoryLayer`，接入 Chroma、Qdrant、Milvus、pgvector 等向量库。
 - 把 `ToolGateway` 接到真实工具实现，例如文件读写、测试执行、浏览器、GitHub。
 - 给 `MainAgent.selectSubAgents` 增加更精细的路由策略。

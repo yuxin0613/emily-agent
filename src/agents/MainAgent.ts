@@ -1,5 +1,5 @@
 import type { MemoryRecallResult, Task } from "../types.ts";
-import type { EchoModelProvider } from "../llm/EchoModelProvider.ts";
+import type { ModelProvider } from "../llm/ModelProvider.ts";
 import type { MemorySystem } from "../memory/MemorySystem.ts";
 import type { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
@@ -29,7 +29,7 @@ interface MainAgentResult {
 
 export class MainAgent {
   name: string;
-  model: EchoModelProvider;
+  model: ModelProvider;
   memory: MemorySystem;
   taskStore: TaskStore;
   experienceStore: ExperienceStore;
@@ -45,7 +45,7 @@ export class MainAgent {
     roleAgentManager,
   }: {
     name: string;
-    model: EchoModelProvider;
+    model: ModelProvider;
     memory: MemorySystem;
     taskStore: TaskStore;
     experienceStore: ExperienceStore;

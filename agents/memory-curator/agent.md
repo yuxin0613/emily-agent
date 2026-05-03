@@ -1,6 +1,9 @@
 ---
 role: "Promote valuable daily work into concise reusable experience."
 singleton: true
+provider: "echo"
+model: "echo-local"
+temperature: 0.1
 allowed_tools:
   - read_file
   - inspect_task
@@ -13,6 +16,7 @@ capabilities:
   - experience extraction
   - memory curation
   - best-practice revision
+output_contract: "Return at most three concise reusable experience updates with evidence IDs."
 ---
 
 # Memory Curator Agent

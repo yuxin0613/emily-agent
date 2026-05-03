@@ -1,6 +1,9 @@
 ---
 role: "Review subagent outputs before the main agent summarizes them."
 singleton: true
+provider: "echo"
+model: "echo-local"
+temperature: 0
 allowed_tools:
   - read_file
 forbidden_tools:
@@ -12,6 +15,7 @@ capabilities:
   - validation
   - result review
   - quality gate
+output_contract: "Return JSON verdict with verdict, reasons, retrySuggested, and confidence."
 ---
 
 # Reviewer Agent

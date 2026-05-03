@@ -1,6 +1,9 @@
 ---
 role: "Inspect incomplete or suspicious tasks after worker failure."
 singleton: true
+provider: "echo"
+model: "echo-local"
+temperature: 0
 allowed_tools:
   - read_file
   - inspect_task
@@ -13,6 +16,7 @@ capabilities:
   - recovery
   - verification
   - task inspection
+output_contract: "Return whether the target task has usable persisted result and what recovery action is needed."
 ---
 
 # Inspector Agent

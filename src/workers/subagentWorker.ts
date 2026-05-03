@@ -1,5 +1,6 @@
 import { SubAgent } from "../agents/SubAgent.ts";
-import { EchoModelProvider } from "../llm/EchoModelProvider.ts";
+import type { ModelProvider } from "../llm/ModelProvider.ts";
+import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
@@ -33,7 +34,7 @@ process.on("message", (message: unknown) => {
 async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: StartMessage): Promise<void> {
   const taskStore = await TaskStore.create({ dataDir });
   const memory = await MemorySystem.create({ dataDir });
-  const model = new EchoModelProvider();
+  const providerRegistry = await ProviderRegistry.create({ dataDir, persist: false });
   let eventId: number | null = null;
 
   const heartbeat = setInterval(() => {
@@ -57,7 +58,7 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: Star
     }
     const result = role === "inspector"
       ? await withTimeout(inspectTask({ task, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId)
-      : await withTimeout(runRoleTask({ role, task, memory, model, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId);
+      : await withTimeout(runRoleTask({ role, task, memory, providerRegistry, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId);
     throwIfCancelled(taskId);
 
     eventId = taskStore.finishTask(taskId, {
@@ -104,16 +105,35 @@ async function runRoleTask({
   role,
   task,
   memory,
-  model,
+  providerRegistry,
   taskStore,
 }: {
   role: string;
   task: Task;
   memory: MemorySystem;
-  model: EchoModelProvider;
+  providerRegistry: ProviderRegistry;
   taskStore: TaskStore;
 }): Promise<TaskResult> {
-  const definition = await readRoleDefinition(role);
+  const definition = await readRoleDefinition(role, { roleDir: process.env.EMILY_ROLE_DIR });
+  let providerFallback: { requestedProviderId: string; fallbackProviderId: string; reason: string } | null = null;
+  const model: ModelProvider = providerRegistry.createForRole(definition, {
+    onFallback: (fallback) => {
+      providerFallback = fallback;
+    },
+  });
+  if (providerFallback) {
+    taskStore.addEvent({
+      type: "runtime.anomaly",
+      taskId: task.id,
+      payload: {
+        severity: "warning",
+        code: "provider_fallback",
+        message: `Role ${role} fell back from provider ${providerFallback.requestedProviderId} to ${providerFallback.fallbackProviderId}.`,
+        repaired: true,
+        reason: providerFallback.reason,
+      },
+    });
+  }
   const toolGateway = new ToolGateway(definition);
   toolGateway.assertAllowed("read_file");
   if (typeof task.metadata.forceDelayMs === "number") {
@@ -136,6 +156,9 @@ async function runRoleTask({
   const response = await agent.run({
     input: [
       definition.instructions,
+      "",
+      "Output contract:",
+      definition.outputContract || "Return a concise result that the main agent can summarize.",
       "",
       `Allowed tools: ${toolGateway.listAllowed().join(", ") || "(none)"}`,
       "",
@@ -162,6 +185,15 @@ async function runRoleTask({
   return createTaskResult({
     status: "success",
     summary: response.content,
+    artifacts: [{
+      type: "provider-call",
+      title: `${response.provider.id}/${response.provider.model}`,
+      metadata: {
+        providerId: response.provider.id,
+        model: response.provider.model,
+        latencyMs: response.provider.latencyMs,
+      },
+    }],
     memoryCandidates: [{
       scope: String(task.metadata.sessionId || "default"),
       kind: "subagent:result",
@@ -171,7 +203,7 @@ async function runRoleTask({
 }
 
 async function inspectTask({ task, taskStore }: { task: Task; taskStore: TaskStore }): Promise<TaskResult> {
-  const definition = await readRoleDefinition("inspector");
+  const definition = await readRoleDefinition("inspector", { roleDir: process.env.EMILY_ROLE_DIR });
   const toolGateway = new ToolGateway(definition);
   toolGateway.assertAllowed("inspect_task");
   if (typeof task.metadata.forceDelayMs === "number") {

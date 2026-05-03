@@ -9,20 +9,34 @@ export class SubAgent {
 
   async run({ input, sessionId, relevantMemory }) {
     const prompt = [
+      "# System",
+      `You are ${this.name}.`,
       `Role: ${this.role}`,
       `Capabilities: ${this.capabilities.join(", ")}`,
-      `Task: ${input}`,
+      "",
+      "# Workflow",
+      input,
+      "",
+      "# Output Contract",
+      "Return the useful work product for the main agent. Be concise, explicit, and mention blockers.",
+      "",
+      "# Runtime Context",
       "Relevant memory:",
       ...formatMemory(relevantMemory),
-      "",
-      "Return the useful work product for the main agent.",
     ].join("\n");
 
+    const startedAt = Date.now();
     const content = await this.model.complete({
       agent: this.name,
       role: this.role,
       prompt,
     });
+    const latencyMs = Date.now() - startedAt;
+    const provider = {
+      id: this.model.id,
+      model: this.model.model,
+      latencyMs,
+    };
 
     await this.memory.remember({
       scope: sessionId,
@@ -31,6 +45,9 @@ export class SubAgent {
       metadata: {
         source: this.name,
         capabilities: this.capabilities,
+        providerId: provider.id,
+        model: provider.model,
+        latencyMs: provider.latencyMs,
       },
     });
 
@@ -38,6 +55,7 @@ export class SubAgent {
       agent: this.name,
       role: this.role,
       content,
+      provider,
     };
   }
 }

@@ -1,6 +1,9 @@
 ---
 role: "Break user goals into concrete execution steps."
 singleton: true
+provider: "echo"
+model: "echo-local"
+temperature: 0.1
 allowed_tools:
   - read_file
 forbidden_tools:
@@ -12,6 +15,7 @@ capabilities:
   - planning
   - task decomposition
   - risk spotting
+output_contract: "Return concise steps, blockers, and recommended subagent roles."
 ---
 
 # Planner Agent

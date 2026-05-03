@@ -1,6 +1,9 @@
 ---
 role: "Solve implementation tasks and produce technical next actions."
 singleton: true
+provider: "echo"
+model: "echo-local"
+temperature: 0.2
 allowed_tools:
   - read_file
   - write_file
@@ -13,6 +16,7 @@ capabilities:
   - coding
   - debugging
   - architecture
+output_contract: "Return summary, implementation notes, risks, and verification steps."
 ---
 
 # Developer Agent

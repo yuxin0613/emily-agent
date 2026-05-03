@@ -1,5 +1,15 @@
-export class EchoModelProvider {
-  async complete({ agent, role, prompt }) {
+import type { ModelCompleteInput, ModelProvider } from "./ModelProvider.ts";
+
+export class EchoModelProvider implements ModelProvider {
+  id: string;
+  model: string;
+
+  constructor({ id = "echo", model = "echo-local" }: { id?: string; model?: string } = {}) {
+    this.id = id;
+    this.model = model;
+  }
+
+  async complete({ agent, role, prompt }: ModelCompleteInput): Promise<string> {
     if (agent === "planner") {
       return [
         "我会把任务拆成三步：",
@@ -31,6 +41,9 @@ export class EchoModelProvider {
 
     return [
       "收到。当前运行的是本地 EchoModelProvider，所以我会展示编排结果而不是调用真实 LLM。",
+      `Provider: ${this.id}`,
+      `Model: ${this.model}`,
+      `Role: ${role}`,
       "",
       compactPrompt(prompt),
       "",
@@ -39,7 +52,7 @@ export class EchoModelProvider {
   }
 }
 
-function compactPrompt(prompt) {
+function compactPrompt(prompt: string): string {
   const lines = prompt.split("\n").filter(Boolean);
   return lines.slice(0, 8).join("\n");
 }

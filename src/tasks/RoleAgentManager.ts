@@ -23,6 +23,7 @@ export class RoleAgentManager extends EventEmitter {
   dataDir: string;
   taskStore: TaskStore;
   workerPath: string;
+  roleDir: string;
   staleTaskMs: number;
   leaseMs: number;
   recoveryPolicy: RecoveryPolicy;
@@ -36,12 +37,14 @@ export class RoleAgentManager extends EventEmitter {
     dataDir,
     taskStore,
     workerPath,
+    roleDir = process.env.EMILY_ROLE_DIR || `${process.cwd()}/agents`,
     staleTaskMs = 30000,
     leaseMs = 30000,
   }: {
     dataDir: string;
     taskStore: TaskStore;
     workerPath: string;
+    roleDir?: string;
     staleTaskMs?: number;
     leaseMs?: number;
   }) {
@@ -49,6 +52,7 @@ export class RoleAgentManager extends EventEmitter {
     this.dataDir = dataDir;
     this.taskStore = taskStore;
     this.workerPath = workerPath;
+    this.roleDir = roleDir;
     this.staleTaskMs = staleTaskMs;
     this.leaseMs = leaseMs;
     this.recoveryPolicy = new RecoveryPolicy();
@@ -289,6 +293,7 @@ export class RoleAgentManager extends EventEmitter {
       env: {
         ...process.env,
         EMILY_DATA_DIR: this.dataDir,
+        EMILY_ROLE_DIR: this.roleDir,
       },
     });
 

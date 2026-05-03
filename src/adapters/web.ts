@@ -18,6 +18,24 @@ export async function startWebServer({
     diagnostics: (options?: { repair?: boolean }) => unknown;
     cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
     cancelRun: (runId: string, reason?: string) => Promise<unknown>;
+    listProviders: () => unknown[];
+    checkProviders: (options?: { deep?: boolean }) => Promise<unknown[]>;
+    addProvider: (input: { id: string; type: "echo" | "openai" | "ollama"; model?: string; config?: Record<string, unknown> }) => Promise<unknown>;
+    listRoles: () => Promise<unknown[]>;
+    addRole: (input: {
+      name: string;
+      role: string;
+      provider?: string;
+      model?: string;
+      temperature?: number;
+      allowedTools?: string[];
+      forbiddenTools?: string[];
+      capabilities?: string[];
+      outputContract?: string;
+      instructions: string;
+    }) => Promise<unknown>;
+    updateRoleProvider: (name: string, input: { provider?: string; model?: string; temperature?: number }) => Promise<unknown>;
+    initializeDefaultRoles: (options?: { overwrite?: boolean }) => Promise<unknown[]>;
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
@@ -37,6 +55,62 @@ export async function startWebServer({
 
       if (request.method === "GET" && url.pathname === "/events") {
         return streamEvents({ runtime, request, response, afterId: Number(url.searchParams.get("afterId") || 0) });
+      }
+
+      if (request.method === "GET" && url.pathname === "/providers") {
+        return sendJson(response, 200, runtime.listProviders());
+      }
+
+      if (request.method === "GET" && url.pathname === "/providers/health") {
+        return sendJson(response, 200, await runtime.checkProviders({
+          deep: url.searchParams.get("deep") === "true",
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/providers") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.addProvider({
+          id: String(body.id || ""),
+          type: parseProviderType(body.type),
+          model: typeof body.model === "string" ? body.model : undefined,
+          config: typeof body.config === "object" && body.config ? body.config as Record<string, unknown> : undefined,
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/roles") {
+        return sendJson(response, 200, await runtime.listRoles());
+      }
+
+      if (request.method === "POST" && url.pathname === "/roles") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.addRole({
+          name: String(body.name || ""),
+          role: String(body.role || body.name || ""),
+          provider: typeof body.provider === "string" ? body.provider : undefined,
+          model: typeof body.model === "string" ? body.model : undefined,
+          temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+          allowedTools: Array.isArray(body.allowedTools) ? body.allowedTools.map(String) : undefined,
+          forbiddenTools: Array.isArray(body.forbiddenTools) ? body.forbiddenTools.map(String) : undefined,
+          capabilities: Array.isArray(body.capabilities) ? body.capabilities.map(String) : undefined,
+          outputContract: typeof body.outputContract === "string" ? body.outputContract : undefined,
+          instructions: String(body.instructions || "Follow the task requirements and return a concise result."),
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/roles/defaults") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.initializeDefaultRoles({
+          overwrite: body.overwrite === true,
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/roles/provider") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.updateRoleProvider(String(body.name || ""), {
+          provider: typeof body.provider === "string" ? body.provider : undefined,
+          model: typeof body.model === "string" ? body.model : undefined,
+          temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+        }));
       }
 
       if (request.method === "GET" && url.pathname === "/experiences") {
@@ -119,7 +193,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /health", "GET /events", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /health", "GET /events", "GET /providers", "GET /providers/health", "POST /providers", "GET /roles", "POST /roles", "POST /roles/defaults", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {
@@ -138,6 +212,11 @@ export async function startWebServer({
 function parseFeedbackRating(value: unknown): "useful" | "wrong" | "outdated" | "duplicate" {
   if (value === "useful" || value === "wrong" || value === "outdated" || value === "duplicate") return value;
   throw new Error("Invalid feedback rating");
+}
+
+function parseProviderType(value: unknown): "echo" | "openai" | "ollama" {
+  if (value === "echo" || value === "openai" || value === "ollama") return value;
+  throw new Error("Invalid provider type");
 }
 
 function streamEvents({

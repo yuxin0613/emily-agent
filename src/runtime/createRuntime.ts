@@ -3,20 +3,51 @@ import path from "node:path";
 import { MainAgent } from "../agents/MainAgent.ts";
 import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
-import { EchoModelProvider } from "../llm/EchoModelProvider.ts";
+import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
+import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
+import { RoleManager } from "../roles/RoleManager.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { renderTimeline } from "../timeline/renderTimeline.ts";
 
-export async function createRuntime(options: { dataDir?: string; model?: EchoModelProvider } = {}) {
+export async function createRuntime(options: {
+  dataDir?: string;
+  roleDir?: string;
+  model?: ModelProvider;
+  providers?: ProviderConfig[];
+  defaultProviderId?: string;
+  providerFallbackMode?: ProviderFallbackMode;
+  mainProviderId?: string;
+} = {}) {
   const dataDir = options.dataDir || path.join(process.cwd(), ".emily");
+  const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
   await mkdir(dataDir, { recursive: true });
 
-  const model = options.model || new EchoModelProvider();
+  const requestedMainProviderId = options.mainProviderId || options.defaultProviderId || options.model?.id;
+  const providerRegistry = await ProviderRegistry.create({
+    dataDir,
+    providers: options.providers,
+    defaultProviderId: requestedMainProviderId || "echo",
+    fallbackMode: options.providerFallbackMode || "strict",
+  });
+  const mainProviderId = requestedMainProviderId || providerRegistry.defaultProviderId;
+  let shouldWriteProviderRegistry = false;
+  if (providerRegistry.defaultProviderId !== mainProviderId) {
+    providerRegistry.defaultProviderId = mainProviderId;
+    providerRegistry.ensureDefault();
+    shouldWriteProviderRegistry = true;
+  }
+  if (options.providerFallbackMode && providerRegistry.fallbackMode !== options.providerFallbackMode) {
+    providerRegistry.fallbackMode = options.providerFallbackMode;
+    shouldWriteProviderRegistry = true;
+  }
+  if (shouldWriteProviderRegistry) await providerRegistry.write(dataDir);
+  const model = options.model || providerRegistry.createProvider(mainProviderId);
   const memory = await MemorySystem.create({ dataDir });
   const taskStore = await TaskStore.create({ dataDir });
   const experienceStore = ExperienceStore.create({ dataDir });
+  const roleManager = new RoleManager({ roleDir, providerRegistry });
   const experienceBuilder = new ExperienceBuilder({
     taskStore,
     experienceStore,
@@ -25,6 +56,7 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
     dataDir,
     taskStore,
     workerPath: path.join(process.cwd(), "src", "workers", "subagentWorker.ts"),
+    roleDir,
   });
   await roleAgentManager.start();
 
@@ -77,12 +109,37 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
   return {
     dataDir,
     memory,
+    providerRegistry,
+    roleManager,
     experienceStore,
     experienceBuilder,
     model,
     taskStore,
     roleAgentManager,
     mainAgent,
+    listProviders() {
+      return providerRegistry.list();
+    },
+    checkProviders(options: { deep?: boolean } = {}) {
+      return providerRegistry.health(options);
+    },
+    async addProvider(config: ProviderConfig) {
+      providerRegistry.add(config);
+      await providerRegistry.write(dataDir);
+      return providerRegistry.getConfig(config.id);
+    },
+    listRoles() {
+      return roleManager.listRoles();
+    },
+    addRole(input: Parameters<RoleManager["addRole"]>[0]) {
+      return roleManager.addRole(input);
+    },
+    updateRoleProvider(name: string, input: Parameters<RoleManager["updateRoleProvider"]>[1]) {
+      return roleManager.updateRoleProvider(name, input);
+    },
+    initializeDefaultRoles(options: Parameters<RoleManager["initializeDefaultRoles"]>[0] = {}) {
+      return roleManager.initializeDefaultRoles(options);
+    },
     async handleUserMessage(input: string, context = {}) {
       return mainAgent.handleUserMessage(input, context);
     },

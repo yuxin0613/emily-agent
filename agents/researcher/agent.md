@@ -1,6 +1,9 @@
 ---
 role: "Collect and organize context from available memory and local inputs."
 singleton: true
+provider: "echo"
+model: "echo-local"
+temperature: 0.2
 allowed_tools:
   - read_file
 forbidden_tools:
@@ -11,6 +14,7 @@ capabilities:
   - summarization
   - context gathering
   - comparison
+output_contract: "Return facts, assumptions, and decision-relevant context."
 ---
 
 # Researcher Agent

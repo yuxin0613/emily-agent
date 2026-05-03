@@ -161,12 +161,17 @@ export interface Timeline {
 }
 
 export interface RoleDefinition {
+  name: string;
   role: string;
   singleton: boolean;
+  provider?: string;
+  model?: string;
+  temperature?: number;
   allowedTools: ToolPermission[];
   forbiddenTools: ToolPermission[];
   maxConcurrentTasks: number;
   capabilities: string[];
+  outputContract?: string;
   instructions: string;
 }
 
