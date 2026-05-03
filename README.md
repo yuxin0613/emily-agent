@@ -87,6 +87,7 @@ flowchart LR
 - `TaskGraphExecutor`: 自动执行 PlanSpec DAG，按依赖推进 queued / pending task，支持并行 ready task、role singleton 约束、失败后阻断依赖任务，以及 rolling 模式下的运行时图扩展。
 - `reviewer`: 正常流程里的结果验收 agent，区别于异常恢复用的 `inspector`；reviewer 优先输出 JSON verdict，再降级解析文本，并影响 run 状态。
 - `memory_candidates`: subagent 输出先成为候选记忆，统一由 `MemoryCandidatePolicy` approve / reject 后才写入 MemorySystem。
+- `doctor({ deep, repair })`: 聚合 health、diagnostics、provider health、security audit、pending memory/skill candidates、session trash 状态和 Gateway 协议元信息；默认只读，`repair=true` 才会调用已有修复路径。
 - `getTimeline({ runId })`: 返回一次 run 的 run、tasks、events。
 - `getTaskTrace(taskId)`: 返回单个 task 的事件轨迹。
 - `diagnostics({ repair })`: 检查 queued task、running lease、terminal queue、task graph 和 run 状态不变量，可选择修复。
@@ -101,10 +102,13 @@ flowchart LR
 - memory candidate 审批使用 `WHERE status = 'pending'` 条件更新，避免 main agent 和 maintenance 并发重复写入长期记忆。
 - 普通记忆的长期向量索引用文件锁和临时文件原子替换保存；多进程 subagent 同时写入时会先 reload / merge 再落盘。
 - `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
+- `PermissionMode`: task/run 可携带 `read_only`、`workspace_write` 或 `danger_full_access`，最终工具权限始终是 `role.allowed_tools ∩ permissionMode - role.forbidden_tools`。
 - `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
 - `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
 - `SkillRegistry`: 内置并可从 `skills/<skill>/skill.md` 加载技能 prompt，task 的 `skillHints` 和 role 的 `skills` 会合并后注入 subagent prompt。
 - `SkillCandidateStore` / `SkillBuilder`: 从重复成功 workflow 中生成 `proposed` skill candidate；默认不会自动启用，审批后才写入 skill 文件，已有相似 skill 优先走 update。
+- `resumeLatestSession()` / `exportSession()` / `previewSessionCompaction()` / `sessionUsage()`: 基于现有 session/run/message/usage 数据提供 session 运维能力，不改变 `/new`、`/clear`、trash/restore 生命周期。
+- `CommandRegistry`: 统一注册 doctor、session 运维以及 tools/skills/providers/roles 查询类命令，供 TUI/Web/Gateway 复用；不替换 runtime 执行路径。
 - `tool.hints.resolved` / `skill.hints.resolved`: 每个 worker 会记录工具/技能解析结果；未知或被拒绝的 hints 会额外记录 `runtime.anomaly`。
 
 ## 第二轮核心优化
@@ -160,6 +164,7 @@ flowchart LR
 - `exitCriteria`: 本次 run 的结果验收标准。
 - `planningMode`: `single_wave` 或 `rolling`；长任务默认使用 rolling，任务图可以先粗后细地逐步展开。
 - `tasks`: DAG task 列表，包含 `key`、`role`、`parentKey`、`dependsOn`、`acceptanceCriteria`、`timeoutMs`、`maxRetries`。
+- `permissionMode`: task 级权限模式，可省略并继承 run/session 模式。
 - `expandable`: rolling 模式下可展开节点的标记；节点完成后 executor 会先创建 planner 扩展任务，让 planner 根据 `expansionGoal`、父节点结果和当前图状态返回 `GraphPatchSpec`。
 - `review`: 最终验收要求，reviewer 会根据 exit criteria 做质量门。
 
@@ -346,6 +351,9 @@ Gateway request 示例：
 - `providers.list` / `providers.health` / `providers.usage`
 - `roles.list` / `roles.add`
 - `tools.list` / `skills.list` / `skills.candidates.list`
+- `doctor.run`
+- `sessions.resume_latest` / `sessions.export` / `sessions.compact_preview` / `sessions.usage`
+- `commands.list` / `commands.run`
 - `experiences.recall`
 - `timeline.get`
 - `diagnostics.run` / `maintenance.run` / `security.audit`
@@ -397,6 +405,13 @@ await runtime.addRole({
 })
 await runtime.updateRoleProvider("qa", { provider: "reviewer-fast", model: "echo-review-v2" })
 await runtime.initializeDefaultRoles()
+await runtime.doctor({ deep: true })
+runtime.resumeLatestSession({ includeHidden: true })
+runtime.exportSession("session-id", { format: "markdown" })
+runtime.previewSessionCompaction("session-id", { maxMessages: 20 })
+runtime.sessionUsage("session-id")
+runtime.listCommands()
+await runtime.runCommand("doctor", { args: ["--deep"], format: "json" })
 ```
 
 Web API：
@@ -426,6 +441,16 @@ curl 'http://127.0.0.1:3000/providers/health?deep=false' -H "x-emily-token: $TOK
 curl 'http://127.0.0.1:3000/providers/usage' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/providers/dashboard?token='"$TOKEN"
 curl 'http://127.0.0.1:3000/roles' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/doctor?deep=true' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/commands' -H "x-emily-token: $TOKEN"
+curl -X POST http://127.0.0.1:3000/commands/run \
+  -H 'content-type: application/json' \
+  -H "x-emily-token: $TOKEN" \
+  -d '{"name":"doctor","args":["--deep"]}'
+curl 'http://127.0.0.1:3000/sessions/resume-latest?includeHidden=true' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/sessions/export?sessionId=demo&format=markdown' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/sessions/compact-preview?sessionId=demo&maxMessages=20' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/sessions/usage?sessionId=demo' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/timeline?runId=...' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/timeline?runId=...&format=text' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/task-trace?taskId=...' -H "x-emily-token: $TOKEN"
@@ -538,7 +563,15 @@ curl -X POST http://127.0.0.1:3000/experiences/feedback \
 npm start
 ```
 
-TUI 支持 `:health`、`:providers`、`:roles`、`:sessions`、`:messages`、`:tools`、`:skills`、`:candidates`、`:timeline`、`:diagnostics`、`:maintenance` 和直接聊天。会话命令中，`/new` 会创建一个新的可见 session，`/clear` 会隐藏当前 session 并创建新 session；隐藏 session 可通过 `:sessions all` 查看，并用 `:restore-session <id>` 恢复。聊天窗口和消息历史只读取当前 session 内的上下文。
+TUI 支持 `:health`、`:doctor`、`:providers`、`:roles`、`:commands`、`:sessions`、`:resume latest`、`:export-session`、`:compact-preview`、`:session-usage`、`:messages`、`:tools`、`:skills`、`:candidates`、`:timeline`、`:diagnostics`、`:maintenance` 和直接聊天。会话命令中，`/new` 会创建一个新的可见 session，`/clear` 会隐藏当前 session 并创建新 session；隐藏 session 可通过 `:sessions all` 查看，并用 `:restore-session <id>` 恢复。聊天窗口和消息历史只读取当前 session 内的上下文。
+
+只跑诊断：
+
+```bash
+node src/index.ts --doctor --deep
+node src/index.ts --doctor --repair
+node src/index.ts --security-audit
+```
 
 启动 Web 适配器：
 
@@ -581,7 +614,7 @@ WebUI 采用 Wiki.js 风格的信息架构：左侧分组导航、顶部搜索�
 curl -X POST http://127.0.0.1:3000/chat \
   -H 'content-type: application/json' \
   -H "x-emily-token: $TOKEN" \
-  -d '{"sessionId":"demo","message":"帮我设计一个 Node 多 agent 架构"}'
+  -d '{"sessionId":"demo","message":"帮我设计一个 Node 多 agent 架构","permissionMode":"workspace_write"}'
 
 curl http://127.0.0.1:3000/sessions \
   -H "x-emily-token: $TOKEN"
@@ -608,6 +641,9 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/gateway/GatewayProtocol.ts`: typed WebSocket request/response/event 协议和 dispatch。
 - `src/routing/AgentRouter.ts`: 确定性 role 路由规则。
 - `src/runtime/LifecycleHooks.ts`: runtime 生命周期 hook 注册和触发。
+- `src/runtime/Doctor.ts`: 聚合 health、diagnostics、provider health、security audit、session 和候选项状态的 runtime doctor 报告。
+- `src/runtime/SessionOps.ts`: resume latest、session export、compaction preview 和 per-session usage 汇总。
+- `src/commands/CommandRegistry.ts`: 统一注册可复用 runtime command，当前覆盖 doctor、session 运维和查询类命令。
 - `src/security/SecurityAudit.ts`: 底座安全审计报告。
 - `src/agents/AgentProfile.ts`: subagent profile 隔离描述和 prompt 渲染。
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
@@ -635,6 +671,7 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/llm/OllamaModelProvider.ts`: Ollama provider。
 - `src/tools/ToolRegistry.ts`: 工具声明注册表，包含别名、副作用、approval 和提示词说明。
 - `src/tools/ToolGateway.ts`: 工具权限校验入口，解析 tool hints 并过滤 role 不允许的工具。
+- `src/tools/PermissionMode.ts`: task/run 级额外权限护栏，和 role policy 求交集。
 - `src/skills/SkillRegistry.ts`: 技能注册表，加载内置技能和 `skills/<skill>/skill.md`。
 - `src/skills/SkillCandidateStore.ts`: skill candidate SQLite 存储、审批、拒绝和 skill 文件写入。
 - `src/skills/SkillBuilder.ts`: 从重复 task workflow 生成 proposed skill candidate，优先更新已有 skill。
@@ -647,7 +684,7 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
 - `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
 - `src/adapters/tui.ts`: 命令行交互入口，提供 chat、health、provider、tool、skill、timeline、diagnostics 和 maintenance 命令。
-- `src/adapters/web.ts`: Web/API/Gateway 入口，提供 `GET /` WebUI、`GET /health`、`GET /events`、`POST /chat` 和 `/gateway` WebSocket。
+- `src/adapters/web.ts`: Web/API/Gateway 入口，提供 `GET /` WebUI、`GET /health`、`GET /doctor`、session ops、commands、`GET /events`、`POST /chat` 和 `/gateway` WebSocket。
 - `src/adapters/webUi.ts`: Wiki.js 风格 WebUI HTML/CSS/JS。
 - `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
 - `skills/<skill>/skill.md`: 技能定义，描述可复用工作流、aliases、capabilities 和 tool hints。
@@ -686,6 +723,7 @@ npm run check
 - session 生命周期和消息隔离：new、clear/hide、restore、trash、session 内消息历史和 30 天后删除。
 - TUI/WebUI 静态渲染入口和 WebUI 基础结构。
 - WebSocket Gateway、ContextEngine active/deep 召回、确定性路由、LifecycleHooks 和 security audit。
+- doctor、CommandRegistry、session 运维 API 和 permission mode 的基础接线。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。
@@ -694,9 +732,13 @@ npm run check
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
 - 经验相似匹配、applicability/contraindications、feedback/reuse、索引重建和 schema migration 记录。
 
-## 后续扩展
+## 下一阶段建议
 
-- 给 `ProviderRegistry` 增加更多 provider，例如 Anthropic、Gemini 或 OpenAI-compatible 私有网关。
-- 替换 `VectorMemoryLayer`，接入 Chroma、Qdrant、Milvus、pgvector 等向量库。
-- 把 `ToolGateway` 接到真实工具实现，例如文件读写、测试执行、浏览器、GitHub。
-- 给 `MainAgent.selectSubAgents` 增加更精细的路由策略。
+这部分只列真正还没有封装完成的扩展点；已完成的 ProviderRegistry、ToolGateway 权限层、AgentRouter、doctor、session ops 和 CommandRegistry 已在上文归入当前能力。
+
+- Provider：补原生 Anthropic、Gemini provider；OpenAI-compatible 私有网关可先通过 `openai` provider 的兼容配置承载，再按需要沉淀专用 adapter。
+- Memory：为 Chroma、Qdrant、Milvus、pgvector 增加可插拔外部向量库 adapter，同时保留当前文件向量索引作为离线 fallback。
+- Tools：在现有 `ToolRegistry` / `ToolGateway` 权限层下接真实工具执行器，例如 workspace 文件读写、测试执行、浏览器、GitHub；工具执行结果仍要进入 task event 和审计轨迹。
+- Planner：增强计划器的重规划、预算控制、失败分支处理和任务图质量评分，而不是替换现有 `PlanSpec` / `GraphPatchSpec` 协议。
+- CommandRegistry：继续把 Web/TUI/Gateway 的写类控制命令迁移到 registry，并补 input schema 校验和权限要求。
+- Mock parity：把 `test/harness/MockParityHarness.ts` 扩展成覆盖 provider、planner、worker crash、cancel、gateway 和 memory candidate 的统一回归套件。
