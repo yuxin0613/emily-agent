@@ -7,6 +7,8 @@ import type { ExperienceStore } from "../experience/ExperienceStore.ts";
 import type { ExperienceRecallResult } from "../types.ts";
 import { parseReviewerVerdict, type ReviewerVerdict } from "../review/ReviewerVerdict.ts";
 import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
+import { createTaskGraph } from "../tasks/TaskGraph.ts";
+import { taskResultSummary } from "../tasks/TaskResult.ts";
 
 interface MainAgentResult {
   agent: string;
@@ -94,7 +96,7 @@ export class MainAgent {
       const relevantExperiences = this.experienceStore.recall(normalizedInput, {
         scope: "project",
         limit: 3,
-      });
+      }).filter((experience) => experienceApplies(experience, normalizedInput));
 
       const delegated = await this.delegateTasks({
         input: normalizedInput,
@@ -190,37 +192,48 @@ export class MainAgent {
   }> {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
-    const plannerTask = this.taskStore.createTask({
-      role: "planner",
-      title: `planner: ${input.slice(0, 60)}`,
-      input,
-      metadata: {
+    const taskGraph = createTaskGraph({
+      taskStore: this.taskStore,
+      baseMetadata: {
         sessionId,
         source,
         runId,
         createdBy: this.name,
-        graphRole: "planner",
+        timeoutMs: 30000,
+        maxResultChars: 12000,
+        maxMemoryCandidates: 1,
+      },
+      spec: {
+        tasks: [
+          {
+            key: "planner",
+            role: "planner",
+            title: `planner: ${input.slice(0, 60)}`,
+            input,
+            metadata: { graphRole: "planner" },
+          },
+          ...selectedAgents.filter((agentRole) => agentRole !== "planner").map((role) => ({
+            key: role,
+            role,
+            title: `${role}: ${input.slice(0, 60)}`,
+            input,
+            dependsOn: ["planner"],
+            metadata: {
+              graphRole: role,
+              autoRetry: false,
+            },
+          })),
+        ],
       },
     });
+    const plannerTask = taskGraph.planner;
+    const graphId = String(plannerTask.metadata.graphId || "");
 
     const finishedPlanner = await this.roleAgentManager.runTask(plannerTask);
     results.push(this.formatTaskResult("planner", finishedPlanner));
 
     for (const role of selectedAgents.filter((agentRole) => agentRole !== "planner")) {
-      const task = this.taskStore.createTask({
-        role,
-        title: `${role}: ${input.slice(0, 60)}`,
-        input,
-        metadata: {
-          sessionId,
-          source,
-          runId,
-          createdBy: this.name,
-          autoRetry: false,
-        },
-      });
-      this.taskStore.addTaskDependency(task.id, plannerTask.id, "success");
-
+      const task = taskGraph[role];
       const finishedTask = await this.roleAgentManager.runTask(task);
       results.push(this.formatTaskResult(role, finishedTask));
     }
@@ -242,6 +255,7 @@ export class MainAgent {
           runId,
           createdBy: this.name,
           graphRole: "reviewer",
+          graphId,
         },
       });
       for (const result of results.filter((item) => item.role !== "planner")) {
@@ -284,7 +298,7 @@ export class MainAgent {
       role,
       taskId: finishedTask.id,
       status: finishedTask.status,
-      content: finishedTask.result || finishedTask.error || "(no result)",
+      content: taskResultSummary(finishedTask.result, finishedTask.error || "(no result)"),
     };
   }
 
@@ -337,7 +351,8 @@ function runStatusFrom({
 }: {
   subResults: Array<{ status: string }>;
   reviewerVerdict?: ReviewerVerdict;
-}): "done" | "failed" | "blocked" {
+}): "done" | "failed" | "blocked" | "cancelled" {
+  if (subResults.some((result) => result.status === "cancelled")) return "cancelled";
   if (subResults.some((result) => result.status !== "done")) return "failed";
   if (reviewerVerdict?.verdict === "needs_user_input") return "blocked";
   if (reviewerVerdict?.verdict === "fail") return "failed";
@@ -349,6 +364,21 @@ function formatExperiences(experiences: ExperienceRecallResult[]): string[] {
   return experiences.map((experience) => [
     `- ${experience.topicKey} r${experience.revision} score=${experience.score.toFixed(3)}`,
     `  problem: ${experience.problemPattern}`,
+    `  applicability: ${experience.applicability}`,
+    ...(experience.contraindications.length ? [`  avoid: ${experience.contraindications.join("; ")}`] : []),
     `  solution: ${experience.solutionPattern}`,
   ].join("\n"));
+}
+
+function experienceApplies(experience: ExperienceRecallResult, input: string): boolean {
+  const normalized = input.toLowerCase();
+  for (const item of experience.contraindications) {
+    const words = item.toLowerCase().split(/[\s,.;:，。；：]+/).filter((word) => word.length >= 4);
+    if (words.length && words.some((word) => normalized.includes(word))) return false;
+  }
+  if (!experience.applicability) return true;
+  const applicabilityWords = experience.applicability.toLowerCase().split(/[\s,.;:，。；：]+/).filter((word) => word.length >= 4);
+  if (!applicabilityWords.length) return true;
+  return applicabilityWords.some((word) => normalized.includes(word))
+    || normalized.includes(experience.problemPattern.slice(0, 12).toLowerCase());
 }

@@ -69,13 +69,15 @@ flowchart LR
 已实现的核心能力：
 
 - `runs`: 一次用户请求的结构化运行记录。
-- `runs.status`: 支持 `running`、`reviewing`、`recovering`、`partially_done`、`waiting_user`、`done`、`failed`、`blocked`，用于区分执行、验收、恢复和等待用户输入。
+- `runs.status`: 支持 `running`、`reviewing`、`recovering`、`partially_done`、`waiting_user`、`done`、`failed`、`blocked`、`cancelled`，用于区分执行、验收、恢复、等待用户输入和主动取消。
+- `TaskResult`: worker 结果使用结构化 JSON，包含 `status`、`summary`、`artifacts`、`memoryCandidates` 和 `nextActions`。
 - `task_graphs`: 为一次 run 的 DAG 提供 graph id，task metadata 会带上 `graphId`，便于跨 task 追踪。
 - `task_dependencies`: task graph / DAG 依赖，依赖满足后才会进入 `queued`。
 - `reviewer`: 正常流程里的结果验收 agent，区别于异常恢复用的 `inspector`；reviewer 优先输出 JSON verdict，再降级解析文本，并影响 run 状态。
 - `memory_candidates`: subagent 输出先成为候选记忆，统一由 `MemoryCandidatePolicy` approve / reject 后才写入 MemorySystem。
 - `getTimeline({ runId })`: 返回一次 run 的 run、tasks、events。
 - `getTaskTrace(taskId)`: 返回单个 task 的事件轨迹。
+- `diagnostics({ repair })`: 检查 queued task、running lease、terminal queue、task graph 和 run 状态不变量，可选择修复。
 - `renderTimeline(runId)`: 把结构化 timeline 渲染成人类可读 replay 文本。
 - `health()`: 返回 pending/running task、过期 lease、未 ack 终态 task、待处理记忆候选和 active experience 数量。
 - `maintenance()`: 执行 reconcile、刷新 task graph、收敛孤儿 run、处理遗留 memory candidates、生成每日经验，并返回维护后的健康状态。
@@ -85,6 +87,7 @@ flowchart LR
 - worker 异常退出统一走 `RecoveryPolicy`，可按任务状态选择 finish、retry、dead-letter 或 inspector 复核。
 - `RoleAgentManager` 会从 `role_queues` 动态发现角色，不要求所有角色预先写死在主进程。
 - memory candidate 审批使用 `WHERE status = 'pending'` 条件更新，避免 main agent 和 maintenance 并发重复写入长期记忆。
+- `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
 
 ## 第二轮核心优化
 
@@ -114,6 +117,21 @@ flowchart LR
 - `recoverStaleRuns()` 会把 task 已经终态但 run 仍处于 running/reviewing/recovering 的孤儿 run 收敛到最终状态。
 - `health()` 现在包含 active run、queued role 和 open task graph 指标。
 
+## 第三轮核心完善
+
+这一轮把核心从“抗故障”补到“可控、可诊断、可维护”：
+
+1. task/run 支持 `cancelled` 状态，并提供取消 API。
+2. worker 输出统一为 `TaskResult` 结构化 JSON，主 agent/reviewer 使用 summary 视图。
+3. 主 agent 常规流程通过 `TaskGraph` 创建 planner/role DAG，reviewer 也归入同一 graph。
+4. task metadata 支持 `timeoutMs`、`maxResultChars` 和 `maxMemoryCandidates`，worker 会超时失败并限制结果/候选记忆数量。
+5. diagnostics 检查 runtime invariant，并发出 `runtime.anomaly` 事件。
+6. planner 仍是路由入口，但 role graph 已统一，为后续结构化 plan 输出留好接口。
+7. experience 召回进入主 agent 前会用 `applicability/contraindications` 做二次过滤。
+8. maintenance 增加 WAL checkpoint、optimize、vacuum、event retention 和 memory candidate retention。
+9. Web API 增加 diagnostics、cancel-task、cancel-run 控制入口。
+10. 增加 core hardening / chaos 类测试，覆盖取消、worker 超时、graph metadata、diagnostics 和 maintenance。
+
 Web API：
 
 ```bash
@@ -121,10 +139,15 @@ curl 'http://127.0.0.1:3000/health'
 curl 'http://127.0.0.1:3000/timeline?runId=...'
 curl 'http://127.0.0.1:3000/timeline?runId=...&format=text'
 curl 'http://127.0.0.1:3000/task-trace?taskId=...'
+curl 'http://127.0.0.1:3000/diagnostics?repair=true'
 
 curl -X POST http://127.0.0.1:3000/maintenance \
   -H 'content-type: application/json' \
-  -d '{"day":"2026-05-03","staleRunMs":300000}'
+  -d '{"day":"2026-05-03","staleRunMs":300000,"maxEvents":10000}'
+
+curl -X POST http://127.0.0.1:3000/cancel-run \
+  -H 'content-type: application/json' \
+  -d '{"runId":"...","reason":"用户取消"}'
 ```
 
 ## 经验记忆
@@ -209,6 +232,7 @@ curl http://127.0.0.1:3000/events
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务并写回记忆。
 - `src/tasks/TaskStore.ts`: SQLite task、agent、event、role queue、状态机、lease、retry/dead-letter。
 - `src/tasks/TaskGraph.ts`: 将 task graph spec 落成 tasks + dependencies。
+- `src/tasks/TaskResult.ts`: 结构化 task result 序列化、解析和 summary 提取。
 - `src/tasks/errors.ts`: 状态机错误类型。
 - `src/events/RuntimeEventFactory.ts`: 统一生成 runtime event payload。
 - `src/recovery/RecoveryPolicy.ts`: worker exit / 异常恢复决策。
@@ -240,7 +264,7 @@ SQLite 是事实来源，IPC 只负责实时通知：
 3. `TaskStore.enqueueTask()` 把可运行 task 写入 `role_queues`。
 4. `RoleAgentManager` 每个角色最多启动一个 worker。
 5. worker 领取任务后标记 `running`，写入 lease 并定期 heartbeat。
-6. worker 完成后标记 `done` / `failed` / `dead_letter`，再通过 IPC 发 `task.finished`。
+6. worker 完成后写入结构化 `TaskResult`，标记 `done` / `failed` / `cancelled` / `dead_letter`，再通过 IPC 发 `task.finished`。
 7. main agent 收到通知后回 SQLite 查询最终状态，不信任 IPC payload。
 8. worker 异常退出或 lease 过期时，manager 先走 `RecoveryPolicy`；能确认已有结果则 finish，可重试则 retry，超过上限则 dead-letter，否则转为 `needs_inspection` 并派发 `inspector`。
 
@@ -257,9 +281,11 @@ npm run check
 - worker 崩溃后 inspector 自动检查并落最终状态。
 - runtime 重启后继续 drain 已持久化 queued task，包括动态角色。
 - Task 状态机、非法跳转、retry 和 dead-letter。
+- task/run 取消、worker 超时、结构化 TaskResult。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。
+- diagnostics invariant 和 database retention maintenance。
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
 - 经验相似匹配、applicability/contraindications、feedback/reuse 和 schema migration 记录。
 

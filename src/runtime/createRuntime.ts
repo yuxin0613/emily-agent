@@ -95,19 +95,34 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
     getTaskTrace(taskId: string) {
       return taskStore.getTaskTrace(taskId);
     },
+    diagnostics(options: { repair?: boolean } = {}) {
+      return taskStore.diagnostics(options);
+    },
+    async cancelTask(taskId: string, reason?: string) {
+      return roleAgentManager.cancelTask(taskId, reason);
+    },
+    async cancelRun(runId: string, reason?: string) {
+      await roleAgentManager.cancelRun(runId, reason);
+      return taskStore.getRun(runId);
+    },
     renderTimeline(runId: string) {
       return renderTimeline(taskStore.getTimeline({ runId }));
     },
     health,
-    async maintenance(options: { day?: Date; staleRunMs?: number } = {}) {
+    async maintenance(options: { day?: Date; staleRunMs?: number; maxEvents?: number; pruneMemoryCandidateDays?: number } = {}) {
       const reconcile = await roleAgentManager.reconcile();
       const taskGraphs = taskStore.refreshTaskGraphStatuses();
       const staleRuns = taskStore.recoverStaleRuns({
         olderThanMs: options.staleRunMs ?? 5 * 60 * 1000,
       });
+      const anomalies = taskStore.diagnostics({ repair: true });
       const memoryCandidates = await approvePendingMemoryCandidates();
       const experiences = experienceBuilder.buildDailyExperiences({
         day: options.day || new Date(),
+      });
+      const database = taskStore.maintenance({
+        maxEvents: options.maxEvents,
+        pruneDecidedMemoryCandidatesOlderThanDays: options.pruneMemoryCandidateDays,
       });
       return {
         reconcile: {
@@ -121,8 +136,13 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
         staleRuns: {
           recovered: staleRuns.length,
         },
+        diagnostics: {
+          anomalies: anomalies.length,
+          repaired: anomalies.filter((anomaly) => anomaly.repaired).length,
+        },
         memoryCandidates,
         experiences,
+        database,
         health: health(),
       };
     },

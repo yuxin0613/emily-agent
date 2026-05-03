@@ -79,7 +79,40 @@ export class RoleAgentManager extends EventEmitter {
   async runTask(task: Task, { timeoutMs = 60000 }: { timeoutMs?: number } = {}): Promise<Task> {
     const finished = this.waitForTask(task.id, { timeoutMs });
     await this.enqueue(task);
-    return finished;
+    try {
+      return await finished;
+    } catch (error) {
+      await this.cancelTask(task.id, `main agent timed out after ${timeoutMs}ms`);
+      throw error;
+    }
+  }
+
+  async cancelTask(taskId: string, reason = "cancelled by user"): Promise<Task | null> {
+    const task = this.taskStore.getTask(taskId);
+    if (!task) return null;
+    for (const roleState of this.roles.values()) {
+      if (roleState.activeTaskId !== taskId) continue;
+      roleState.activeTaskId = null;
+      if (roleState.child && !roleState.child.killed) {
+        roleState.child.send?.({ type: "task.cancel", taskId, reason });
+        roleState.child.disconnect();
+        roleState.child.kill();
+      }
+    }
+    const eventId = this.taskStore.cancelTask(taskId, { reason });
+    await this.taskStore.writeTaskMarkdown(taskId);
+    this.emitTaskEvent("task.finished", taskId, eventId);
+    this.drainAllRoles();
+    return this.taskStore.getTask(taskId);
+  }
+
+  async cancelRun(runId: string, reason = "cancelled by user"): Promise<void> {
+    for (const task of this.taskStore.getTasksForRun(runId)) {
+      if (!this.taskStore.isTerminalStatus(task.status)) {
+        await this.cancelTask(task.id, reason);
+      }
+    }
+    this.taskStore.cancelRun(runId, reason);
   }
 
   waitForTask(taskId: string, { timeoutMs }: { timeoutMs: number }): Promise<Task> {
@@ -303,7 +336,7 @@ export class RoleAgentManager extends EventEmitter {
       await this.taskStore.writeTaskMarkdown(payload.taskId);
       this.emitTaskEvent("task.finished", payload.taskId, payload.eventId ?? null);
       if (task?.status && this.taskStore.isTerminalStatus(task.status)) {
-        this.taskStore.completeQueueItem(payload.taskId, task.status === "done" ? "done" : "failed");
+        this.taskStore.completeQueueItem(payload.taskId, task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : "failed");
       }
       this.drainAllRoles();
     }

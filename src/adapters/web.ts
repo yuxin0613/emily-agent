@@ -15,10 +15,13 @@ export async function startWebServer({
     };
     getTimeline: (options: { runId: string }) => unknown;
     getTaskTrace: (taskId: string) => unknown;
+    diagnostics: (options?: { repair?: boolean }) => unknown;
+    cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
+    cancelRun: (runId: string, reason?: string) => Promise<unknown>;
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
-    maintenance: (options?: { day?: Date; staleRunMs?: number }) => Promise<unknown>;
+    maintenance: (options?: { day?: Date; staleRunMs?: number; maxEvents?: number; pruneMemoryCandidateDays?: number }) => Promise<unknown>;
     roleAgentManager: NodeJS.EventEmitter;
   };
   port: number;
@@ -60,6 +63,12 @@ export async function startWebServer({
         return sendJson(response, 200, runtime.getTaskTrace(String(url.searchParams.get("taskId") || "")));
       }
 
+      if (request.method === "GET" && url.pathname === "/diagnostics") {
+        return sendJson(response, 200, runtime.diagnostics({
+          repair: url.searchParams.get("repair") === "true",
+        }));
+      }
+
       if (request.method === "POST" && url.pathname === "/experiences/build-daily") {
         const body = await readJson(request);
         const result = runtime.buildDailyExperiences({
@@ -73,6 +82,8 @@ export async function startWebServer({
         const result = await runtime.maintenance({
           day: typeof body.day === "string" ? new Date(body.day) : new Date(),
           staleRunMs: typeof body.staleRunMs === "number" ? body.staleRunMs : undefined,
+          maxEvents: typeof body.maxEvents === "number" ? body.maxEvents : undefined,
+          pruneMemoryCandidateDays: typeof body.pruneMemoryCandidateDays === "number" ? body.pruneMemoryCandidateDays : undefined,
         });
         return sendJson(response, 200, result);
       }
@@ -87,6 +98,16 @@ export async function startWebServer({
         return sendJson(response, 200, result);
       }
 
+      if (request.method === "POST" && url.pathname === "/cancel-task") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.cancelTask(String(body.taskId || ""), String(body.reason || "cancelled by user")));
+      }
+
+      if (request.method === "POST" && url.pathname === "/cancel-run") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.cancelRun(String(body.runId || ""), String(body.reason || "cancelled by user")));
+      }
+
       if (request.method === "POST" && url.pathname === "/chat") {
         const body = await readJson(request);
         const result = await runtime.handleUserMessage(String(body.message || ""), {
@@ -98,7 +119,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /health", "GET /events", "GET /experiences", "GET /timeline", "GET /task-trace", "POST /maintenance", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /health", "GET /events", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {

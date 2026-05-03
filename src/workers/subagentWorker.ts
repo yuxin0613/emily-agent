@@ -3,8 +3,9 @@ import { EchoModelProvider } from "../llm/EchoModelProvider.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
+import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
 import { ToolGateway } from "../tools/ToolGateway.ts";
-import type { Task } from "../types.ts";
+import type { Task, TaskResult } from "../types.ts";
 
 interface StartMessage {
   type: "task.start";
@@ -15,7 +16,13 @@ interface StartMessage {
   leaseMs?: number;
 }
 
+const cancelledTasks = new Map<string, string>();
+
 process.on("message", (message: unknown) => {
+  if (isCancelMessage(message)) {
+    cancelledTasks.set(message.taskId, message.reason || "cancelled by main agent");
+    return;
+  }
   if (!isStartMessage(message)) return;
   runTask(message).catch((error: Error) => {
     process.stderr.write(`worker fatal error: ${error.stack || error.message}\n`);
@@ -44,25 +51,36 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: Star
     notify("task.changed", { taskId, eventId });
 
     const task = taskStore.getTaskOrThrow(taskId);
+    throwIfCancelled(taskId);
     if (task.metadata.forceCrash) {
       process.exit(70);
     }
-
     const result = role === "inspector"
-      ? await inspectTask({ task, taskStore })
-      : await runRoleTask({ role, task, memory, model, taskStore });
+      ? await withTimeout(inspectTask({ task, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId)
+      : await withTimeout(runRoleTask({ role, task, memory, model, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId);
+    throwIfCancelled(taskId);
 
     eventId = taskStore.finishTask(taskId, {
-      result,
+      result: serializeTaskResult(limitTaskResult(result, readNumber(task.metadata.maxResultChars, 12000))),
       agentId,
     });
   } catch (error) {
     const message = error instanceof Error ? error.stack || error.message : String(error);
-    eventId = taskStore.failTask(taskId, {
-      error: message,
-      result: `任务执行失败：${error instanceof Error ? error.message : String(error)}`,
-      agentId,
-    });
+    if (error instanceof TaskCancelledError) {
+      eventId = taskStore.cancelTask(taskId, {
+        reason: error.message,
+        agentId,
+      });
+    } else {
+      eventId = taskStore.failTask(taskId, {
+        error: message,
+        result: serializeTaskResult(createTaskResult({
+          status: "failed",
+          summary: `任务执行失败：${error instanceof Error ? error.message : String(error)}`,
+        })),
+        agentId,
+      });
+    }
   } finally {
     clearInterval(heartbeat);
 
@@ -94,10 +112,13 @@ async function runRoleTask({
   memory: MemorySystem;
   model: EchoModelProvider;
   taskStore: TaskStore;
-}): Promise<string> {
+}): Promise<TaskResult> {
   const definition = await readRoleDefinition(role);
   const toolGateway = new ToolGateway(definition);
   toolGateway.assertAllowed("read_file");
+  if (typeof task.metadata.forceDelayMs === "number") {
+    await sleep(task.metadata.forceDelayMs);
+  }
 
   const relevantMemory = await memory.recall(task.input, {
     scope: String(task.metadata.sessionId || "default"),
@@ -124,31 +145,53 @@ async function runRoleTask({
     sessionId: String(task.metadata.sessionId || "default"),
     relevantMemory,
   });
-  taskStore.createMemoryCandidate({
-    runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
-    taskId: task.id,
-    scope: String(task.metadata.sessionId || "default"),
-    kind: "subagent:result",
-    content: response.content,
-    createdBy: role,
-  });
+  throwIfCancelled(task.id);
 
-  return response.content;
+  const memoryContent = response.content;
+  if (readNonNegativeNumber(task.metadata.maxMemoryCandidates, 1) > 0) {
+    taskStore.createMemoryCandidate({
+      runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
+      taskId: task.id,
+      scope: String(task.metadata.sessionId || "default"),
+      kind: "subagent:result",
+      content: memoryContent,
+      createdBy: role,
+    });
+  }
+
+  return createTaskResult({
+    status: "success",
+    summary: response.content,
+    memoryCandidates: [{
+      scope: String(task.metadata.sessionId || "default"),
+      kind: "subagent:result",
+      content: memoryContent,
+    }],
+  });
 }
 
-async function inspectTask({ task, taskStore }: { task: Task; taskStore: TaskStore }): Promise<string> {
+async function inspectTask({ task, taskStore }: { task: Task; taskStore: TaskStore }): Promise<TaskResult> {
   const definition = await readRoleDefinition("inspector");
   const toolGateway = new ToolGateway(definition);
   toolGateway.assertAllowed("inspect_task");
+  if (typeof task.metadata.forceDelayMs === "number") {
+    await sleep(task.metadata.forceDelayMs);
+  }
 
   const targetTaskId = String(task.metadata.targetTaskId || "");
   const targetTask = taskStore.getTask(targetTaskId);
   if (!targetTask) {
-    return `未找到需要检查的任务：${targetTaskId}`;
+    return createTaskResult({
+      status: "failed",
+      summary: `未找到需要检查的任务：${targetTaskId}`,
+    });
   }
 
   if (targetTask.status === "done" && targetTask.result) {
-    return `检查完成：目标任务 ${targetTask.id} 已有可用结果。`;
+    return createTaskResult({
+      status: "success",
+      summary: `检查完成：目标任务 ${targetTask.id} 已有可用结果。`,
+    });
   }
 
   const result = [
@@ -173,7 +216,11 @@ async function inspectTask({ task, taskStore }: { task: Task; taskStore: TaskSto
     eventId: targetEventId,
   });
 
-  return result;
+  return createTaskResult({
+    status: "failed",
+    summary: result,
+    nextActions: ["主 agent 重新派发该任务或向用户说明失败原因。"],
+  });
 }
 
 function notify(type: string, payload: { taskId: string; eventId: number | null }): void {
@@ -190,4 +237,57 @@ function isStartMessage(message: unknown): message is StartMessage {
       && (message as StartMessage).type === "task.start"
       && typeof (message as StartMessage).taskId === "string",
   );
+}
+
+function isCancelMessage(message: unknown): message is { type: "task.cancel"; taskId: string; reason?: string } {
+  return Boolean(
+    message
+      && typeof message === "object"
+      && (message as { type?: string }).type === "task.cancel"
+      && typeof (message as { taskId?: unknown }).taskId === "string",
+  );
+}
+
+function throwIfCancelled(taskId: string): void {
+  const reason = cancelledTasks.get(taskId);
+  if (reason) throw new TaskCancelledError(reason);
+}
+
+async function withTimeout<T>(work: Promise<T>, timeoutMs: number, taskId: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          cancelledTasks.set(taskId, `Task ${taskId} timed out after ${timeoutMs}ms`);
+          reject(new Error(`Task ${taskId} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function readNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function readNonNegativeNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function limitTaskResult(result: TaskResult, maxChars: number): TaskResult {
+  if (result.summary.length <= maxChars) return result;
+  return {
+    ...result,
+    summary: `${result.summary.slice(0, Math.max(0, maxChars - 3))}...`,
+  };
+}
+
+class TaskCancelledError extends Error {}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

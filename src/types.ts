@@ -6,6 +6,7 @@ export type TaskStatus =
   | "needs_inspection"
   | "done"
   | "failed"
+  | "cancelled"
   | "dead_letter";
 
 export type AgentStatus = "idle" | "running" | "exited" | "stale";
@@ -52,12 +53,23 @@ export interface Task {
   updatedAt: string;
 }
 
+export type RunStatus =
+  | "running"
+  | "reviewing"
+  | "recovering"
+  | "partially_done"
+  | "waiting_user"
+  | "done"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
 export interface Run {
   id: string;
   sessionId: string;
   source: string;
   userInput: string;
-  status: "running" | "reviewing" | "recovering" | "partially_done" | "waiting_user" | "done" | "failed" | "blocked";
+  status: RunStatus;
   startedAt: string;
   completedAt: string | null;
 }
@@ -86,6 +98,35 @@ export interface TaskEvent {
   createdAt: string;
 }
 
+export interface TaskResult {
+  status: "success" | "failed" | "needs_user_input" | "cancelled";
+  summary: string;
+  artifacts: Array<{
+    type: string;
+    uri?: string;
+    title?: string;
+    metadata?: Metadata;
+  }>;
+  memoryCandidates: Array<{
+    scope?: string;
+    kind?: string;
+    content: string;
+    metadata?: Metadata;
+  }>;
+  nextActions: string[];
+}
+
+export interface RuntimeAnomaly {
+  id: string;
+  severity: "info" | "warning" | "critical";
+  code: string;
+  message: string;
+  taskId?: string;
+  runId?: string;
+  graphId?: string;
+  repaired: boolean;
+}
+
 export type RuntimeEventType =
   | "run.started"
   | "run.status"
@@ -99,6 +140,8 @@ export type RuntimeEventType =
   | "task.heartbeat_ignored"
   | "task.done"
   | "task.failed"
+  | "task.cancelled"
+  | "task.cancel_ignored"
   | "task.dead_letter"
   | "task.acknowledged"
   | "task_graph.created"
@@ -107,6 +150,8 @@ export type RuntimeEventType =
   | "memory.candidate.created"
   | "memory.candidate.approved"
   | "memory.candidate.rejected"
+  | "runtime.anomaly"
+  | "runtime.maintenance"
   | "experience.updated";
 
 export interface Timeline {

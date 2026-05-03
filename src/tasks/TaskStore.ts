@@ -2,21 +2,22 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentStatus, MemoryCandidate, Metadata, Run, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
+import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "./errors.ts";
 import { RuntimeEventFactory } from "../events/RuntimeEventFactory.ts";
 
-const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "dead_letter"]);
+const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "cancelled", "dead_letter"]);
 
 const ALLOWED_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
-  pending: ["queued", "running", "blocked", "dead_letter"],
-  queued: ["running", "pending", "dead_letter"],
-  running: ["done", "failed", "blocked", "needs_inspection", "dead_letter"],
-  blocked: ["pending", "queued", "dead_letter"],
-  needs_inspection: ["queued", "running", "done", "failed", "dead_letter"],
+  pending: ["queued", "running", "blocked", "cancelled", "dead_letter"],
+  queued: ["running", "pending", "cancelled", "dead_letter"],
+  running: ["done", "failed", "blocked", "needs_inspection", "cancelled", "dead_letter"],
+  blocked: ["pending", "queued", "cancelled", "dead_letter"],
+  needs_inspection: ["queued", "running", "done", "failed", "cancelled", "dead_letter"],
   done: [],
   failed: ["queued", "dead_letter"],
+  cancelled: [],
   dead_letter: [],
 };
 
@@ -307,7 +308,7 @@ export class TaskStore {
 
   updateRunStatus(runId: string, status: Run["status"]): number {
     this.db
-      .prepare("UPDATE runs SET status = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'partially_done', 'waiting_user') THEN ? ELSE completed_at END WHERE id = ?")
+      .prepare("UPDATE runs SET status = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'partially_done', 'waiting_user', 'cancelled') THEN ? ELSE completed_at END WHERE id = ?")
       .run(status, status, new Date().toISOString(), runId);
     return this.addEvent({
       type: "run.status",
@@ -344,6 +345,15 @@ export class TaskStore {
       if (refreshed) recovered.push(refreshed);
     }
     return recovered;
+  }
+
+  cancelRun(runId: string, reason = "cancelled by user"): number {
+    for (const task of this.getTasksForRun(runId)) {
+      if (!this.isTerminalStatus(task.status)) {
+        this.cancelTask(task.id, { reason });
+      }
+    }
+    return this.completeRun(runId, "cancelled");
   }
 
   addTaskDependency(taskId: string, dependsOnTaskId: string, dependencyType: TaskDependency["dependencyType"] = "success"): void {
@@ -520,7 +530,7 @@ export class TaskStore {
     return null;
   }
 
-  completeQueueItem(taskId: string, status: "done" | "failed" | "dead_letter" = "done"): void {
+  completeQueueItem(taskId: string, status: "done" | "failed" | "cancelled" | "dead_letter" = "done"): void {
     this.db
       .prepare("UPDATE role_queues SET status = ?, updated_at = ? WHERE task_id = ?")
       .run(status, new Date().toISOString(), taskId);
@@ -675,6 +685,29 @@ export class TaskStore {
     });
     this.releaseReadyDependents(taskId);
     return eventId;
+  }
+
+  cancelTask(taskId: string, { reason = "cancelled", agentId = null }: { reason?: string; agentId?: string | null } = {}): number {
+    const task = this.getTaskOrThrow(taskId);
+    if (this.isTerminalStatus(task.status)) {
+      return this.addEvent({
+        type: "task.cancel_ignored",
+        taskId,
+        agentId,
+        payload: { status: task.status, reason },
+      });
+    }
+    this.completeQueueItem(taskId, "cancelled");
+    return this.transitionTask(taskId, "cancelled", {
+      agentId,
+      error: reason,
+      reason,
+      metadata: {
+        ...task.metadata,
+        cancelledAt: new Date().toISOString(),
+        cancelReason: reason,
+      },
+    });
   }
 
   releaseReadyDependents(taskId: string): string[] {
@@ -907,7 +940,7 @@ export class TaskStore {
   getUnacknowledgedTerminalTasks(): Task[] {
     const rows = this.db
       .prepare(
-        "SELECT * FROM tasks WHERE status IN ('done', 'failed', 'blocked', 'dead_letter') AND main_ack_at IS NULL",
+        "SELECT * FROM tasks WHERE status IN ('done', 'failed', 'blocked', 'cancelled', 'dead_letter') AND main_ack_at IS NULL",
       )
       .all() as TaskRow[];
     return rows.map(parseTask);
@@ -932,7 +965,7 @@ export class TaskStore {
     const rows = this.db
       .prepare(`
         SELECT * FROM tasks
-        WHERE status IN ('done', 'failed', 'dead_letter')
+        WHERE status IN ('done', 'failed', 'cancelled', 'dead_letter')
           AND updated_at >= ?
           AND updated_at < ?
         ORDER BY updated_at DESC
@@ -990,6 +1023,157 @@ export class TaskStore {
     return rows.map(parseTask);
   }
 
+  diagnostics({ repair = false, emit = true }: { repair?: boolean; emit?: boolean } = {}): RuntimeAnomaly[] {
+    const anomalies: RuntimeAnomaly[] = [];
+    const add = (input: Omit<RuntimeAnomaly, "id" | "repaired"> & { repaired?: boolean }) => {
+      const anomaly: RuntimeAnomaly = {
+        id: randomUUID(),
+        repaired: Boolean(input.repaired),
+        ...input,
+      };
+      anomalies.push(anomaly);
+      if (emit) {
+        this.addEvent({
+          type: "runtime.anomaly",
+          taskId: anomaly.taskId || null,
+          payload: {
+            anomalyId: anomaly.id,
+            severity: anomaly.severity,
+            code: anomaly.code,
+            message: anomaly.message,
+            runId: anomaly.runId || "",
+            graphId: anomaly.graphId || "",
+            repaired: anomaly.repaired,
+          },
+        });
+      }
+    };
+
+    const queuedWithoutQueue = this.db
+      .prepare(`
+        SELECT t.* FROM tasks t
+        LEFT JOIN role_queues q ON q.task_id = t.id AND q.status = 'queued'
+        WHERE t.status = 'queued' AND q.task_id IS NULL
+      `)
+      .all() as TaskRow[];
+    for (const row of queuedWithoutQueue) {
+      const task = parseTask(row);
+      if (repair) this.enqueueTask(task.id);
+      add({
+        severity: "warning",
+        code: "queued_task_missing_queue_item",
+        message: `Queued task ${task.id} has no queued role_queues row.`,
+        taskId: task.id,
+        repaired: repair,
+      });
+    }
+
+    const runningWithoutLease = this.db
+      .prepare("SELECT * FROM tasks WHERE status = 'running' AND (lease_expires_at IS NULL OR lease_owner IS NULL)")
+      .all() as TaskRow[];
+    for (const row of runningWithoutLease) {
+      const task = parseTask(row);
+      add({
+        severity: "critical",
+        code: "running_task_missing_lease",
+        message: `Running task ${task.id} is missing lease metadata.`,
+        taskId: task.id,
+      });
+    }
+
+    const terminalRunningQueue = this.db
+      .prepare(`
+        SELECT t.* FROM tasks t
+        JOIN role_queues q ON q.task_id = t.id
+        WHERE t.status IN ('done', 'failed', 'blocked', 'cancelled', 'dead_letter')
+          AND q.status = 'running'
+      `)
+      .all() as TaskRow[];
+    for (const row of terminalRunningQueue) {
+      const task = parseTask(row);
+      if (repair) this.completeQueueItem(task.id, queueStatusForTask(task));
+      add({
+        severity: "warning",
+        code: "terminal_task_running_queue_item",
+        message: `Terminal task ${task.id} still has a running queue item.`,
+        taskId: task.id,
+        repaired: repair,
+      });
+    }
+
+    for (const graph of this.getOpenTaskGraphs()) {
+      const expected = graphStatusFromTasks(this.getTasksForGraph(graph.id));
+      if (expected !== graph.status) {
+        if (repair) this.refreshTaskGraphStatuses();
+        add({
+          severity: "info",
+          code: "task_graph_status_drift",
+          message: `Task graph ${graph.id} status is ${graph.status}, expected ${expected}.`,
+          graphId: graph.id,
+          repaired: repair,
+        });
+      }
+    }
+
+    for (const run of this.getActiveRuns({ olderThanMs: 0 })) {
+      const expected = recoverableRunStatusFromTasks(this.getTasksForRun(run.id));
+      if (expected) {
+        if (repair) this.completeRun(run.id, expected);
+        add({
+          severity: "warning",
+          code: "recoverable_active_run",
+          message: `Run ${run.id} is active but all tasks imply ${expected}.`,
+          runId: run.id,
+          repaired: repair,
+        });
+      }
+    }
+
+    return anomalies;
+  }
+
+  maintenance({
+    maxEvents = 10000,
+    pruneDecidedMemoryCandidatesOlderThanDays = 30,
+  }: {
+    maxEvents?: number;
+    pruneDecidedMemoryCandidatesOlderThanDays?: number;
+  } = {}): { checkpoint: unknown; analysis: unknown; vacuum: unknown; prunedEvents: number; prunedMemoryCandidates: number } {
+    const prunedEvents = this.pruneEvents({ maxEvents });
+    const prunedMemoryCandidates = this.pruneDecidedMemoryCandidates({
+      olderThanDays: pruneDecidedMemoryCandidatesOlderThanDays,
+    });
+    const checkpoint = safeDbOperation(() => this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").all());
+    const analysis = safeDbOperation(() => {
+      this.db.exec("PRAGMA optimize");
+      return this.db.prepare("PRAGMA analysis_limit = 400").get();
+    });
+    const vacuum = safeDbOperation(() => {
+      this.db.exec("VACUUM");
+      return { ok: true };
+    });
+    this.addEvent({
+      type: "runtime.maintenance",
+      payload: { checkpointed: true, optimized: true, vacuumed: true, prunedEvents, prunedMemoryCandidates },
+    });
+    return { checkpoint, analysis, vacuum, prunedEvents, prunedMemoryCandidates };
+  }
+
+  pruneEvents({ maxEvents = 10000 }: { maxEvents?: number } = {}): number {
+    const row = this.db.prepare("SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?").get(maxEvents) as { id: number } | undefined;
+    if (!row) return 0;
+    const result = this.db.prepare("DELETE FROM events WHERE id < ?").run(row.id);
+    return Number(result.changes);
+  }
+
+  pruneDecidedMemoryCandidates({ olderThanDays = 30 }: { olderThanDays?: number } = {}): number {
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+    const result = this.db
+      .prepare("DELETE FROM memory_candidates WHERE status IN ('approved', 'rejected') AND decided_at IS NOT NULL AND decided_at < ?")
+      .run(cutoff);
+    return Number(result.changes);
+  }
+
   health(): {
     pendingTasks: number;
     runningTasks: number;
@@ -999,6 +1183,7 @@ export class TaskStore {
     pendingMemoryCandidates: number;
     queuedRoles: string[];
     openTaskGraphs: number;
+    diagnostics: number;
   } {
     return {
       pendingTasks: count(this.db, "SELECT COUNT(*) AS count FROM tasks WHERE status IN ('pending', 'queued')"),
@@ -1009,6 +1194,7 @@ export class TaskStore {
       pendingMemoryCandidates: count(this.db, "SELECT COUNT(*) AS count FROM memory_candidates WHERE status = 'pending'"),
       queuedRoles: this.getQueuedRoles(),
       openTaskGraphs: count(this.db, "SELECT COUNT(*) AS count FROM task_graphs WHERE status IN ('pending', 'running')"),
+      diagnostics: this.diagnostics({ repair: false, emit: false }).length,
     };
   }
 
@@ -1215,15 +1401,16 @@ function parseMemoryCandidate(row: MemoryCandidateRow): MemoryCandidate {
   };
 }
 
-function queueStatusForTask(task: Task): "done" | "failed" | "dead_letter" {
+function queueStatusForTask(task: Task): "done" | "failed" | "cancelled" | "dead_letter" {
   if (task.status === "done") return "done";
+  if (task.status === "cancelled") return "cancelled";
   if (task.status === "dead_letter") return "dead_letter";
   return "failed";
 }
 
 function graphStatusFromTasks(tasks: Task[]): TaskGraph["status"] {
   if (!tasks.length) return "pending";
-  if (tasks.some((task) => task.status === "failed" || task.status === "dead_letter" || task.status === "blocked")) {
+  if (tasks.some((task) => task.status === "failed" || task.status === "dead_letter" || task.status === "blocked" || task.status === "cancelled")) {
     return "failed";
   }
   if (tasks.every((task) => task.status === "done")) return "done";
@@ -1239,6 +1426,7 @@ function recoverableRunStatusFromTasks(tasks: Task[]): Run["status"] | null {
     return null;
   }
   if (tasks.every((task) => task.status === "done")) return "done";
+  if (tasks.some((task) => task.status === "cancelled")) return "cancelled";
   if (tasks.some((task) => task.status === "blocked")) return "blocked";
   if (tasks.some((task) => task.status === "done")) return "partially_done";
   return "failed";
@@ -1247,4 +1435,15 @@ function recoverableRunStatusFromTasks(tasks: Task[]): Run["status"] | null {
 function count(db: DatabaseSync, sql: string): number {
   const row = db.prepare(sql).get() as { count: number };
   return row.count;
+}
+
+function safeDbOperation<T>(operation: () => T): T | { ok: false; error: string } {
+  try {
+    return operation();
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
