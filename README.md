@@ -105,12 +105,12 @@ flowchart LR
 - `cancelTask()` / `cancelRun()` 支持主动取消任务或整次 run，运行中的 worker 会收到 cancel 消息并被终止。
 - `PermissionMode`: task/run 可携带 `read_only`、`workspace_write` 或 `danger_full_access`，最终工具权限始终是 `role.allowed_tools ∩ permissionMode - role.forbidden_tools`。
 - `ProviderRegistry` 支持多 provider，main agent 和每个 subagent role 都可以绑定不同 provider/model。
-- `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`http_fetch`、`browser`、`github`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
-- `SkillRegistry`: 内置并可从 `skills/<skill>/skill.md` 加载技能 prompt，task 的 `skillHints` 和 role 的 `skills` 会合并后注入 subagent prompt。
+- `ToolRegistry` / `ToolGateway`: 内置 `read_file`、`write_file`、`run_tests`、`web_search`、`http_fetch`、`browser`、`github`、`shell`、`network`、`create_task`、`inspect_task`、`git_reset`、`delete_file` 的声明式定义和硬权限过滤。
+- `SkillRegistry`: 内置 planning、coding、research、web-search、github、review、recovery、memory-curation，也可从 `skills/<skill>/skill.md` 加载技能 prompt；task 的 `skillHints` 和 role 的 `skills` 会合并后注入 subagent prompt。
 - `SkillCandidateStore` / `SkillBuilder`: 从重复成功 workflow 中生成 `proposed` skill candidate；默认不会自动启用，审批后才写入 skill 文件，已有相似 skill 优先走 update。
 - `resumeLatestSession()` / `exportSession()` / `previewSessionCompaction()` / `sessionUsage()`: 基于现有 session/run/message/usage 数据提供 session 运维能力，不改变 `/new`、`/clear`、trash/restore 生命周期。
 - `CommandRegistry`: 统一注册 doctor、session 运维、provider/role/skill/session 写命令、tool execution 和主要查询命令，供 TUI/Web/Gateway 复用；adapter 只负责 IO 和渲染，不替换 runtime 执行路径。
-- `ToolExecutor`: 在 `ToolRegistry` / `ToolGateway` 权限过滤之后执行真实工具，当前内置 workspace 文件读写、受限测试执行、task inspection、create_task、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作；approval-sensitive 工具必须带精确 approval template，结果会写入 `tool.execution.*` 事件。
+- `ToolExecutor`: 在 `ToolRegistry` / `ToolGateway` 权限过滤之后执行真实工具，当前内置 workspace 文件读写、受限测试执行、task inspection、create_task、web search、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作；approval-sensitive 工具必须带精确 approval template，结果会写入 `tool.execution.*` 事件。
 - `tool.hints.resolved` / `skill.hints.resolved`: 每个 worker 会记录工具/技能解析结果；未知或被拒绝的 hints 会额外记录 `runtime.anomaly`。
 
 ## 第二轮核心优化
@@ -268,12 +268,13 @@ Tools 和 skills 是两层不同的能力描述：
   - `run_tests`: 只允许 `npm test`、`npm run check/test` 或 `node test/*.test.ts`，不走 shell。
   - `inspect_task`: 返回 task trace。
   - `create_task`: 创建 follow-up task。
+  - `web_search`: 受限 Web 搜索，默认支持 `duckduckgo`，也可通过 `EMILY_WEB_SEARCH_ENDPOINT` 接外部 provider，或用 `provider: "ollama"` 调 Ollama experimental web search；需要 `network_read` approval，结果标记为 untrusted external content。
   - `http_fetch`: 受限 HTTP/HTTPS fetch，限制方法、header 和响应大小；GET/HEAD 需要 `network_read` approval，POST 需要 `network_write` approval。
   - `browser`: 轻量浏览器式交互，支持 `snapshot`、`links`、`forms`、`text`、`assert_text`、`follow_link` 和最多 10 步 `sequence`，需要 `browser_interaction` approval。
   - `github`: 支持结构化 `pr.get`、`pr.list`、`issue.get`、`issue.list`、`pr.comment`、`issue.comment`，也保留受限 `gh` allowlist；读动作需要 `github_read` approval，写动作需要 `github_write` approval。
   - `delete_file` / `git_reset` / `shell` / `network` 仍是高风险或宽泛能力；`delete_file` 需要 role 显式允许且带 approval，`git_reset` / `shell` / `network` 内置 executor 继续拒绝。
 - task metadata 可带 `toolRequests: [{ tool, args, approval }]`，worker 会在模型调用前执行允许的工具，把结果注入 prompt，并记录 `tool.execution.started/completed/failed/approval_required`；`tool.execution.started` 会写入最终要求的 approval template，便于外部应用做确认 UI。
-- `SkillRegistry`: 内置常用技能，也会加载 `skills/<name>/skill.md`。skill 是可复用工作流 prompt，可以声明 `capabilities`、`aliases` 和需要的 `tool_hints`。
+- `SkillRegistry`: 内置常用技能，也会加载 `skills/<name>/skill.md`。skill 是可复用工作流 prompt，可以声明 `capabilities`、`aliases` 和需要的 `tool_hints`；其中 `web-search` 负责当前信息发现，`github` 负责 PR/issue/CI/仓库元数据工作流。
 - worker 执行前会合并 `agent.md` 的 `skills` 与 task metadata 的 `skillHints`，解析后注入 `Skill context`；工具解析结果注入 `Tool context`。
 - Skill 采用渐进披露：`SkillRegistry.resolveForTask()` 会先看 role/task hints，再根据 trigger/capability 自动少量命中；`renderSkillContext(..., { mode: "progressive" })` 只注入命中的 skill 元数据和流程，避免把所有技能 prompt 塞进上下文。
 - role 可以通过 `skill_allowlist` 收紧技能边界；未配置时保持兼容，允许 task hints 临时请求其它已注册 skill。
@@ -716,7 +717,7 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/tools/ToolRegistry.ts`: 工具声明注册表，包含别名、副作用、approval 和提示词说明。
 - `src/tools/ToolGateway.ts`: 工具权限校验入口，解析 tool hints 并过滤 role 不允许的工具。
 - `src/tools/PermissionMode.ts`: task/run 级额外权限护栏，和 role policy 求交集。
-- `src/tools/ToolExecutor.ts`: 真实工具执行器，当前支持 workspace 文件读写、受限测试执行、task inspection、create_task、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作，并写入审计事件。
+- `src/tools/ToolExecutor.ts`: 真实工具执行器，当前支持 workspace 文件读写、受限测试执行、task inspection、create_task、web search、HTTP fetch、轻量浏览器交互和 GitHub PR/issue 结构化动作，并写入审计事件。
 - `src/skills/SkillRegistry.ts`: 技能注册表，加载内置技能和 `skills/<skill>/skill.md`。
 - `src/skills/SkillCandidateStore.ts`: skill candidate SQLite 存储、审批、拒绝和 skill 文件写入。
 - `src/skills/SkillBuilder.ts`: 从重复 task workflow 生成 proposed skill candidate，优先更新已有 skill。

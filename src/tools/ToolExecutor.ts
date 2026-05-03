@@ -59,6 +59,13 @@ interface BrowserSnapshot {
   truncated: boolean;
 }
 
+interface WebSearchResult {
+  title: string;
+  url: string;
+  snippet: string;
+  siteName?: string;
+}
+
 export interface ToolExecutionResult {
   tool: ToolPermission;
   ok: boolean;
@@ -167,11 +174,12 @@ export class ToolExecutor {
     if (tool === "create_task") return this.createTask(args, request);
     if (tool === "delete_file") return this.deleteFile(args);
     if (tool === "http_fetch") return this.httpFetch(args);
+    if (tool === "web_search") return this.webSearch(args);
     if (tool === "browser") return this.browser(args);
     if (tool === "github") return this.github(args);
     if (tool === "git_reset") throw new Error("git_reset is declared but not executable without an external approval executor.");
     if (tool === "shell") throw new Error("shell is declared but not executable through the built-in executor.");
-    if (tool === "network") throw new Error("network is declared as a broad permission; use http_fetch, browser, or github instead.");
+    if (tool === "network") throw new Error("network is declared as a broad permission; use web_search, http_fetch, browser, or github instead.");
     throw new Error(`No executor registered for tool ${tool}.`);
   }
 
@@ -351,6 +359,119 @@ export class ToolExecutor {
       maxBytes: args.maxBytes || 384000,
     });
     return parseBrowserSnapshot(fetched.url, fetched.status, String(fetched.body || ""), fetched.truncated);
+  }
+
+  private async webSearch(args: Record<string, unknown>): Promise<{
+    query: string;
+    provider: string;
+    count: number;
+    tookMs: number;
+    externalContent: { untrusted: boolean; source: string; provider: string };
+    results: WebSearchResult[];
+    setupHint?: string;
+  }> {
+    const query = requiredString(args.query ?? args.q, "query").trim();
+    const count = boundedPositiveNumber(args.count ?? args.limit, 5, 1, 10);
+    const provider = parseWebSearchProvider(args.provider);
+    const startedAt = Date.now();
+    if (provider === "endpoint") return this.endpointWebSearch(args, query, count, startedAt);
+    if (provider === "ollama") return this.ollamaWebSearch(args, query, count, startedAt);
+    return this.duckDuckGoWebSearch(query, count, startedAt);
+  }
+
+  private async endpointWebSearch(args: Record<string, unknown>, query: string, count: number, startedAt: number): Promise<{
+    query: string;
+    provider: string;
+    count: number;
+    tookMs: number;
+    externalContent: { untrusted: boolean; source: string; provider: string };
+    results: WebSearchResult[];
+    setupHint?: string;
+  }> {
+    const endpoint = typeof args.endpoint === "string" && args.endpoint.trim()
+      ? args.endpoint.trim()
+      : String(process.env.EMILY_WEB_SEARCH_ENDPOINT || "").trim();
+    if (!endpoint) {
+      return webSearchResponse(query, "endpoint", [], startedAt, "Set EMILY_WEB_SEARCH_ENDPOINT or use provider=duckduckgo/ollama.");
+    }
+    const method = String(args.method || process.env.EMILY_WEB_SEARCH_METHOD || "GET").toUpperCase();
+    if (method !== "GET" && method !== "POST") throw new Error(`web_search endpoint supports GET or POST. Received: ${method}`);
+    const url = new URL(endpoint);
+    if (method === "GET") {
+      url.searchParams.set("query", query);
+      url.searchParams.set("q", query);
+      url.searchParams.set("count", String(count));
+      url.searchParams.set("limit", String(count));
+    }
+    await assertAllowedHttpEgress(url);
+    const response = await fetch(url.toString(), {
+      method,
+      headers: { "Content-Type": "application/json", "User-Agent": "Emily-AgentOS/0.1 web_search" },
+      body: method === "POST" ? JSON.stringify({ query, q: query, count, limit: count }) : undefined,
+      signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
+    });
+    if (!response.ok) {
+      const detail = await readResponseText(response, 64000);
+      throw new Error(`web_search endpoint failed (${response.status}): ${detail.text || ""}`.trim());
+    }
+    const payload = await response.json();
+    return webSearchResponse(query, "endpoint", normalizeWebSearchPayload(payload, count), startedAt);
+  }
+
+  private async ollamaWebSearch(args: Record<string, unknown>, query: string, count: number, startedAt: number): Promise<{
+    query: string;
+    provider: string;
+    count: number;
+    tookMs: number;
+    externalContent: { untrusted: boolean; source: string; provider: string };
+    results: WebSearchResult[];
+  }> {
+    const baseUrl = new URL(String(args.baseUrl || process.env.EMILY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"));
+    const endpoint = new URL("/api/experimental/web_search", baseUrl);
+    await assertAllowedHttpEgress(endpoint);
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "User-Agent": "Emily-AgentOS/0.1 web_search",
+    };
+    if (process.env.EMILY_OLLAMA_API_KEY) headers.Authorization = `Bearer ${process.env.EMILY_OLLAMA_API_KEY}`;
+    const response = await fetch(endpoint.toString(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query, max_results: count }),
+      signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
+    });
+    if (response.status === 401) throw new Error("Ollama web search authentication failed. Run ollama signin or configure EMILY_OLLAMA_API_KEY.");
+    if (response.status === 403) throw new Error("Ollama web search is unavailable on the configured host.");
+    if (!response.ok) {
+      const detail = await readResponseText(response, 64000);
+      throw new Error(`Ollama web search failed (${response.status}): ${detail.text || ""}`.trim());
+    }
+    const payload = await response.json();
+    return webSearchResponse(query, "ollama", normalizeWebSearchPayload(payload, count), startedAt);
+  }
+
+  private async duckDuckGoWebSearch(query: string, count: number, startedAt: number): Promise<{
+    query: string;
+    provider: string;
+    count: number;
+    tookMs: number;
+    externalContent: { untrusted: boolean; source: string; provider: string };
+    results: WebSearchResult[];
+  }> {
+    const url = new URL("https://duckduckgo.com/html/");
+    url.searchParams.set("q", query);
+    await assertAllowedHttpEgress(url);
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: { "User-Agent": "Emily-AgentOS/0.1 web_search" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      const detail = await readResponseText(response, 64000);
+      throw new Error(`DuckDuckGo web search failed (${response.status}): ${detail.text || ""}`.trim());
+    }
+    const body = await readResponseText(response, 512000);
+    return webSearchResponse(query, "duckduckgo", parseDuckDuckGoResults(body.text, url.toString(), count), startedAt);
   }
 
   private async github(args: Record<string, unknown>): Promise<{ action: string; command: string[]; stdout: string; stderr: string; parsed?: unknown }> {
@@ -623,6 +744,13 @@ function approvalRequirementFor(definition: ToolDefinition, args: Record<string,
       reason: `Tool ${definition.name} requires explicit network approval`,
     };
   }
+  if (definition.name === "web_search") {
+    return {
+      required: true,
+      template: "network_read",
+      reason: "Web search requires explicit network approval",
+    };
+  }
   if (definition.name === "browser") {
     return {
       required: true,
@@ -653,6 +781,162 @@ function approvalRequirementFor(definition: ToolDefinition, args: Record<string,
     };
   }
   return { required: false };
+}
+
+function parseWebSearchProvider(value: unknown): "endpoint" | "ollama" | "duckduckgo" {
+  const raw = String(value || process.env.EMILY_WEB_SEARCH_PROVIDER || (process.env.EMILY_WEB_SEARCH_ENDPOINT ? "endpoint" : "duckduckgo")).trim().toLowerCase();
+  if (raw === "endpoint" || raw === "custom") return "endpoint";
+  if (raw === "ollama") return "ollama";
+  if (raw === "duckduckgo" || raw === "ddg") return "duckduckgo";
+  throw new Error(`Unsupported web_search provider: ${raw}`);
+}
+
+function webSearchResponse(
+  query: string,
+  provider: string,
+  results: WebSearchResult[],
+  startedAt: number,
+  setupHint?: string,
+): {
+  query: string;
+  provider: string;
+  count: number;
+  tookMs: number;
+  externalContent: { untrusted: boolean; source: string; provider: string };
+  results: WebSearchResult[];
+  setupHint?: string;
+} {
+  return {
+    query,
+    provider,
+    count: results.length,
+    tookMs: Date.now() - startedAt,
+    externalContent: {
+      untrusted: true,
+      source: "web_search",
+      provider,
+    },
+    results,
+    ...(setupHint ? { setupHint } : {}),
+  };
+}
+
+function normalizeWebSearchPayload(payload: unknown, count: number): WebSearchResult[] {
+  const rawResults = Array.isArray(payload)
+    ? payload
+    : isObject(payload) && Array.isArray(payload.results)
+      ? payload.results
+      : isObject(payload) && Array.isArray(payload.items)
+        ? payload.items
+        : [];
+  const results: WebSearchResult[] = [];
+  for (const raw of rawResults) {
+    const normalized = normalizeWebSearchResult(raw);
+    if (!normalized) continue;
+    results.push(normalized);
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
+function normalizeWebSearchResult(value: unknown): WebSearchResult | null {
+  if (!isObject(value)) return null;
+  const url = firstString(value.url, value.link, value.href);
+  if (!url) return null;
+  const parsed = safeUrl(url);
+  if (!parsed) return null;
+  const title = truncateText(firstString(value.title, value.name) || parsed.hostname, 200);
+  const snippet = truncateText(firstString(value.snippet, value.content, value.description, value.text) || "", 320);
+  return {
+    title,
+    url: parsed.toString(),
+    snippet,
+    siteName: siteName(parsed),
+  };
+}
+
+function parseDuckDuckGoResults(html: string, baseUrl: string, count: number): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  const seen = new Set<string>();
+  const blockPattern = /<div\b[^>]*class=["'][^"']*\bresult\b[^"']*["'][^>]*>([\s\S]*?)(?=<div\b[^>]*class=["'][^"']*\bresult\b|$)/gi;
+  for (const block of html.matchAll(blockPattern)) {
+    const body = block[1] || "";
+    const href = attributeValue(body.match(/<a\b[^>]*class=["'][^"']*result__a[^"']*["'][^>]*>/i)?.[0] || "", "href");
+    if (!href) continue;
+    const url = normalizeSearchResultUrl(new URL(href, baseUrl).toString());
+    if (!url || seen.has(url) || isSearchUtilityUrl(url)) continue;
+    const title = decodeHtml(stripHtml(body.match(/<a\b[^>]*class=["'][^"']*result__a[^"']*["'][^>]*>([\s\S]*?)<\/a>/i)?.[1] || "")).replace(/\s+/g, " ").trim();
+    const snippet = decodeHtml(stripHtml(body.match(/<a\b[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>/i)?.[1]
+      || body.match(/<div\b[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)?.[1]
+      || "")).replace(/\s+/g, " ").trim();
+    const parsed = safeUrl(url);
+    if (!parsed) continue;
+    seen.add(url);
+    results.push({
+      title: truncateText(title || parsed.hostname, 200),
+      url,
+      snippet: truncateText(snippet, 320),
+      siteName: siteName(parsed),
+    });
+    if (results.length >= count) return results;
+  }
+  for (const link of extractLinks(html, baseUrl)) {
+    const url = normalizeSearchResultUrl(link.url);
+    if (!url || seen.has(url) || isSearchUtilityUrl(url)) continue;
+    const parsed = safeUrl(url);
+    if (!parsed) continue;
+    seen.add(url);
+    results.push({
+      title: truncateText(link.text || parsed.hostname, 200),
+      url,
+      snippet: "",
+      siteName: siteName(parsed),
+    });
+    if (results.length >= count) break;
+  }
+  return results;
+}
+
+function normalizeSearchResultUrl(input: string): string | null {
+  const parsed = safeUrl(input);
+  if (!parsed) return null;
+  const uddg = parsed.searchParams.get("uddg");
+  if (uddg) return safeUrl(uddg)?.toString() || null;
+  return parsed.toString();
+}
+
+function isSearchUtilityUrl(input: string): boolean {
+  const parsed = safeUrl(input);
+  if (!parsed) return true;
+  const hostname = parsed.hostname.toLowerCase();
+  return hostname === "duckduckgo.com"
+    || hostname.endsWith(".duckduckgo.com")
+    || parsed.protocol !== "http:" && parsed.protocol !== "https:";
+}
+
+function siteName(url: URL): string {
+  return url.hostname.replace(/^www\./, "");
+}
+
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
+function safeUrl(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function truncateText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars).trim()}...` : value;
 }
 
 function isExpiredApproval(approval: ToolApproval): boolean {

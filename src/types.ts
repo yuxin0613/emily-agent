@@ -18,6 +18,7 @@ export type ToolPermission =
   | "shell"
   | "network"
   | "http_fetch"
+  | "web_search"
   | "browser"
   | "github"
   | "create_task"

@@ -21,7 +21,7 @@ const role: RoleDefinition = {
   name: "network-researcher",
   role: "Use approved external tools.",
   singleton: true,
-  allowedTools: ["read_file", "http_fetch", "browser", "github", "delete_file"],
+  allowedTools: ["read_file", "http_fetch", "web_search", "browser", "github", "delete_file"],
   forbiddenTools: ["delete_file"],
   maxConcurrentTasks: 1,
   capabilities: ["research"],
@@ -58,6 +58,16 @@ const approvalRequired = await executor.execute({
 });
 assert.equal(approvalRequired.ok, false);
 assert.match(String(approvalRequired.error || ""), /network_read/);
+
+const webSearchApprovalRequired = await executor.execute({
+  tool: "web_search",
+  args: { query: "agentos", provider: "endpoint" },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(webSearchApprovalRequired.ok, false);
+assert.match(String(webSearchApprovalRequired.error || ""), /network_read/);
 
 const wrongTemplate = await executor.execute({
   tool: "http_fetch",
