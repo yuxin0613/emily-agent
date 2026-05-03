@@ -9,7 +9,7 @@ import type { ExperienceRecallResult } from "../types.ts";
 import { parseReviewerVerdict, type ReviewerVerdict } from "../review/ReviewerVerdict.ts";
 import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
 import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts";
-import { TaskGraphExecutor } from "../tasks/TaskGraphExecutor.ts";
+import { TaskGraphExecutor, type TaskGraphPause } from "../tasks/TaskGraphExecutor.ts";
 import { taskResultSummary } from "../tasks/TaskResult.ts";
 import {
   createFallbackPlanSpec,
@@ -36,6 +36,10 @@ interface MainAgentResult {
     content: string;
   }>;
   reviewerVerdict?: ReviewerVerdict;
+  needsUserInput?: {
+    reason: string;
+    questions: string[];
+  };
   plan?: {
     goal: string;
     deliveryLevel: string;
@@ -43,6 +47,14 @@ interface MainAgentResult {
     taskCount: number;
     exitCriteria: string[];
   };
+}
+
+interface UserInputPause {
+  reason: string;
+  questions: string[];
+  taskId?: string;
+  plannerTaskId?: string;
+  source: "plan" | TaskGraphPause["source"];
 }
 
 export class MainAgent {
@@ -152,6 +164,49 @@ export class MainAgent {
       delegatedTo = delegated.delegatedTo;
       planSummary = summarizePlan(delegated.plan);
 
+      if (delegated.pause) {
+        const content = formatUserInputPause(delegated.pause);
+        for (const result of subResults) {
+          this.taskStore.acknowledgeTask(result.taskId);
+        }
+        await this.approveRunMemoryCandidates(run.id);
+        this.taskStore.completeRun(run.id, "waiting_user");
+        await this.memory.remember({
+          scope: sessionId,
+          kind: "message:assistant",
+          content,
+          metadata: {
+            source: "main-agent",
+            runId: run.id,
+            delegatedTo,
+            plan: planSummary || null,
+            waitingFor: "user_input",
+            pause: {
+              reason: delegated.pause.reason,
+              questions: delegated.pause.questions,
+              taskId: delegated.pause.taskId || "",
+              plannerTaskId: delegated.pause.plannerTaskId || "",
+              source: delegated.pause.source,
+            },
+          },
+        });
+        return {
+          agent: this.name,
+          runId: run.id,
+          content,
+          delegatedTo,
+          memory: relevantMemory,
+          experiences: relevantExperiences,
+          plan: planSummary,
+          subResults,
+          reviewerVerdict,
+          needsUserInput: {
+            reason: delegated.pause.reason,
+            questions: delegated.pause.questions,
+          },
+        };
+      }
+
       const content = await this.synthesizeResponse({
         input: normalizedInput,
         runId: run.id,
@@ -241,6 +296,7 @@ export class MainAgent {
     reviewerVerdict?: ReviewerVerdict;
     delegatedTo: string[];
     plan: PlanSpec;
+    pause?: UserInputPause;
   }> {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
@@ -301,6 +357,21 @@ export class MainAgent {
       plan = createFallbackPlanSpec(input, selectedAgents);
     }
 
+    if (plan.clarificationRequired) {
+      return {
+        subResults: results,
+        reviewerVerdict,
+        delegatedTo: ["planner"],
+        plan,
+        pause: {
+          reason: "planner requested clarification before execution",
+          questions: plan.clarificationQuestions.length ? plan.clarificationQuestions : ["请补充这个任务继续拆解前必须确认的信息。"],
+          taskId: finishedPlanner.id,
+          source: "plan",
+        },
+      };
+    }
+
     const executionTasks = createTaskGraphFromPlan({
       taskStore: this.taskStore,
       plan,
@@ -323,6 +394,26 @@ export class MainAgent {
     }
     for (const task of execution.internal) {
       this.taskStore.acknowledgeTask(task.id);
+    }
+
+    if (execution.pause) {
+      return {
+        subResults: results,
+        reviewerVerdict,
+        delegatedTo: unique([
+          "planner",
+          ...plan.tasks.map((task) => task.role),
+          ...results.map((result) => result.role),
+        ]),
+        plan,
+        pause: {
+          reason: execution.pause.reason,
+          questions: execution.pause.questions,
+          taskId: execution.pause.taskId,
+          plannerTaskId: execution.pause.plannerTaskId,
+          source: execution.pause.source,
+        },
+      };
     }
 
     if (results.some((result) => result.role !== "planner" && result.status === "done")) {
@@ -542,6 +633,18 @@ function formatPlan(plan: PlanSpec): string[] {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function formatUserInputPause(pause: UserInputPause): string {
+  const questions = pause.questions.length ? pause.questions : ["请补充继续执行前必须确认的信息。"];
+  return [
+    "这一步需要你补充信息后我才能继续拆分执行。",
+    "",
+    `原因：${pause.reason}`,
+    "",
+    "请确认：",
+    ...questions.map((question, index) => `${index + 1}. ${question}`),
+  ].join("\n");
 }
 
 function runStatusFrom({

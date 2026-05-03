@@ -20,11 +20,21 @@ export interface TaskGraphExecutionResult {
   graphId: string | null;
   expanded: Task[];
   internal: Task[];
+  pause: TaskGraphPause | null;
+}
+
+export interface TaskGraphPause {
+  reason: string;
+  questions: string[];
+  taskId: string;
+  plannerTaskId?: string;
+  source: "planner" | "fallback";
 }
 
 interface ExpansionResult {
   plannerTask: Task | null;
   created: Task[];
+  pause: TaskGraphPause | null;
 }
 
 export class TaskGraphExecutor {
@@ -62,6 +72,7 @@ export class TaskGraphExecutor {
     const failed: Task[] = [];
     const expanded: Task[] = [];
     const internal: Task[] = [];
+    let pause: TaskGraphPause | null = null;
     const recorded = new Set<string>();
     const recordedInternal = new Set<string>();
     const graphId = graphIdFrom(tasksByKey);
@@ -108,8 +119,21 @@ export class TaskGraphExecutor {
       for (const task of finished) {
         pending.delete(keyFor(tasksByKey, task.id));
         record(task);
+        if (pause) continue;
         const expansion = await this.expandTaskIfNeeded(task, tasksByKey);
         recordInternal(expansion.plannerTask);
+        if (expansion.pause) {
+          pause = expansion.pause;
+          for (const blockedTask of await this.blockRemaining(
+            [...pending].map((key) => tasksByKey[key]).filter(Boolean),
+            `waiting for user input: ${expansion.pause.reason}`,
+          )) {
+            pending.delete(keyFor(tasksByKey, blockedTask.id));
+            record(blockedTask);
+          }
+          pending.clear();
+          continue;
+        }
         for (const expandedTask of expansion.created) {
           pending.add(String(expandedTask.metadata.graphKey));
           expanded.push(expandedTask);
@@ -118,7 +142,7 @@ export class TaskGraphExecutor {
     }
 
     this.taskStore.refreshTaskGraphStatuses();
-    return { completed, blocked, failed, graphId, expanded, internal };
+    return { completed, blocked, failed, graphId, expanded, internal, pause };
   }
 
   private async runOne(task: Task): Promise<Task> {
@@ -202,8 +226,30 @@ export class TaskGraphExecutor {
       availableSlots,
     });
     const patch = planned.patch;
+    if (patch.needsUserInput) {
+      const pause: TaskGraphPause = {
+        reason: patch.reason,
+        questions: patch.questions,
+        taskId: task.id,
+        plannerTaskId: planned.plannerTask?.id,
+        source: planned.source,
+      };
+      this.taskStore.addEvent({
+        type: "task_graph.waiting_user",
+        taskId: task.id,
+        payload: {
+          graphId: typeof task.metadata.graphId === "string" ? task.metadata.graphId : "",
+          parentKey,
+          reason: patch.reason,
+          source: planned.source,
+          plannerTaskId: planned.plannerTask?.id || "",
+          questions: patch.questions,
+        },
+      });
+      return { plannerTask: planned.plannerTask, created: [], pause };
+    }
     const taskSpecs = patch.tasks.slice(0, availableSlots);
-    if (!taskSpecs.length) return { plannerTask: planned.plannerTask, created: [] };
+    if (!taskSpecs.length) return { plannerTask: planned.plannerTask, created: [], pause: null };
     this.taskStore.addEvent({
       type: "task_graph.expanded",
       taskId: task.id,
@@ -216,13 +262,8 @@ export class TaskGraphExecutor {
         addedTasks: taskSpecs.map((item) => item.key),
       },
     });
-    const created: Task[] = [];
-    for (const spec of taskSpecs) {
-      const dynamicTask = this.createDynamicTask(spec, task, tasksByKey, currentDepth + 1);
-      tasksByKey[String(dynamicTask.metadata.graphKey)] = dynamicTask;
-      created.push(dynamicTask);
-    }
-    return { plannerTask: planned.plannerTask, created };
+    const created = this.createDynamicTasks(taskSpecs, task, tasksByKey, currentDepth + 1);
+    return { plannerTask: planned.plannerTask, created, pause: null };
   }
 
   private async planGraphPatch({
@@ -310,11 +351,15 @@ export class TaskGraphExecutor {
     maxNewTasks: number;
   }): Task {
     const parentKey = String(parentTask.metadata.graphKey || "");
+    const parentGraphId = typeof parentTask.metadata.graphId === "string" ? parentTask.metadata.graphId : "";
     const graphKey = uniqueInternalKey(`expand_${parentKey}_${currentDepth + 1}`, existingKeys);
     const metadata: Metadata = {
       ...baseGraphMetadata(parentTask),
+      graphId: "",
       graphKey,
       graphRole: "planner",
+      internalGraph: true,
+      parentGraphId,
       planPhase: "graph_expansion",
       parentKey,
       expandsTaskId: parentTask.id,
@@ -438,7 +483,43 @@ export class TaskGraphExecutor {
     });
   }
 
-  private createDynamicTask(spec: PlanTaskSpec, parentTask: Task, tasksByKey: Record<string, Task>, expansionDepth: number): Task {
+  private createDynamicTasks(
+    specs: PlanTaskSpec[],
+    parentTask: Task,
+    tasksByKey: Record<string, Task>,
+    expansionDepth: number,
+  ): Task[] {
+    const created = specs.map((spec) => {
+      const task = this.createDynamicTask(spec, parentTask, expansionDepth);
+      tasksByKey[String(task.metadata.graphKey)] = task;
+      return { spec, task };
+    });
+
+    for (const { spec, task } of created) {
+      for (const dependencyKey of spec.dependsOn.length ? spec.dependsOn : [String(parentTask.metadata.graphKey || "")]) {
+        const dependency = tasksByKey[dependencyKey];
+        if (dependency) {
+          this.taskStore.addTaskDependency(task.id, dependency.id, spec.dependencyType);
+        } else {
+          this.taskStore.addEvent({
+            type: "runtime.anomaly",
+            taskId: task.id,
+            payload: {
+              severity: "warning",
+              code: "dynamic_dependency_missing",
+              message: `Dynamic task dependency was missing: ${dependencyKey}.`,
+              dependencyKey,
+              repaired: false,
+            },
+          });
+        }
+      }
+    }
+
+    return created.map((item) => this.taskStore.getTaskOrThrow(item.task.id));
+  }
+
+  private createDynamicTask(spec: PlanTaskSpec, parentTask: Task, expansionDepth: number): Task {
     const metadata: Metadata = {
       ...baseGraphMetadata(parentTask),
       ...(spec.metadata || {}),
@@ -467,12 +548,6 @@ export class TaskGraphExecutor {
       maxRetries: spec.maxRetries,
       metadata,
     });
-    for (const dependencyKey of spec.dependsOn.length ? spec.dependsOn : [String(parentTask.metadata.graphKey || "")]) {
-      const dependency = tasksByKey[dependencyKey];
-      if (dependency) {
-        this.taskStore.addTaskDependency(created.id, dependency.id, spec.dependencyType);
-      }
-    }
     return this.taskStore.getTaskOrThrow(created.id);
   }
 }
@@ -500,6 +575,7 @@ function emptyExpansion(): ExpansionResult {
   return {
     plannerTask: null,
     created: [],
+    pause: null,
   };
 }
 

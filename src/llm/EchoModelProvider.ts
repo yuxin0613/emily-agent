@@ -11,7 +11,20 @@ export class EchoModelProvider implements ModelProvider {
 
   async complete({ agent, role, prompt }: ModelCompleteInput): Promise<ModelCompleteResult> {
     if (agent === "planner" && /GraphPatchSpec|adaptively expand/i.test(prompt)) {
+      if (/FAIL_GRAPH_PATCH/.test(prompt)) {
+        throw new Error("Echo graph patch failure requested by test input.");
+      }
       const parentKey = extractParentKey(prompt);
+      if (/NEEDS_GRAPH_INPUT/.test(prompt)) {
+        return this.result(JSON.stringify({
+          reason: "Need more graph input before creating the next slice.",
+          parentKey,
+          stop: false,
+          needsUserInput: true,
+          questions: ["请补充任务图继续拆解前必须确认的业务边界。"],
+          tasks: [],
+        }));
+      }
       return this.result(JSON.stringify({
         reason: "Echo adaptive graph patch from the completed parent task.",
         parentKey,
@@ -19,29 +32,6 @@ export class EchoModelProvider implements ModelProvider {
         needsUserInput: false,
         questions: [],
         tasks: [
-          {
-            key: "implementation",
-            role: "developer",
-            title: "implementation slice",
-            input: "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.",
-            parentKey,
-            dependsOn: [parentKey],
-            dependencyType: "success",
-            acceptanceCriteria: [
-              "A concrete implementation slice or precise executable design is produced.",
-              "The result states what remains for later rolling waves.",
-            ],
-            toolHints: ["read_file", "write_file", "run_tests"],
-            skillHints: ["coding", "implementation"],
-            timeoutMs: 30000,
-            maxRetries: 1,
-            maxResultChars: 12000,
-            maxMemoryCandidates: 1,
-            wave: 2,
-            expandable: false,
-            expansionGoal: "",
-            maxExpansionDepth: 0,
-          },
           {
             key: "verification",
             role: "reviewer",
@@ -65,11 +55,69 @@ export class EchoModelProvider implements ModelProvider {
             expansionGoal: "",
             maxExpansionDepth: 0,
           },
+          {
+            key: "implementation",
+            role: "developer",
+            title: "implementation slice",
+            input: "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.",
+            parentKey,
+            dependsOn: [parentKey],
+            dependencyType: "success",
+            acceptanceCriteria: [
+              "A concrete implementation slice or precise executable design is produced.",
+              "The result states what remains for later rolling waves.",
+            ],
+            toolHints: ["read_file", "write_file", "run_tests"],
+            skillHints: ["coding", "implementation"],
+            timeoutMs: 30000,
+            maxRetries: 1,
+            maxResultChars: 12000,
+            maxMemoryCandidates: 1,
+            wave: 2,
+            expandable: false,
+            expansionGoal: "",
+            maxExpansionDepth: 0,
+          },
         ],
       }));
     }
 
     if (agent === "planner") {
+      if (/NEEDS_PLAN_CLARIFICATION/.test(prompt)) {
+        return this.result(JSON.stringify({
+          goal: "Clarification required before execution.",
+          deliveryLevel: "poc",
+          exitCriteria: ["The user answers the planner clarification question."],
+          planningMode: "rolling",
+          maxWaves: 1,
+          failureStrategy: "block_dependents",
+          tasks: [{
+            key: "scope",
+            role: "researcher",
+            title: "scope clarification",
+            input: "Wait for the user to clarify scope.",
+            dependsOn: [],
+            dependencyType: "success",
+            acceptanceCriteria: ["The missing scope information is available."],
+            toolHints: [],
+            skillHints: ["requirements"],
+            timeoutMs: 30000,
+            maxRetries: 1,
+            maxResultChars: 12000,
+            maxMemoryCandidates: 0,
+            wave: 1,
+            expandable: false,
+            expansionGoal: "",
+            maxExpansionDepth: 0,
+          }],
+          review: {
+            required: true,
+            criteria: ["The clarification answer is available."],
+          },
+          clarificationRequired: true,
+          clarificationQuestions: ["请补充验收范围和必须覆盖的核心场景。"],
+        }));
+      }
       return this.result([
         "我会把任务拆成三步：",
         "1. 明确输入、输出和运行入口。",

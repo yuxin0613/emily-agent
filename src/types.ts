@@ -151,6 +151,7 @@ export type RuntimeEventType =
   | "task_graph.completed"
   | "task_graph.expansion_planned"
   | "task_graph.expanded"
+  | "task_graph.waiting_user"
   | "memory.candidate.created"
   | "memory.candidate.approved"
   | "memory.candidate.rejected"

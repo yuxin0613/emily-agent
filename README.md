@@ -159,6 +159,7 @@ flowchart LR
 - 有准出等级后，`TaskGraphExecutor` 会自动执行当前 DAG：依赖满足即入队，多个 ready task 可以并行等待，单个 role 仍保持 singleton worker。
 - rolling 图不是一次性冻结的 DAG。粗粒度节点可以带 `expandable=true`，完成后会向同一个 graph 追加更细的实现、验证或后续拆分 task，并记录 `task_graph.expansion_planned` 和 `task_graph.expanded` 事件。
 - 自适应拆解优先走 planner 生成的 `GraphPatchSpec` 严格 JSON；如果模型输出不是 JSON、依赖非法、task key 冲突或超出上限，会记录 `runtime.anomaly` 并使用保守 fallback patch。
+- 如果 `PlanSpec` 或 `GraphPatchSpec` 要求用户补充信息，run 会进入 `waiting_user`，记录 `task_graph.waiting_user`，并把问题交还给主 agent 而不是继续执行。
 - 动态追加的 task 会带上 `expandedFromTaskId`、`parentKey`、`expansionDepth` 和原 graph 的准出标准，timeline 可以复盘任务图是如何从粗到细长出来的。
 - 如果上游 success dependency 失败，下游 task 会被标记为 `blocked`，不会一直等待到超时。
 - 每个 task 的 `acceptanceCriteria` 写入 metadata，timeline / task trace 可以复盘为什么这个 task 存在、验收标准是什么。
