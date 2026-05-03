@@ -81,6 +81,8 @@ export class ExperienceBuilder {
         solutionPattern: task.result
           ? compact(task.result, 260)
           : "No reliable solution was produced; prefer inspection, smaller task slices, and explicit recovery checks.",
+        applicability: "Use when a similar task fails or reaches dead-letter and the team needs a reusable recovery lesson.",
+        contraindications: ["Do not use as a success pattern without checking the failure context."],
         evidenceTaskIds: [task.id],
         evidenceEventIds: [],
         confidence: value.confidence,
@@ -101,6 +103,8 @@ export class ExperienceBuilder {
       summary: compact(task.result || task.input, 260),
       problemPattern: compact(task.input, 220),
       solutionPattern: compact(task.result || "Repeat the successful approach captured by this task.", 320),
+      applicability: "Use when the current request has the same problem shape, constraints, and runtime context.",
+      contraindications: ["Avoid applying when the new task has different safety, storage, or deployment constraints."],
       evidenceTaskIds: [task.id],
       evidenceEventIds: [],
       confidence: value.confidence,

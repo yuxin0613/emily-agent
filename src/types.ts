@@ -52,6 +52,31 @@ export interface Task {
   updatedAt: string;
 }
 
+export interface Run {
+  id: string;
+  sessionId: string;
+  source: string;
+  userInput: string;
+  status: "running" | "reviewing" | "recovering" | "partially_done" | "waiting_user" | "done" | "failed" | "blocked";
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface TaskDependency {
+  taskId: string;
+  dependsOnTaskId: string;
+  dependencyType: "success" | "finished";
+  createdAt: string;
+}
+
+export interface TaskGraph {
+  id: string;
+  runId: string | null;
+  status: "pending" | "running" | "done" | "failed";
+  createdAt: string;
+  completedAt: string | null;
+}
+
 export interface TaskEvent {
   id: number;
   type: string;
@@ -59,6 +84,28 @@ export interface TaskEvent {
   agentId: string | null;
   payload: Metadata;
   createdAt: string;
+}
+
+export type RuntimeEventType =
+  | "run.started"
+  | "run.completed"
+  | "task.created"
+  | "task.queued"
+  | "task.waiting"
+  | "task.running"
+  | "task.done"
+  | "task.failed"
+  | "task.dead_letter"
+  | "task.acknowledged"
+  | "memory.candidate.created"
+  | "memory.candidate.approved"
+  | "memory.candidate.rejected"
+  | "experience.updated";
+
+export interface Timeline {
+  run: Run | null;
+  tasks: Task[];
+  events: TaskEvent[];
 }
 
 export interface RoleDefinition {
@@ -86,6 +133,19 @@ export interface MemoryRecord {
   createdAt: string;
 }
 
+export interface MemoryCandidate {
+  id: string;
+  runId: string | null;
+  taskId: string | null;
+  scope: string;
+  kind: string;
+  content: string;
+  status: "pending" | "approved" | "rejected";
+  createdBy: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
 export type ExperienceStatus = "active" | "archived" | "deprecated";
 
 export type ExperienceType =
@@ -96,7 +156,7 @@ export type ExperienceType =
   | "decision"
   | "procedure";
 
-export type ExperienceUpdateAction = "create" | "replace" | "merge" | "skip";
+export type ExperienceUpdateAction = "create" | "replace" | "merge" | "skip" | "conflict" | "split" | "deprecate";
 
 export interface Experience {
   id: string;
@@ -109,6 +169,8 @@ export interface Experience {
   summary: string;
   problemPattern: string;
   solutionPattern: string;
+  applicability: string;
+  contraindications: string[];
   evidenceTaskIds: string[];
   evidenceEventIds: number[];
   confidence: number;
@@ -126,6 +188,8 @@ export interface ExperienceCandidate {
   summary: string;
   problemPattern: string;
   solutionPattern: string;
+  applicability?: string;
+  contraindications?: string[];
   evidenceTaskIds: string[];
   evidenceEventIds?: number[];
   confidence: number;
@@ -141,6 +205,8 @@ export interface ExperienceRevision {
   summary: string;
   problemPattern: string;
   solutionPattern: string;
+  applicability: string;
+  contraindications: string[];
   confidence: number;
   importance: number;
   evidenceTaskIds: string[];

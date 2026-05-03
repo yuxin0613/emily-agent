@@ -16,8 +16,11 @@ const rows = db
   .all() as Array<{ namespace: string; version: number; name: string }>;
 
 assert.ok(rows.some((row) => row.namespace === "task" && row.version === 1));
+assert.ok(rows.some((row) => row.namespace === "task" && row.version === 2));
+assert.ok(rows.some((row) => row.namespace === "task" && row.version === 3));
 assert.ok(rows.some((row) => row.namespace === "experience" && row.version === 1));
 assert.ok(rows.some((row) => row.namespace === "experience" && row.version === 2));
+assert.ok(rows.some((row) => row.namespace === "experience" && row.version === 3));
 
 db.close();
 experienceStore.close();

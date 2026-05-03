@@ -13,7 +13,12 @@ export async function startWebServer({
       recall: (query: string, options?: { scope?: "project"; limit?: number }) => unknown[];
       addFeedback: (input: { experienceId: string; rating: "useful" | "wrong" | "outdated" | "duplicate"; comment?: string }) => unknown;
     };
+    getTimeline: (options: { runId: string }) => unknown;
+    getTaskTrace: (taskId: string) => unknown;
+    renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
+    health: () => unknown;
+    maintenance: (options?: { day?: Date }) => Promise<unknown>;
     roleAgentManager: NodeJS.EventEmitter;
   };
   port: number;
@@ -24,7 +29,7 @@ export async function startWebServer({
       const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
 
       if (request.method === "GET" && url.pathname === "/health") {
-        return sendJson(response, 200, { ok: true });
+        return sendJson(response, 200, { ok: true, runtime: runtime.health() });
       }
 
       if (request.method === "GET" && url.pathname === "/events") {
@@ -39,9 +44,33 @@ export async function startWebServer({
         return sendJson(response, 200, result);
       }
 
+      if (request.method === "GET" && url.pathname === "/timeline") {
+        const runId = String(url.searchParams.get("runId") || "");
+        if (url.searchParams.get("format") === "text") {
+          response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+          response.end(runtime.renderTimeline(runId));
+          return;
+        }
+        return sendJson(response, 200, runtime.getTimeline({
+          runId,
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/task-trace") {
+        return sendJson(response, 200, runtime.getTaskTrace(String(url.searchParams.get("taskId") || "")));
+      }
+
       if (request.method === "POST" && url.pathname === "/experiences/build-daily") {
         const body = await readJson(request);
         const result = runtime.buildDailyExperiences({
+          day: typeof body.day === "string" ? new Date(body.day) : new Date(),
+        });
+        return sendJson(response, 200, result);
+      }
+
+      if (request.method === "POST" && url.pathname === "/maintenance") {
+        const body = await readJson(request);
+        const result = await runtime.maintenance({
           day: typeof body.day === "string" ? new Date(body.day) : new Date(),
         });
         return sendJson(response, 200, result);
@@ -68,7 +97,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /health", "GET /events", "GET /experiences", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /health", "GET /events", "GET /experiences", "GET /timeline", "GET /task-trace", "POST /maintenance", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {

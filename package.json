@@ -9,8 +9,8 @@
     "start": "node src/index.ts",
     "tui": "node src/index.ts --tui",
     "web": "node src/index.ts --web",
-    "test": "node test/smoke.test.ts && node test/recovery.test.ts && node test/state-machine.test.ts && node test/experience.test.ts && node test/migration.test.ts",
-    "check": "node test/smoke.test.ts && node test/recovery.test.ts && node test/state-machine.test.ts && node test/experience.test.ts && node test/migration.test.ts"
+    "test": "node test/smoke.test.ts && node test/recovery.test.ts && node test/restart.test.ts && node test/state-machine.test.ts && node test/experience.test.ts && node test/policy.test.ts && node test/migration.test.ts",
+    "check": "node test/smoke.test.ts && node test/recovery.test.ts && node test/restart.test.ts && node test/state-machine.test.ts && node test/experience.test.ts && node test/policy.test.ts && node test/migration.test.ts"
   },
   "engines": {
     "node": ">=22.18"

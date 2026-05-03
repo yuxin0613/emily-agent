@@ -2,8 +2,10 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { AgentStatus, Metadata, Task, TaskEvent, TaskStatus } from "../types.ts";
+import type { AgentStatus, MemoryCandidate, Metadata, Run, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
+import { IllegalTaskTransitionError, TaskTransitionConflictError } from "./errors.ts";
+import { RuntimeEventFactory } from "../events/RuntimeEventFactory.ts";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "dead_letter"]);
 
@@ -25,6 +27,12 @@ interface CreateTaskInput {
   parentTaskId?: string | null;
   metadata?: Metadata;
   maxRetries?: number;
+}
+
+interface CreateRunInput {
+  sessionId: string;
+  source: string;
+  userInput: string;
 }
 
 export class TaskStore {
@@ -125,6 +133,67 @@ export class TaskStore {
           `);
         },
       },
+      {
+        version: 2,
+        name: "create_runs_dependencies_memory_candidates",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS runs (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              source TEXT NOT NULL,
+              user_input TEXT NOT NULL,
+              status TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS task_dependencies (
+              task_id TEXT NOT NULL,
+              depends_on_task_id TEXT NOT NULL,
+              dependency_type TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (task_id, depends_on_task_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends ON task_dependencies(depends_on_task_id);
+
+            CREATE TABLE IF NOT EXISTS memory_candidates (
+              id TEXT PRIMARY KEY,
+              run_id TEXT,
+              task_id TEXT,
+              scope TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              content TEXT NOT NULL,
+              status TEXT NOT NULL,
+              created_by TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              decided_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memory_candidates_status ON memory_candidates(status, run_id, task_id);
+          `);
+        },
+      },
+      {
+        version: 3,
+        name: "create_task_graphs",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS task_graphs (
+              id TEXT PRIMARY KEY,
+              run_id TEXT,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              completed_at TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_task_graphs_run ON task_graphs(run_id, status);
+          `);
+        },
+      },
     ]);
 
     this.ensureColumn("tasks", "retry_count", "INTEGER NOT NULL DEFAULT 0");
@@ -210,8 +279,118 @@ export class TaskStore {
     return { ...task, eventId };
   }
 
+  createRun({ sessionId, source, userInput }: CreateRunInput): Run {
+    const now = new Date().toISOString();
+    const run: Run = {
+      id: randomUUID(),
+      sessionId,
+      source,
+      userInput,
+      status: "running",
+      startedAt: now,
+      completedAt: null,
+    };
+    this.db
+      .prepare("INSERT INTO runs (id, session_id, source, user_input, status, started_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(run.id, run.sessionId, run.source, run.userInput, run.status, run.startedAt, run.completedAt);
+    this.addEvent(RuntimeEventFactory.runStarted(run));
+    return run;
+  }
+
+  completeRun(runId: string, status: Run["status"] = "done"): number {
+    const now = new Date().toISOString();
+    this.db
+      .prepare("UPDATE runs SET status = ?, completed_at = ? WHERE id = ?")
+      .run(status, now, runId);
+    return this.addEvent(RuntimeEventFactory.runCompleted(runId, status));
+  }
+
+  getRun(runId: string): Run | null {
+    const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as RunRow | undefined;
+    return row ? parseRun(row) : null;
+  }
+
+  addTaskDependency(taskId: string, dependsOnTaskId: string, dependencyType: TaskDependency["dependencyType"] = "success"): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id, dependency_type, created_at) VALUES (?, ?, ?, ?)")
+      .run(taskId, dependsOnTaskId, dependencyType, new Date().toISOString());
+    this.addEvent({
+      type: "task.dependency.created",
+      taskId,
+      payload: { dependsOnTaskId, dependencyType },
+    });
+  }
+
+  createTaskGraph({ runId = null }: { runId?: string | null } = {}): TaskGraph {
+    const graph: TaskGraph = {
+      id: randomUUID(),
+      runId,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    this.db
+      .prepare("INSERT INTO task_graphs (id, run_id, status, created_at, completed_at) VALUES (?, ?, ?, ?, ?)")
+      .run(graph.id, graph.runId, graph.status, graph.createdAt, graph.completedAt);
+    this.addEvent({
+      type: "task_graph.created",
+      payload: { graphId: graph.id, runId },
+    });
+    return graph;
+  }
+
+  completeTaskGraph(graphId: string, status: TaskGraph["status"] = "done"): void {
+    this.db
+      .prepare("UPDATE task_graphs SET status = ?, completed_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), graphId);
+    this.addEvent({
+      type: "task_graph.completed",
+      payload: { graphId, status },
+    });
+  }
+
+  getDependencies(taskId: string): TaskDependency[] {
+    const rows = this.db
+      .prepare("SELECT * FROM task_dependencies WHERE task_id = ? ORDER BY created_at ASC")
+      .all(taskId) as TaskDependencyRow[];
+    return rows.map(parseDependency);
+  }
+
+  getDependents(taskId: string): Task[] {
+    const rows = this.db
+      .prepare(`
+        SELECT t.* FROM tasks t
+        JOIN task_dependencies d ON d.task_id = t.id
+        WHERE d.depends_on_task_id = ?
+      `)
+      .all(taskId) as TaskRow[];
+    return rows.map(parseTask);
+  }
+
+  dependenciesSatisfied(taskId: string): boolean {
+    const rows = this.db
+      .prepare(`
+        SELECT d.dependency_type, t.status
+        FROM task_dependencies d
+        JOIN tasks t ON t.id = d.depends_on_task_id
+        WHERE d.task_id = ?
+      `)
+      .all(taskId) as Array<{ dependency_type: TaskDependency["dependencyType"]; status: TaskStatus }>;
+    return rows.every((row) => row.dependency_type === "finished"
+      ? TERMINAL_STATUSES.has(row.status)
+      : row.status === "done");
+  }
+
   enqueueTask(taskId: string, { priority = 0 }: { priority?: number } = {}): number {
     const task = this.getTaskOrThrow(taskId);
+    if (!this.dependenciesSatisfied(taskId)) {
+      return this.addEvent({
+        type: "task.waiting",
+        taskId,
+        agentId: task.assignedAgentId,
+        payload: { reason: "dependencies not satisfied" },
+      });
+    }
     const eventId = this.transitionTask(taskId, "queued", {
       reason: "queued for role worker",
       metadata: task.metadata,
@@ -238,9 +417,10 @@ export class TaskStore {
       .get(role) as { task_id: string } | undefined;
     if (!row) return null;
 
-    this.db
+    const queueUpdate = this.db
       .prepare("UPDATE role_queues SET status = 'running', updated_at = ? WHERE task_id = ?")
       .run(new Date().toISOString(), row.task_id);
+    if (queueUpdate.changes === 0) return null;
     this.claimTask(row.task_id, agentId, { leaseMs });
     return this.getTask(row.task_id);
   }
@@ -309,7 +489,7 @@ export class TaskStore {
   ): number {
     const task = this.getTaskOrThrow(taskId);
     if (!ALLOWED_TRANSITIONS[task.status].includes(nextStatus) && task.status !== nextStatus) {
-      throw new Error(`Illegal task transition: ${task.status} -> ${nextStatus}`);
+      throw new IllegalTaskTransitionError(`Illegal task transition: ${task.status} -> ${nextStatus}`);
     }
 
     const now = new Date().toISOString();
@@ -317,7 +497,7 @@ export class TaskStore {
     const terminal = TERMINAL_STATUSES.has(nextStatus);
     const retryCount = patch.retryCount ?? task.retryCount;
 
-    this.db
+    const result = this.db
       .prepare(`
         UPDATE tasks
         SET status = ?,
@@ -332,7 +512,7 @@ export class TaskStore {
             heartbeat_at = ?,
             main_ack_at = ?,
             updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND status = ?
       `)
       .run(
         nextStatus,
@@ -348,28 +528,32 @@ export class TaskStore {
         patch.mainAckAt ?? task.mainAckAt,
         now,
         taskId,
+        task.status,
       );
+    if (result.changes === 0) {
+      throw new TaskTransitionConflictError(`Task transition conflict: ${taskId} expected ${task.status}`);
+    }
 
     return this.addEvent({
       type: `task.${nextStatus}`,
       taskId,
       agentId: options.agentId ?? patch.assignedAgentId ?? task.assignedAgentId,
       payload: {
-        from: task.status,
-        to: nextStatus,
-        reason: options.reason || null,
+        ...RuntimeEventFactory.taskTransition(task.status, nextStatus, options.reason || null),
       },
     });
   }
 
   finishTask(taskId: string, { result, agentId }: { result: string; agentId?: string | null }): number {
     this.completeQueueItem(taskId, "done");
-    return this.transitionTask(taskId, "done", {
+    const eventId = this.transitionTask(taskId, "done", {
       agentId,
       result,
       error: null,
       reason: "worker completed",
     });
+    this.releaseReadyDependents(taskId);
+    return eventId;
   }
 
   failTask(
@@ -380,7 +564,7 @@ export class TaskStore {
     const retryCount = task.retryCount + 1;
     const nextStatus: TaskStatus = retryCount > task.maxRetries ? "dead_letter" : "failed";
     this.completeQueueItem(taskId, nextStatus);
-    return this.transitionTask(taskId, nextStatus, {
+    const eventId = this.transitionTask(taskId, nextStatus, {
       agentId,
       result: result ?? task.result,
       error,
@@ -394,6 +578,99 @@ export class TaskStore {
         },
       },
     });
+    this.releaseReadyDependents(taskId);
+    return eventId;
+  }
+
+  releaseReadyDependents(taskId: string): string[] {
+    const released: string[] = [];
+    for (const dependent of this.getDependents(taskId)) {
+      if (dependent.status !== "pending" && dependent.status !== "blocked") continue;
+      if (!this.dependenciesSatisfied(dependent.id)) continue;
+      this.enqueueTask(dependent.id);
+      released.push(dependent.id);
+    }
+    return released;
+  }
+
+  createMemoryCandidate({
+    runId = null,
+    taskId = null,
+    scope,
+    kind,
+    content,
+    createdBy,
+  }: {
+    runId?: string | null;
+    taskId?: string | null;
+    scope: string;
+    kind: string;
+    content: string;
+    createdBy: string;
+  }): MemoryCandidate {
+    const candidate: MemoryCandidate = {
+      id: randomUUID(),
+      runId,
+      taskId,
+      scope,
+      kind,
+      content,
+      status: "pending",
+      createdBy,
+      createdAt: new Date().toISOString(),
+      decidedAt: null,
+    };
+    this.db
+      .prepare(`
+        INSERT INTO memory_candidates (id, run_id, task_id, scope, kind, content, status, created_by, created_at, decided_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(candidate.id, candidate.runId, candidate.taskId, candidate.scope, candidate.kind, candidate.content, candidate.status, candidate.createdBy, candidate.createdAt, candidate.decidedAt);
+    this.addEvent({
+      type: "memory.candidate.created",
+      taskId,
+      payload: RuntimeEventFactory.memoryCandidate(candidate.id, runId, scope, kind, createdBy),
+    });
+    return candidate;
+  }
+
+  decideMemoryCandidate(candidateId: string, status: "approved" | "rejected"): MemoryCandidate {
+    this.db
+      .prepare("UPDATE memory_candidates SET status = ?, decided_at = ? WHERE id = ?")
+      .run(status, new Date().toISOString(), candidateId);
+    const candidate = this.getMemoryCandidate(candidateId);
+    if (!candidate) throw new Error(`Memory candidate not found: ${candidateId}`);
+    this.addEvent({
+      type: status === "approved" ? "memory.candidate.approved" : "memory.candidate.rejected",
+      taskId: candidate.taskId,
+      payload: RuntimeEventFactory.candidateLifecycle(candidateId, candidate.runId, status),
+    });
+    return candidate;
+  }
+
+  getPendingMemoryCandidates({ runId, limit = 20 }: { runId?: string; limit?: number } = {}): MemoryCandidate[] {
+    const rows = runId
+      ? this.db
+        .prepare("SELECT * FROM memory_candidates WHERE status = 'pending' AND run_id = ? ORDER BY created_at ASC LIMIT ?")
+        .all(runId, limit) as MemoryCandidateRow[]
+      : this.db
+        .prepare("SELECT * FROM memory_candidates WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?")
+        .all(limit) as MemoryCandidateRow[];
+    return rows.map(parseMemoryCandidate);
+  }
+
+  getMemoryCandidate(candidateId: string): MemoryCandidate | null {
+    const row = this.db
+      .prepare("SELECT * FROM memory_candidates WHERE id = ?")
+      .get(candidateId) as MemoryCandidateRow | undefined;
+    return row ? parseMemoryCandidate(row) : null;
+  }
+
+  getMemoryCandidatesForRun(runId: string): MemoryCandidate[] {
+    const rows = this.db
+      .prepare("SELECT * FROM memory_candidates WHERE run_id = ? ORDER BY created_at ASC")
+      .all(runId) as MemoryCandidateRow[];
+    return rows.map(parseMemoryCandidate);
   }
 
   markNeedsInspection(taskId: string, reason: string, metadata: Metadata = {}): number {
@@ -560,6 +837,56 @@ export class TaskStore {
     return rows.map(parseEvent);
   }
 
+  getTimeline({ runId }: { runId: string }): Timeline {
+    const run = this.getRun(runId);
+    const tasks = this.getTasksForRun(runId);
+    const taskIds = new Set(tasks.map((task) => task.id));
+    const rows = this.db
+      .prepare("SELECT * FROM events ORDER BY id ASC")
+      .all() as EventRow[];
+    const events = rows
+      .map(parseEvent)
+      .filter((event) => event.payload.runId === runId || (event.taskId && taskIds.has(event.taskId)));
+    return { run, tasks, events };
+  }
+
+  getTaskTrace(taskId: string): Timeline {
+    const task = this.getTask(taskId);
+    const runId = typeof task?.metadata.runId === "string" ? task.metadata.runId : "";
+    const run = runId ? this.getRun(runId) : null;
+    const rows = this.db
+      .prepare("SELECT * FROM events WHERE task_id = ? ORDER BY id ASC")
+      .all(taskId) as EventRow[];
+    return {
+      run,
+      tasks: task ? [task] : [],
+      events: rows.map(parseEvent),
+    };
+  }
+
+  getTasksForRun(runId: string): Task[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tasks WHERE json_extract(metadata, '$.runId') = ? ORDER BY created_at ASC")
+      .all(runId) as TaskRow[];
+    return rows.map(parseTask);
+  }
+
+  health(): {
+    pendingTasks: number;
+    runningTasks: number;
+    expiredLeases: number;
+    unacknowledgedTerminalTasks: number;
+    pendingMemoryCandidates: number;
+  } {
+    return {
+      pendingTasks: count(this.db, "SELECT COUNT(*) AS count FROM tasks WHERE status IN ('pending', 'queued')"),
+      runningTasks: count(this.db, "SELECT COUNT(*) AS count FROM tasks WHERE status = 'running'"),
+      expiredLeases: this.getExpiredLeaseTasks().length,
+      unacknowledgedTerminalTasks: this.getUnacknowledgedTerminalTasks().length,
+      pendingMemoryCandidates: count(this.db, "SELECT COUNT(*) AS count FROM memory_candidates WHERE status = 'pending'"),
+    };
+  }
+
   async writeTaskMarkdown(taskId: string): Promise<string | null> {
     const task = this.getTask(taskId);
     if (!task) return null;
@@ -636,6 +963,36 @@ interface TaskRow {
   updated_at: string;
 }
 
+interface RunRow {
+  id: string;
+  session_id: string;
+  source: string;
+  user_input: string;
+  status: Run["status"];
+  started_at: string;
+  completed_at: string | null;
+}
+
+interface TaskDependencyRow {
+  task_id: string;
+  depends_on_task_id: string;
+  dependency_type: TaskDependency["dependencyType"];
+  created_at: string;
+}
+
+interface MemoryCandidateRow {
+  id: string;
+  run_id: string | null;
+  task_id: string | null;
+  scope: string;
+  kind: string;
+  content: string;
+  status: MemoryCandidate["status"];
+  created_by: string;
+  created_at: string;
+  decided_at: string | null;
+}
+
 interface EventRow {
   id: number;
   type: string;
@@ -677,4 +1034,45 @@ function parseEvent(row: EventRow): TaskEvent {
     payload: JSON.parse(row.payload || "{}") as Metadata,
     createdAt: row.created_at,
   };
+}
+
+function parseRun(row: RunRow): Run {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    source: row.source,
+    userInput: row.user_input,
+    status: row.status,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function parseDependency(row: TaskDependencyRow): TaskDependency {
+  return {
+    taskId: row.task_id,
+    dependsOnTaskId: row.depends_on_task_id,
+    dependencyType: row.dependency_type,
+    createdAt: row.created_at,
+  };
+}
+
+function parseMemoryCandidate(row: MemoryCandidateRow): MemoryCandidate {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    taskId: row.task_id,
+    scope: row.scope,
+    kind: row.kind,
+    content: row.content,
+    status: row.status,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at,
+  };
+}
+
+function count(db: DatabaseSync, sql: string): number {
+  const row = db.prepare(sql).get() as { count: number };
+  return row.count;
 }

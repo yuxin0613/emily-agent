@@ -2,6 +2,7 @@ import { fork, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import type { Task, TaskEvent } from "../types.ts";
 import type { TaskStore } from "./TaskStore.ts";
+import { RecoveryPolicy } from "../recovery/RecoveryPolicy.ts";
 
 interface RoleState {
   role: string;
@@ -22,6 +23,7 @@ export class RoleAgentManager extends EventEmitter {
   workerPath: string;
   staleTaskMs: number;
   leaseMs: number;
+  recoveryPolicy: RecoveryPolicy;
   roles: Map<string, RoleState>;
   shuttingDown: boolean;
   reconcileTimer: NodeJS.Timeout | null;
@@ -45,6 +47,7 @@ export class RoleAgentManager extends EventEmitter {
     this.workerPath = workerPath;
     this.staleTaskMs = staleTaskMs;
     this.leaseMs = leaseMs;
+    this.recoveryPolicy = new RecoveryPolicy();
     this.roles = new Map();
     this.shuttingDown = false;
     this.reconcileTimer = null;
@@ -71,6 +74,11 @@ export class RoleAgentManager extends EventEmitter {
   }
 
   waitForTask(taskId: string, { timeoutMs }: { timeoutMs: number }): Promise<Task> {
+    const current = this.taskStore.getTask(taskId);
+    if (current && this.taskStore.isTerminalStatus(current.status)) {
+      return Promise.resolve(current);
+    }
+
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
@@ -153,9 +161,7 @@ export class RoleAgentManager extends EventEmitter {
       this.emitTaskEvent("task.changed", task.id, null);
     }
 
-    for (const role of ["planner", "developer", "researcher", "inspector", "memory-curator"]) {
-      this.drainRole(role);
-    }
+    this.drainAllRoles();
 
     return { expiredLeaseTasks, needsInspectionTasks, unacknowledgedTerminalTasks };
   }
@@ -189,6 +195,12 @@ export class RoleAgentManager extends EventEmitter {
       dataDir: this.dataDir,
       leaseMs: this.leaseMs,
     });
+  }
+
+  drainAllRoles(): void {
+    for (const role of ["planner", "developer", "researcher", "reviewer", "inspector", "memory-curator"]) {
+      this.drainRole(role);
+    }
   }
 
   ensureWorker(roleState: RoleState): ChildProcess {
@@ -249,7 +261,7 @@ export class RoleAgentManager extends EventEmitter {
       if (task?.status && this.taskStore.isTerminalStatus(task.status)) {
         this.taskStore.completeQueueItem(payload.taskId, task.status === "done" ? "done" : "failed");
       }
-      this.drainRole(roleState.role);
+      this.drainAllRoles();
     }
 
     if (payload.type === "agent.heartbeat") {
@@ -280,14 +292,49 @@ export class RoleAgentManager extends EventEmitter {
     if (activeTaskId) {
       const task = this.taskStore.getTask(activeTaskId);
       if (task && task.status === "running") {
-        await this.enqueueInspection(
-          task,
-          `worker exited before completion: code=${code ?? "null"} signal=${signal ?? "null"}`,
-        );
+        await this.recoverTask(task, `worker exited before completion: code=${code ?? "null"} signal=${signal ?? "null"}`);
       }
     }
 
-    this.drainRole(roleState.role);
+    this.drainAllRoles();
+  }
+
+  async recoverTask(task: Task, reason: string): Promise<void> {
+    const decision = this.recoveryPolicy.decideWorkerExit(task, reason);
+
+    if (decision.action === "finish") {
+      const eventId = this.taskStore.finishTask(task.id, {
+        result: task.result || "",
+        agentId: task.assignedAgentId || undefined,
+      });
+      await this.taskStore.writeTaskMarkdown(task.id);
+      this.emitTaskEvent("task.finished", task.id, eventId);
+      return;
+    }
+
+    if (decision.action === "retry") {
+      this.taskStore.failTask(task.id, {
+        error: decision.reason,
+        agentId: task.assignedAgentId || undefined,
+      });
+      const latest = this.taskStore.getTask(task.id);
+      if (latest && latest.status === "failed") {
+        await this.enqueue(latest);
+      }
+      return;
+    }
+
+    if (decision.action === "dead_letter") {
+      const eventId = this.taskStore.failTask(task.id, {
+        error: decision.reason,
+        agentId: task.assignedAgentId || undefined,
+      });
+      await this.taskStore.writeTaskMarkdown(task.id);
+      this.emitTaskEvent("task.finished", task.id, eventId);
+      return;
+    }
+
+    await this.enqueueInspection(task, decision.reason);
   }
 
   emitTaskEvent(type: string, taskId: string, eventId: number | null): void {

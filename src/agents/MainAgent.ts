@@ -5,9 +5,12 @@ import type { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
 import type { ExperienceStore } from "../experience/ExperienceStore.ts";
 import type { ExperienceRecallResult } from "../types.ts";
+import { parseReviewerVerdict, type ReviewerVerdict } from "../review/ReviewerVerdict.ts";
+import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
 
 interface MainAgentResult {
   agent: string;
+  runId?: string;
   content: string;
   delegatedTo: string[];
   memory?: MemoryRecallResult;
@@ -19,6 +22,7 @@ interface MainAgentResult {
     status: string;
     content: string;
   }>;
+  reviewerVerdict?: ReviewerVerdict;
 }
 
 export class MainAgent {
@@ -28,6 +32,7 @@ export class MainAgent {
   taskStore: TaskStore;
   experienceStore: ExperienceStore;
   roleAgentManager: RoleAgentManager;
+  memoryCandidatePolicy: MemoryCandidatePolicy;
 
   constructor({
     name,
@@ -50,6 +55,7 @@ export class MainAgent {
     this.taskStore = taskStore;
     this.experienceStore = experienceStore;
     this.roleAgentManager = roleAgentManager;
+    this.memoryCandidatePolicy = new MemoryCandidatePolicy();
   }
 
   async handleUserMessage(input: string, context: { sessionId?: string; source?: string } = {}): Promise<MainAgentResult> {
@@ -62,15 +68,23 @@ export class MainAgent {
       };
     }
 
+    const sessionId = context.sessionId || "default";
+    const source = context.source || "unknown";
+    const run = this.taskStore.createRun({
+      sessionId,
+      source,
+      userInput: normalizedInput,
+    });
+
     await this.memory.remember({
-      scope: context.sessionId || "default",
+      scope: sessionId,
       kind: "message:user",
       content: normalizedInput,
-      metadata: { source: context.source || "unknown" },
+      metadata: { source, runId: run.id },
     });
 
     const relevantMemory = await this.memory.recall(normalizedInput, {
-      scope: context.sessionId || "default",
+      scope: sessionId,
       limit: 5,
     });
     const relevantExperiences = this.experienceStore.recall(normalizedInput, {
@@ -79,10 +93,11 @@ export class MainAgent {
     });
 
     const selectedAgents = this.selectSubAgents(normalizedInput);
-    const subResults = await this.delegateTasks({
+    const { subResults, reviewerVerdict } = await this.delegateTasks({
       input: normalizedInput,
-      sessionId: context.sessionId || "default",
-      source: context.source || "unknown",
+      sessionId,
+      source,
+      runId: run.id,
       selectedAgents,
     });
 
@@ -102,6 +117,7 @@ export class MainAgent {
       content,
       metadata: {
         source: "main-agent",
+        runId: run.id,
         delegatedTo: selectedAgents,
       },
     });
@@ -109,14 +125,18 @@ export class MainAgent {
     for (const result of subResults) {
       this.taskStore.acknowledgeTask(result.taskId);
     }
+    await this.approveRunMemoryCandidates(run.id);
+    this.taskStore.completeRun(run.id, runStatusFrom({ subResults, reviewerVerdict }));
 
     return {
       agent: this.name,
+      runId: run.id,
       content,
       delegatedTo: selectedAgents,
       memory: relevantMemory,
       experiences: relevantExperiences,
       subResults,
+      reviewerVerdict,
     };
   }
 
@@ -125,15 +145,36 @@ export class MainAgent {
     sessionId,
     source,
     selectedAgents,
+    runId,
   }: {
     input: string;
     sessionId: string;
     source: string;
+    runId: string;
     selectedAgents: string[];
-  }): Promise<Array<{ agent: string; role: string; taskId: string; status: string; content: string }>> {
+  }): Promise<{
+    subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }>;
+    reviewerVerdict?: ReviewerVerdict;
+  }> {
     const results = [];
+    let reviewerVerdict: ReviewerVerdict | undefined;
+    const plannerTask = this.taskStore.createTask({
+      role: "planner",
+      title: `planner: ${input.slice(0, 60)}`,
+      input,
+      metadata: {
+        sessionId,
+        source,
+        runId,
+        createdBy: this.name,
+        graphRole: "planner",
+      },
+    });
 
-    for (const role of selectedAgents) {
+    const finishedPlanner = await this.roleAgentManager.runTask(plannerTask);
+    results.push(this.formatTaskResult("planner", finishedPlanner));
+
+    for (const role of selectedAgents.filter((agentRole) => agentRole !== "planner")) {
       const task = this.taskStore.createTask({
         role,
         title: `${role}: ${input.slice(0, 60)}`,
@@ -141,16 +182,66 @@ export class MainAgent {
         metadata: {
           sessionId,
           source,
+          runId,
           createdBy: this.name,
           autoRetry: false,
         },
       });
+      this.taskStore.addTaskDependency(task.id, plannerTask.id, "success");
 
       const finishedTask = await this.roleAgentManager.runTask(task);
       results.push(this.formatTaskResult(role, finishedTask));
     }
 
-    return results;
+    if (results.some((result) => result.role !== "planner" && result.status === "done")) {
+      const reviewTask = this.taskStore.createTask({
+        role: "reviewer",
+        title: `reviewer: ${input.slice(0, 60)}`,
+        input: [
+          "Review whether the subagent outputs satisfy the user request.",
+          `User input: ${input}`,
+          "Sub-results:",
+          ...results.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
+        ].join("\n"),
+        metadata: {
+          sessionId,
+          source,
+          runId,
+          createdBy: this.name,
+          graphRole: "reviewer",
+        },
+      });
+      for (const result of results.filter((item) => item.role !== "planner")) {
+        this.taskStore.addTaskDependency(reviewTask.id, result.taskId, "finished");
+      }
+      const finishedReview = await this.roleAgentManager.runTask(reviewTask);
+      const reviewResult = this.formatTaskResult("reviewer", finishedReview);
+      reviewerVerdict = parseReviewerVerdict(reviewResult.content);
+      results.push(reviewResult);
+    }
+
+    return { subResults: results, reviewerVerdict };
+  }
+
+  async approveRunMemoryCandidates(runId: string): Promise<void> {
+    for (const candidate of this.taskStore.getPendingMemoryCandidates({ runId, limit: 100 })) {
+      if (this.memoryCandidatePolicy.decide(candidate) === "rejected") {
+        this.taskStore.decideMemoryCandidate(candidate.id, "rejected");
+        continue;
+      }
+      this.taskStore.decideMemoryCandidate(candidate.id, "approved");
+      await this.memory.remember({
+        scope: candidate.scope,
+        kind: candidate.kind,
+        content: candidate.content,
+        metadata: {
+          runId: candidate.runId || "",
+          taskId: candidate.taskId || "",
+          candidateId: candidate.id,
+          committedBy: "main-agent",
+        },
+      });
+    }
   }
 
   formatTaskResult(role: string, finishedTask: Task): { agent: string; role: string; taskId: string; status: string; content: string } {
@@ -204,6 +295,19 @@ export class MainAgent {
       prompt,
     });
   }
+}
+
+function runStatusFrom({
+  subResults,
+  reviewerVerdict,
+}: {
+  subResults: Array<{ status: string }>;
+  reviewerVerdict?: ReviewerVerdict;
+}): "done" | "failed" | "blocked" {
+  if (subResults.some((result) => result.status !== "done")) return "failed";
+  if (reviewerVerdict?.verdict === "needs_user_input") return "blocked";
+  if (reviewerVerdict?.verdict === "fail") return "failed";
+  return "done";
 }
 
 function formatExperiences(experiences: ExperienceRecallResult[]): string[] {

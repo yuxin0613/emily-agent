@@ -20,6 +20,15 @@ export class EchoModelProvider {
       return "我会优先从短期上下文、文件记忆和语义检索中取回相关信息，再整理成主 agent 可直接使用的上下文。";
     }
 
+    if (agent === "reviewer") {
+      return JSON.stringify({
+        verdict: "pass",
+        reasons: ["当前 subagent 结果已形成可汇总输出。"],
+        retrySuggested: false,
+        confidence: 0.82,
+      });
+    }
+
     return [
       "收到。当前运行的是本地 EchoModelProvider，所以我会展示编排结果而不是调用真实 LLM。",
       "",

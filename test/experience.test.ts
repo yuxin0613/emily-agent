@@ -44,6 +44,8 @@ assert.equal(result.updates.length, 2);
 const active = experienceStore.listActive();
 assert.equal(active.length, 1);
 assert.equal(active[0].revision, 2);
+assert.ok(active[0].applicability.length > 0);
+assert.ok(active[0].contraindications.length > 0);
 assert.ok(active[0].evidenceTaskIds.includes(first.id));
 assert.ok(active[0].evidenceTaskIds.includes(second.id));
 
@@ -66,6 +68,8 @@ const similar = experienceStore.upsertExperience({
   summary: "Worker crash recovery should rely on SQLite leases, heartbeat renewal, and inspector fallback.",
   problemPattern: "Worker process exits before notifying the main agent",
   solutionPattern: "Use SQLite lease expiration and an inspector task to verify final state before retrying.",
+  applicability: "Use when a worker exits without IPC notification but SQLite state remains the source of truth.",
+  contraindications: ["Do not use when the worker produced no persisted state and no inspector is available."],
   evidenceTaskIds: ["manual-evidence"],
   evidenceEventIds: [],
   confidence: 0.93,
@@ -75,6 +79,7 @@ const similar = experienceStore.upsertExperience({
 assert.equal(similar.action, "replace");
 assert.equal(similar.experience.id, active[0].id);
 assert.equal(similar.experience.revision, 3);
+assert.match(similar.experience.applicability, /worker exits/);
 
 const feedback = experienceStore.addFeedback({
   experienceId: similar.experience.id,
@@ -83,6 +88,29 @@ const feedback = experienceStore.addFeedback({
 });
 assert.equal(feedback.rating, "useful");
 assert.equal(experienceStore.getFeedback(similar.experience.id).length, 1);
+
+const conflict = experienceStore.upsertExperience({
+  scope: "project",
+  type: "solution",
+  topicKey: similar.experience.topicKey,
+  title: "Best practice: production recovery has a different operational path",
+  summary: "Production recovery keeps the same lease concept but uses a separate operations path.",
+  problemPattern: "Worker process exits before notifying the main agent",
+  solutionPattern: "Use a production-specific recovery path and keep it separate from local runtime recovery.",
+  applicability: "Use only for production deployments with a separate operations recovery path.",
+  contraindications: ["Do not merge with the local runtime recovery path."],
+  evidenceTaskIds: ["production-evidence"],
+  evidenceEventIds: [],
+  confidence: 0.9,
+  importance: 0.9,
+  changeReason: "conflict: production deployment has a different scenario.",
+});
+assert.equal(conflict.action, "conflict");
+assert.notEqual(conflict.experience.id, similar.experience.id);
+
+const deprecated = experienceStore.deprecateExperience(conflict.experience.id, "No longer preferred.");
+assert.equal(deprecated.status, "deprecated");
+assert.ok(!experienceStore.recall("production recovery path", { scope: "project" }).some((item) => item.id === deprecated.id));
 
 experienceStore.close();
 taskStore.close();

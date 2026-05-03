@@ -25,6 +25,8 @@ interface ExperienceRow {
   summary: string;
   problem_pattern: string;
   solution_pattern: string;
+  applicability: string;
+  contraindications: string;
   evidence_task_ids: string;
   evidence_event_ids: string;
   confidence: number;
@@ -42,6 +44,8 @@ interface ExperienceRevisionRow {
   summary: string;
   problem_pattern: string;
   solution_pattern: string;
+  applicability: string;
+  contraindications: string;
   confidence: number;
   importance: number;
   evidence_task_ids: string;
@@ -178,6 +182,16 @@ export class ExperienceStore {
           `);
         },
       },
+      {
+        version: 3,
+        name: "add_experience_applicability",
+        up: () => {
+          this.ensureColumn("experiences", "applicability", "TEXT NOT NULL DEFAULT ''");
+          this.ensureColumn("experiences", "contraindications", "TEXT NOT NULL DEFAULT '[]'");
+          this.ensureColumn("experience_revisions", "applicability", "TEXT NOT NULL DEFAULT ''");
+          this.ensureColumn("experience_revisions", "contraindications", "TEXT NOT NULL DEFAULT '[]'");
+        },
+      },
     ]);
   }
 
@@ -194,6 +208,17 @@ export class ExperienceStore {
     const action = this.chooseUpdateAction(existing, normalized);
     if (action === "skip") {
       return { action, experience: existing };
+    }
+
+    if (action === "conflict" || action === "split") {
+      return {
+        action,
+        experience: this.createExperience({
+          ...normalized,
+          topicKey: `${normalized.topicKey}_${action}_${Date.now()}`.slice(0, 128),
+          changeReason: `${action} from ${existing.id}: ${normalized.changeReason}`,
+        }),
+      };
     }
 
     return {
@@ -258,6 +283,21 @@ export class ExperienceStore {
     return feedback;
   }
 
+  deprecateExperience(experienceId: string, reason: string): Experience {
+    const existing = this.listActive().find((experience) => experience.id === experienceId);
+    if (!existing) throw new Error(`Experience not found: ${experienceId}`);
+    this.archiveRevision(existing, reason);
+    this.archiveVector(existing.id, existing.revision);
+    this.db
+      .prepare("UPDATE experiences SET status = 'deprecated', updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), experienceId);
+    return {
+      ...existing,
+      status: "deprecated",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   getFeedback(experienceId: string): ExperienceFeedback[] {
     const rows = this.db
       .prepare("SELECT * FROM experience_feedback WHERE experience_id = ? ORDER BY created_at DESC")
@@ -299,6 +339,8 @@ export class ExperienceStore {
       summary: candidate.summary,
       problemPattern: candidate.problemPattern,
       solutionPattern: candidate.solutionPattern,
+      applicability: candidate.applicability || defaultApplicability(candidate),
+      contraindications: candidate.contraindications || [],
       evidenceTaskIds: candidate.evidenceTaskIds,
       evidenceEventIds: candidate.evidenceEventIds || [],
       confidence: candidate.confidence,
@@ -312,10 +354,10 @@ export class ExperienceStore {
       .prepare(`
         INSERT INTO experiences (
           id, revision, status, scope, type, topic_key, title, summary,
-          problem_pattern, solution_pattern, evidence_task_ids, evidence_event_ids,
+          problem_pattern, solution_pattern, applicability, contraindications, evidence_task_ids, evidence_event_ids,
           confidence, importance, reuse_count, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         experience.id,
@@ -328,6 +370,8 @@ export class ExperienceStore {
         experience.summary,
         experience.problemPattern,
         experience.solutionPattern,
+        experience.applicability,
+        JSON.stringify(experience.contraindications),
         JSON.stringify(experience.evidenceTaskIds),
         JSON.stringify(experience.evidenceEventIds),
         experience.confidence,
@@ -355,6 +399,12 @@ export class ExperienceStore {
       summary: action === "replace" ? candidate.summary : mergeText(existing.summary, candidate.summary),
       problemPattern: action === "replace" ? candidate.problemPattern : mergeText(existing.problemPattern, candidate.problemPattern),
       solutionPattern: action === "replace" ? candidate.solutionPattern : mergeText(existing.solutionPattern, candidate.solutionPattern),
+      applicability: action === "replace"
+        ? (candidate.applicability || defaultApplicability(candidate))
+        : mergeText(existing.applicability, candidate.applicability || defaultApplicability(candidate)),
+      contraindications: action === "replace"
+        ? (candidate.contraindications || [])
+        : unique([...existing.contraindications, ...(candidate.contraindications || [])]),
       confidence: Math.max(existing.confidence, candidate.confidence),
       importance: Math.max(existing.importance, candidate.importance),
       evidenceTaskIds: mergedTaskIds,
@@ -366,7 +416,8 @@ export class ExperienceStore {
       .prepare(`
         UPDATE experiences
         SET revision = ?, title = ?, summary = ?, problem_pattern = ?, solution_pattern = ?,
-            evidence_task_ids = ?, evidence_event_ids = ?, confidence = ?, importance = ?, updated_at = ?
+            applicability = ?, contraindications = ?, evidence_task_ids = ?, evidence_event_ids = ?,
+            confidence = ?, importance = ?, updated_at = ?
         WHERE id = ?
       `)
       .run(
@@ -375,6 +426,8 @@ export class ExperienceStore {
         next.summary,
         next.problemPattern,
         next.solutionPattern,
+        next.applicability,
+        JSON.stringify(next.contraindications),
         JSON.stringify(next.evidenceTaskIds),
         JSON.stringify(next.evidenceEventIds),
         next.confidence,
@@ -387,6 +440,8 @@ export class ExperienceStore {
   }
 
   private chooseUpdateAction(existing: Experience, candidate: ExperienceCandidate): ExperienceUpdateAction {
+    if (/conflict|冲突|不同场景/.test(candidate.changeReason)) return "conflict";
+    if (/split|拆分/.test(candidate.changeReason)) return "split";
     const feedbackPenalty = Math.min(0.16, Math.abs(Math.min(0, this.feedbackScore(existing.id))) * 0.1);
     const stronger = candidate.importance > existing.importance + 0.05 || candidate.confidence > existing.confidence + 0.08;
     const sameEvidence = candidate.evidenceTaskIds.every((id) => existing.evidenceTaskIds.includes(id));
@@ -411,9 +466,10 @@ export class ExperienceStore {
       .prepare(`
         INSERT INTO experience_revisions (
           id, experience_id, revision, title, summary, problem_pattern, solution_pattern,
-          confidence, importance, evidence_task_ids, evidence_event_ids, change_reason, created_at
+          applicability, contraindications, confidence, importance, evidence_task_ids, evidence_event_ids,
+          change_reason, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         randomUUID(),
@@ -423,6 +479,8 @@ export class ExperienceStore {
         existing.summary,
         existing.problemPattern,
         existing.solutionPattern,
+        existing.applicability,
+        JSON.stringify(existing.contraindications),
         existing.confidence,
         existing.importance,
         JSON.stringify(existing.evidenceTaskIds),
@@ -456,6 +514,12 @@ export class ExperienceStore {
       .run(experienceId, revision);
   }
 
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (columns.some((item) => item.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -468,6 +532,8 @@ function formatExperienceForEmbedding(experience: Experience): string {
     experience.summary,
     experience.problemPattern,
     experience.solutionPattern,
+    experience.applicability,
+    ...experience.contraindications,
   ].join("\n");
 }
 
@@ -483,6 +549,8 @@ function parseExperience(row: ExperienceRow): Experience {
     summary: row.summary,
     problemPattern: row.problem_pattern,
     solutionPattern: row.solution_pattern,
+    applicability: row.applicability || "",
+    contraindications: parseStringArray(row.contraindications),
     evidenceTaskIds: JSON.parse(row.evidence_task_ids || "[]") as string[],
     evidenceEventIds: JSON.parse(row.evidence_event_ids || "[]") as number[],
     confidence: row.confidence,
@@ -502,6 +570,8 @@ function parseRevision(row: ExperienceRevisionRow): ExperienceRevision {
     summary: row.summary,
     problemPattern: row.problem_pattern,
     solutionPattern: row.solution_pattern,
+    applicability: row.applicability || "",
+    contraindications: parseStringArray(row.contraindications),
     confidence: row.confidence,
     importance: row.importance,
     evidenceTaskIds: JSON.parse(row.evidence_task_ids || "[]") as string[],
@@ -530,9 +600,24 @@ function scoreRecall(experience: ExperienceRecallResult, feedbackScore: number):
 }
 
 function mergeText(left: string, right: string): string {
+  if (!left) return right;
+  if (!right) return left;
   if (left.includes(right)) return left;
   if (right.includes(left)) return right;
   return `${left}\n${right}`;
+}
+
+function defaultApplicability(candidate: ExperienceCandidate): string {
+  return `Use when ${candidate.problemPattern}`;
+}
+
+function parseStringArray(raw: string): string[] {
+  try {
+    const value = JSON.parse(raw || "[]") as unknown;
+    return Array.isArray(value) ? value.map(String) : [];
+  } catch {
+    return [];
+  }
 }
 
 function unique(values: string[]): string[] {

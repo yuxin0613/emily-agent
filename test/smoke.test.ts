@@ -15,6 +15,8 @@ const response = await runtime.handleUserMessage("帮我设计一个 Node 多 ag
 assert.equal(response.agent, "emily");
 assert.ok(response.content.includes("EchoModelProvider"));
 assert.deepEqual(response.delegatedTo, ["planner", "developer"]);
+assert.ok(response.subResults?.some((result) => result.role === "reviewer"));
+assert.equal(response.reviewerVerdict?.verdict, "pass");
 
 const memory = await runtime.memory.recall("Node 多 agent 架构", {
   sessionId: "smoke",
@@ -26,8 +28,26 @@ assert.ok(memory.shortTerm.length > 0);
 assert.ok(memory.files.length > 0);
 assert.ok(memory.semantic.length > 0);
 
-const events = runtime.taskStore.getLatestEvents({ limit: 10 });
+const events = runtime.taskStore.getLatestEvents({ limit: 80 });
 assert.ok(events.some((event) => event.type === "task.done"));
+assert.ok(events.some((event) => event.type === "run.completed"));
+assert.ok(response.runId);
+const candidates = runtime.taskStore.getMemoryCandidatesForRun(response.runId);
+assert.ok(candidates.length > 0);
+assert.ok(candidates.some((candidate) => candidate.status === "approved"));
+
+const reviewer = response.subResults?.find((result) => result.role === "reviewer");
+assert.ok(reviewer);
+const trace = runtime.getTaskTrace(reviewer.taskId);
+assert.ok(trace.events.some((event) => event.type === "task.done"));
+const timeline = runtime.getTimeline({ runId: response.runId });
+assert.ok(timeline.tasks.length >= 3);
+assert.ok(timeline.events.some((event) => event.type === "run.started"));
+assert.ok(runtime.renderTimeline(response.runId).includes("run done"));
+const health = runtime.health();
+assert.equal(health.runningTasks, 0);
+const maintenance = await runtime.maintenance();
+assert.ok(maintenance.health.activeExperiences >= 0);
 
 await runtime.shutdown();
 

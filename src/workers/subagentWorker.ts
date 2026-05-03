@@ -50,7 +50,7 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000 }: Star
 
     const result = role === "inspector"
       ? await inspectTask({ task, taskStore })
-      : await runRoleTask({ role, task, memory, model });
+      : await runRoleTask({ role, task, memory, model, taskStore });
 
     eventId = taskStore.finishTask(taskId, {
       result,
@@ -87,11 +87,13 @@ async function runRoleTask({
   task,
   memory,
   model,
+  taskStore,
 }: {
   role: string;
   task: Task;
   memory: MemorySystem;
   model: EchoModelProvider;
+  taskStore: TaskStore;
 }): Promise<string> {
   const definition = await readRoleDefinition(role);
   const toolGateway = new ToolGateway(definition);
@@ -121,6 +123,14 @@ async function runRoleTask({
     ].join("\n"),
     sessionId: String(task.metadata.sessionId || "default"),
     relevantMemory,
+  });
+  taskStore.createMemoryCandidate({
+    runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
+    taskId: task.id,
+    scope: String(task.metadata.sessionId || "default"),
+    kind: "subagent:result",
+    content: response.content,
+    createdBy: role,
   });
 
   return response.content;
