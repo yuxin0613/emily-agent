@@ -9,6 +9,7 @@ import type { ExperienceRecallResult } from "../types.ts";
 import type { ContextEngine } from "../context/ContextEngine.ts";
 import type { LifecycleHooks } from "../runtime/LifecycleHooks.ts";
 import type { AgentRouter } from "../routing/AgentRouter.ts";
+import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { parseReviewerVerdict, type ReviewerVerdict } from "../review/ReviewerVerdict.ts";
 import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
 import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts";
@@ -105,7 +106,7 @@ export class MainAgent {
     this.router = router;
   }
 
-  async handleUserMessage(input: string, context: { sessionId?: string; source?: string } = {}): Promise<MainAgentResult> {
+  async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}): Promise<MainAgentResult> {
     const normalizedInput = String(input || "").trim();
     if (!normalizedInput) {
       return {
@@ -117,6 +118,7 @@ export class MainAgent {
 
     const sessionId = context.sessionId || "default";
     const source = context.source || "unknown";
+    const permissionMode = parsePermissionMode(context.permissionMode);
     const run = this.taskStore.createRun({
       sessionId,
       source,
@@ -124,7 +126,7 @@ export class MainAgent {
     });
     await this.hooks?.emit("beforeRun", {
       run,
-      payload: { input: normalizedInput, sessionId, source },
+      payload: { input: normalizedInput, sessionId, source, permissionMode },
     });
     const selectedAgents = this.selectSubAgents(normalizedInput);
     let delegatedTo = selectedAgents;
@@ -137,7 +139,7 @@ export class MainAgent {
         scope: sessionId,
         kind: "message:user",
         content: normalizedInput,
-        metadata: { source, runId: run.id },
+        metadata: { source, runId: run.id, permissionMode },
       });
 
       if (requiresDeliveryLevelClarification(normalizedInput)) {
@@ -190,6 +192,7 @@ export class MainAgent {
         source,
         runId: run.id,
         selectedAgents,
+        permissionMode,
       });
       subResults = delegated.subResults;
       reviewerVerdict = delegated.reviewerVerdict;
@@ -336,12 +339,14 @@ export class MainAgent {
     source,
     selectedAgents,
     runId,
+    permissionMode,
   }: {
     input: string;
     sessionId: string;
     source: string;
     runId: string;
     selectedAgents: string[];
+    permissionMode?: ReturnType<typeof parsePermissionMode>;
   }): Promise<{
     subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }>;
     reviewerVerdict?: ReviewerVerdict;
@@ -362,6 +367,7 @@ export class MainAgent {
         timeoutMs: 30000,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
+        permissionMode: permissionMode || "workspace_write",
       },
       spec: {
         tasks: [
@@ -432,6 +438,7 @@ export class MainAgent {
         runId,
         createdBy: this.name,
         planSourceTaskId: finishedPlanner.id,
+        permissionMode: permissionMode || "workspace_write",
       },
     });
     const executor = new TaskGraphExecutor({
@@ -493,6 +500,7 @@ export class MainAgent {
             graphRole: "reviewer",
             graphId: execution.graphId || "",
             acceptanceCriteria: plan.review.criteria,
+            permissionMode: permissionMode || "workspace_write",
           },
         });
         for (const result of results.filter((item) => item.role !== "planner")) {
@@ -645,6 +653,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
         expandable: false,
         expansionGoal: "",
         maxExpansionDepth: 0,
+        permissionMode: "workspace_write",
       }],
       review: {
         required: true,
@@ -662,6 +671,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "- Use dependencies instead of prose ordering.",
     "- Keep the first wave small enough to execute now; use planningMode=rolling for larger goals.",
     "- Use deliveryLevel to decide exit criteria: poc, uat, production.",
+    "- task.permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when a task needs a narrower or explicit guardrail.",
     "",
     `User request: ${input}`,
   ].join("\n");

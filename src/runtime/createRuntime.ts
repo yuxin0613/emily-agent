@@ -2,9 +2,11 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
+import { createCommandRegistry } from "../commands/CommandRegistry.ts";
 import { ContextEngine } from "../context/ContextEngine.ts";
 import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
+import { GATEWAY_METHODS } from "../gateway/GatewayProtocol.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
@@ -18,8 +20,16 @@ import { SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
+import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { renderTimeline } from "../timeline/renderTimeline.ts";
+import { buildDoctorReport } from "./Doctor.ts";
 import { LifecycleHooks, type LifecycleHookHandler, type LifecycleHookName } from "./LifecycleHooks.ts";
+import {
+  exportSession as exportSessionData,
+  previewSessionCompaction as previewSessionCompactionData,
+  resumeLatestSession as resumeLatestSessionData,
+  sessionUsage as sessionUsageData,
+} from "./SessionOps.ts";
 
 export async function createRuntime(options: {
   dataDir?: string;
@@ -150,6 +160,170 @@ export async function createRuntime(options: {
     };
   }
 
+  function diagnostics(options: { repair?: boolean; emit?: boolean } = {}) {
+    return taskStore.diagnostics(options);
+  }
+
+  function securityAudit(options: { emit?: boolean } = {}) {
+    return runSecurityAudit({
+      roleManager,
+      providerRegistry,
+      toolRegistry,
+      skillRegistry,
+      taskStore,
+      emit: options.emit,
+    });
+  }
+
+  async function doctor(options: { deep?: boolean; repair?: boolean } = {}) {
+    return buildDoctorReport({
+      deep: options.deep === true,
+      repair: options.repair === true,
+      health,
+      diagnostics,
+      checkProviders: (input) => providerRegistry.health(input),
+      securityAudit,
+      pendingMemoryCandidates: () => taskStore.getPendingMemoryCandidates({ limit: 1000 }).length,
+      proposedSkillCandidates: () => skillCandidateStore.countByStatus("proposed"),
+      sessions: sessionCounts,
+      gateway: () => ({
+        enabled: true,
+        protocolVersion: 1,
+        methods: GATEWAY_METHODS.length,
+      }),
+      maintenance: () => maintenance(),
+    });
+  }
+
+  function sessionCounts() {
+    return {
+      active: taskStore.listSessions({ status: "active", limit: 10000 }).length,
+      hidden: taskStore.listSessions({ status: "hidden", limit: 10000 }).length,
+      trashed: taskStore.listSessions({ status: "trashed", limit: 10000 }).length,
+    };
+  }
+
+  function resumeLatestSession(options: { includeHidden?: boolean } = {}) {
+    return resumeLatestSessionData({
+      taskStore,
+      includeHidden: options.includeHidden === true,
+    });
+  }
+
+  function exportSession(sessionId: string, options: { format?: "json" | "markdown" } = {}) {
+    return exportSessionData({
+      taskStore,
+      sessionId,
+      format: options.format === "markdown" ? "markdown" : "json",
+    });
+  }
+
+  function previewSessionCompaction(sessionId: string, options: { maxMessages?: number } = {}) {
+    return previewSessionCompactionData({
+      taskStore,
+      sessionId,
+      maxMessages: options.maxMessages,
+    });
+  }
+
+  function sessionUsage(sessionId: string) {
+    return sessionUsageData({
+      taskStore,
+      sessionId,
+      providerUsage: (runIds) => providerUsageStore.summaryForRuns(runIds),
+    });
+  }
+
+  async function maintenance(options: {
+    day?: Date;
+    staleRunMs?: number;
+    maxEvents?: number;
+    pruneMemoryCandidateDays?: number;
+    maxFileMemoryRecords?: number;
+    maxVectorMemoryRecords?: number;
+    pruneArchivedExperienceVectorDays?: number;
+    sessionTrashDays?: number;
+    skillLookbackDays?: number;
+    skillMinOccurrences?: number;
+    skillMinScore?: number;
+    skillDailyLimit?: number;
+  } = {}) {
+    const reconcile = await roleAgentManager.reconcile();
+    const taskGraphs = taskStore.refreshTaskGraphStatuses();
+    const staleRuns = taskStore.recoverStaleRuns({
+      olderThanMs: options.staleRunMs ?? 5 * 60 * 1000,
+    });
+    const anomalies = taskStore.diagnostics({ repair: true });
+    const memoryCandidates = await approvePendingMemoryCandidates();
+    const experiences = experienceBuilder.buildDailyExperiences({
+      day: options.day || new Date(),
+    });
+    const skillCandidates = skillBuilder.buildSkillCandidates({
+      day: options.day || new Date(),
+      lookbackDays: options.skillLookbackDays,
+      minOccurrences: options.skillMinOccurrences,
+      minScore: options.skillMinScore,
+      dailyLimit: options.skillDailyLimit,
+    });
+    const memoryCompaction = await memory.compact({
+      maxFileRecords: options.maxFileMemoryRecords,
+      maxVectorRecords: options.maxVectorMemoryRecords,
+    });
+    const experienceIndex = experienceStore.maintenance({
+      rebuildVectors: true,
+      pruneArchivedVectorDays: options.pruneArchivedExperienceVectorDays,
+    });
+    const database = taskStore.maintenance({
+      maxEvents: options.maxEvents,
+      pruneDecidedMemoryCandidatesOlderThanDays: options.pruneMemoryCandidateDays,
+    });
+    const sessions = {
+      archived: taskStore.archiveHiddenSessions({
+        deleteAfterDays: options.sessionTrashDays ?? 30,
+      }).length,
+      pruned: taskStore.pruneTrashedSessions({
+        olderThanDays: options.sessionTrashDays ?? 30,
+      }),
+    };
+    return {
+      reconcile: {
+        expiredLeaseTasks: reconcile.expiredLeaseTasks.length,
+        needsInspectionTasks: reconcile.needsInspectionTasks.length,
+        unacknowledgedTerminalTasks: reconcile.unacknowledgedTerminalTasks.length,
+      },
+      taskGraphs: {
+        updated: taskGraphs.length,
+      },
+      staleRuns: {
+        recovered: staleRuns.length,
+      },
+      diagnostics: {
+        anomalies: anomalies.length,
+        repaired: anomalies.filter((anomaly) => anomaly.repaired).length,
+      },
+      memoryCandidates,
+      experiences,
+      skillCandidates,
+      memoryCompaction,
+      experienceIndex,
+      database,
+      sessions,
+      health: health(),
+    };
+  }
+
+  const commandRegistry = createCommandRegistry({
+    doctor,
+    listTools: () => toolRegistry.list(),
+    listSkills: () => skillRegistry.list(),
+    listProviders: () => providerRegistry.list(),
+    listRoles: () => roleManager.listRoles(),
+    resumeLatestSession,
+    exportSession,
+    previewSessionCompaction,
+    sessionUsage,
+  });
+
   return {
     dataDir,
     memory,
@@ -262,19 +436,23 @@ export async function createRuntime(options: {
     listSessionMessages(options: Parameters<TaskStore["listSessionMessages"]>[0]) {
       return taskStore.listSessionMessages(options);
     },
-    async handleUserMessage(input: string, context: { sessionId?: string; source?: string } = {}) {
+    async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}) {
       const sessionId = context.sessionId || "default";
       const source = context.source || "unknown";
+      const permissionMode = parsePermissionMode(context.permissionMode);
       const normalizedInput = String(input || "").trim();
       if (normalizedInput) {
         taskStore.addSessionMessage({
           sessionId,
           role: "user",
           content: normalizedInput,
-          metadata: { source },
+          metadata: { source, permissionMode },
         });
       }
-      const result = await mainAgent.handleUserMessage(input, context);
+      const result = await mainAgent.handleUserMessage(input, {
+        ...context,
+        permissionMode,
+      });
       taskStore.addSessionMessage({
         sessionId,
         runId: typeof result.runId === "string" ? result.runId : null,
@@ -284,6 +462,7 @@ export async function createRuntime(options: {
         metadata: {
           source: "main-agent",
           needsUserInput: Boolean(result.needsUserInput),
+          permissionMode,
         },
       });
       return result;
@@ -312,17 +491,18 @@ export async function createRuntime(options: {
     getTaskTrace(taskId: string) {
       return taskStore.getTaskTrace(taskId);
     },
-    diagnostics(options: { repair?: boolean } = {}) {
-      return taskStore.diagnostics(options);
+    diagnostics,
+    securityAudit,
+    doctor,
+    resumeLatestSession,
+    exportSession,
+    previewSessionCompaction,
+    sessionUsage,
+    listCommands() {
+      return commandRegistry.list();
     },
-    securityAudit() {
-      return runSecurityAudit({
-        roleManager,
-        providerRegistry,
-        toolRegistry,
-        skillRegistry,
-        taskStore,
-      });
+    runCommand(name: string, options: { args?: string[]; format?: "json" | "text" } = {}) {
+      return commandRegistry.run(name, options.args || [], { format: options.format || "json" });
     },
     async cancelTask(taskId: string, reason?: string) {
       return roleAgentManager.cancelTask(taskId, reason);
@@ -335,83 +515,7 @@ export async function createRuntime(options: {
       return renderTimeline(taskStore.getTimeline({ runId }));
     },
     health,
-    async maintenance(options: {
-      day?: Date;
-      staleRunMs?: number;
-      maxEvents?: number;
-      pruneMemoryCandidateDays?: number;
-      maxFileMemoryRecords?: number;
-      maxVectorMemoryRecords?: number;
-      pruneArchivedExperienceVectorDays?: number;
-      sessionTrashDays?: number;
-      skillLookbackDays?: number;
-      skillMinOccurrences?: number;
-      skillMinScore?: number;
-      skillDailyLimit?: number;
-    } = {}) {
-      const reconcile = await roleAgentManager.reconcile();
-      const taskGraphs = taskStore.refreshTaskGraphStatuses();
-      const staleRuns = taskStore.recoverStaleRuns({
-        olderThanMs: options.staleRunMs ?? 5 * 60 * 1000,
-      });
-      const anomalies = taskStore.diagnostics({ repair: true });
-      const memoryCandidates = await approvePendingMemoryCandidates();
-      const experiences = experienceBuilder.buildDailyExperiences({
-        day: options.day || new Date(),
-      });
-      const skillCandidates = skillBuilder.buildSkillCandidates({
-        day: options.day || new Date(),
-        lookbackDays: options.skillLookbackDays,
-        minOccurrences: options.skillMinOccurrences,
-        minScore: options.skillMinScore,
-        dailyLimit: options.skillDailyLimit,
-      });
-      const memoryCompaction = await memory.compact({
-        maxFileRecords: options.maxFileMemoryRecords,
-        maxVectorRecords: options.maxVectorMemoryRecords,
-      });
-      const experienceIndex = experienceStore.maintenance({
-        rebuildVectors: true,
-        pruneArchivedVectorDays: options.pruneArchivedExperienceVectorDays,
-      });
-      const database = taskStore.maintenance({
-        maxEvents: options.maxEvents,
-        pruneDecidedMemoryCandidatesOlderThanDays: options.pruneMemoryCandidateDays,
-      });
-      const sessions = {
-        archived: taskStore.archiveHiddenSessions({
-          deleteAfterDays: options.sessionTrashDays ?? 30,
-        }).length,
-        pruned: taskStore.pruneTrashedSessions({
-          olderThanDays: options.sessionTrashDays ?? 30,
-        }),
-      };
-      return {
-        reconcile: {
-          expiredLeaseTasks: reconcile.expiredLeaseTasks.length,
-          needsInspectionTasks: reconcile.needsInspectionTasks.length,
-          unacknowledgedTerminalTasks: reconcile.unacknowledgedTerminalTasks.length,
-        },
-        taskGraphs: {
-          updated: taskGraphs.length,
-        },
-        staleRuns: {
-          recovered: staleRuns.length,
-        },
-        diagnostics: {
-          anomalies: anomalies.length,
-          repaired: anomalies.filter((anomaly) => anomaly.repaired).length,
-        },
-        memoryCandidates,
-        experiences,
-        skillCandidates,
-        memoryCompaction,
-        experienceIndex,
-        database,
-        sessions,
-        health: health(),
-      };
-    },
+    maintenance,
     async shutdown() {
       await roleAgentManager.shutdown();
       providerUsageStore.close();

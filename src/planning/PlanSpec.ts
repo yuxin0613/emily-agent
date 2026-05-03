@@ -1,4 +1,4 @@
-import type { Metadata, TaskDependency } from "../types.ts";
+import type { Metadata, PermissionMode, TaskDependency } from "../types.ts";
 
 export type DeliveryLevel = "poc" | "uat" | "production";
 export type PlanningMode = "single_wave" | "rolling";
@@ -23,6 +23,7 @@ export interface PlanTaskSpec {
   expandable: boolean;
   expansionGoal: string;
   maxExpansionDepth: number;
+  permissionMode?: PermissionMode;
   metadata?: Metadata;
 }
 
@@ -254,6 +255,7 @@ export function validatePlanSpec(spec: PlanSpec): PlanValidationResult {
     if (task.maxMemoryCandidates < 0 || task.maxMemoryCandidates > 20) errors.push(`maxMemoryCandidates out of range for ${task.key}`);
     if (task.wave < 1 || task.wave > spec.maxWaves) errors.push(`wave out of range for ${task.key}`);
     if (task.maxExpansionDepth < 0 || task.maxExpansionDepth > 20) errors.push(`maxExpansionDepth out of range for ${task.key}`);
+    if (task.permissionMode && !isPermissionMode(task.permissionMode)) errors.push(`invalid permissionMode for ${task.key}: ${task.permissionMode}`);
   }
 
   for (const task of spec.tasks) {
@@ -304,6 +306,7 @@ export function validateGraphPatchSpec(
     if (task.maxMemoryCandidates < 0 || task.maxMemoryCandidates > 20) errors.push(`maxMemoryCandidates out of range for ${task.key}`);
     if (task.wave < 1 || task.wave > maxWave) errors.push(`wave out of range for ${task.key}`);
     if (task.maxExpansionDepth < 0 || task.maxExpansionDepth > 20) errors.push(`maxExpansionDepth out of range for ${task.key}`);
+    if (task.permissionMode && !isPermissionMode(task.permissionMode)) errors.push(`invalid permissionMode for ${task.key}: ${task.permissionMode}`);
   }
 
   const allowedKeys = new Set([...existingKeys, ...keys]);
@@ -411,6 +414,7 @@ function normalizeTaskSpec(item: unknown, index: number, defaultParentKey?: stri
     expandable: item.expandable === true,
     expansionGoal: stringValue(item.expansionGoal),
     maxExpansionDepth: boundedInteger(item.maxExpansionDepth, 0, 0, 20),
+    permissionMode: parsePermissionModeValue(item.permissionMode),
     metadata: isObject(item.metadata) ? item.metadata as Metadata : undefined,
   });
 }
@@ -440,8 +444,18 @@ function planTask(input: Partial<PlanTaskSpec> & {
     expandable: input.expandable === true,
     expansionGoal: input.expansionGoal || "",
     maxExpansionDepth: input.maxExpansionDepth ?? 0,
+    permissionMode: input.permissionMode,
     metadata: input.metadata,
   };
+}
+
+function parsePermissionModeValue(value: unknown): PermissionMode | undefined {
+  if (value === "read_only" || value === "workspace_write" || value === "danger_full_access") return value;
+  return undefined;
+}
+
+function isPermissionMode(value: unknown): value is PermissionMode {
+  return value === "read_only" || value === "workspace_write" || value === "danger_full_access";
 }
 
 function emptyPatch(parentKey: string, reason: string): GraphPatchSpec {

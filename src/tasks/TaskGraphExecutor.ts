@@ -433,6 +433,7 @@ export class TaskGraphExecutor {
           expandable: false,
           expansionGoal: "",
           maxExpansionDepth: 0,
+          permissionMode: "workspace_write",
         }],
       }, null, 2),
       "",
@@ -445,6 +446,7 @@ export class TaskGraphExecutor {
       "- If user input is required, return needsUserInput=true with questions and tasks=[].",
       "- Keep the patch focused on the next executable layer, not the entire project.",
       "- Mark a new task expandable=true only when it should be decomposed again after completion.",
+      "- permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when appropriate.",
       "",
       "Current plan:",
       `goal: ${this.plan?.goal || ""}`,
@@ -532,6 +534,7 @@ export class TaskGraphExecutor {
       acceptanceCriteria: spec.acceptanceCriteria,
       toolHints: spec.toolHints,
       skillHints: spec.skillHints,
+      permissionMode: spec.permissionMode || parentTask.metadata.permissionMode || "workspace_write",
       timeoutMs: spec.timeoutMs,
       maxResultChars: spec.maxResultChars,
       maxMemoryCandidates: spec.maxMemoryCandidates,
@@ -601,5 +604,6 @@ function baseGraphMetadata(task: Task): Metadata {
     failureStrategy: typeof task.metadata.failureStrategy === "string" ? task.metadata.failureStrategy : "",
     exitCriteria: Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria : [],
     maxWaves: typeof task.metadata.maxWaves === "number" ? task.metadata.maxWaves : 1,
+    permissionMode: typeof task.metadata.permissionMode === "string" ? task.metadata.permissionMode : "workspace_write",
   };
 }

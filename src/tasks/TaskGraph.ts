@@ -94,6 +94,7 @@ export function createTaskGraphFromPlan({
           toolHints: task.toolHints,
           skillHints: task.skillHints,
           parentKey: task.parentKey || "",
+          permissionMode: task.permissionMode || baseMetadata.permissionMode || "workspace_write",
           timeoutMs: task.timeoutMs,
           maxResultChars: task.maxResultChars,
           maxMemoryCandidates: task.maxMemoryCandidates,

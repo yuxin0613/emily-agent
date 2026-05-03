@@ -43,9 +43,15 @@ function printHelp(): void {
     "Commands:",
     "  :help                         show commands",
     "  :health                       runtime health",
+    "  :doctor [deep|repair]         aggregated runtime doctor",
     "  :providers                    list providers",
     "  :roles                        list roles",
+    "  :commands                     list command registry entries",
     "  :sessions [all|hidden|trash]  list sessions",
+    "  :resume latest [hidden]       resume latest session",
+    "  :export-session <id> [md]     export session",
+    "  :compact-preview <id> [n]     preview session compaction",
+    "  :session-usage <id>           provider usage for a session",
     "  :tools                        list tools",
     "  :skills                       list skills",
     "  :candidates [status]          list skill candidates",
@@ -89,14 +95,37 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
     case "health":
       printHealth(runtime.health());
       return;
+    case "doctor":
+      printJson(await runtime.doctor({
+        deep: args.includes("deep") || args.includes("--deep"),
+        repair: args.includes("repair") || args.includes("--repair"),
+      }));
+      return;
     case "providers":
       printProviders(runtime.listProviders());
       return;
     case "roles":
       printRoles(await runtime.listRoles());
       return;
+    case "commands":
+      printCommands(runtime.listCommands());
+      return;
     case "sessions":
       printSessions(runtime.listSessions(sessionListOptions(args[0])));
+      return;
+    case "resume":
+      resumeLatest(runtime, state, args);
+      return;
+    case "export-session":
+      exportSession(runtime, args);
+      return;
+    case "compact-preview":
+      printJson(runtime.previewSessionCompaction(requiredArg(args[0], "session id"), {
+        maxMessages: numberArg(args[1], 20),
+      }));
+      return;
+    case "session-usage":
+      printJson(runtime.sessionUsage(requiredArg(args[0], "session id")));
       return;
     case "tools":
       printTools(runtime.listTools());
@@ -226,6 +255,20 @@ function printSessions(sessions): void {
   output.write("\n");
 }
 
+function printCommands(commands): void {
+  output.write("\nCommands\n");
+  printTable([
+    ["Name", "Aliases", "Perm", "Description"],
+    ...commands.map((command) => [
+      command.name,
+      (command.aliases || []).join(","),
+      command.permission || "",
+      truncate(command.description || "", 62),
+    ]),
+  ]);
+  output.write("\n");
+}
+
 function startNewSession(runtime, state, args: string[] = []): void {
   const session = runtime.createSession({
     title: args.join(" ") || "New session",
@@ -235,6 +278,30 @@ function startNewSession(runtime, state, args: string[] = []): void {
   state.sessionId = session.id;
   state.lastRunId = "";
   output.write(`\nNew session: ${session.id}\n\n`);
+}
+
+function resumeLatest(runtime, state, args: string[]): void {
+  if (args[0] && args[0] !== "latest") throw new Error("usage: :resume latest [hidden]");
+  const session = runtime.resumeLatestSession({
+    includeHidden: args.includes("hidden") || args.includes("--hidden"),
+  });
+  if (!session) {
+    output.write("\nNo session to resume.\n\n");
+    return;
+  }
+  selectSession(runtime, state, session.id);
+  output.write(`\nResumed session: ${session.id}\n\n`);
+}
+
+function exportSession(runtime, args: string[]): void {
+  const sessionId = requiredArg(args[0], "session id");
+  const format = args.includes("md") || args.includes("markdown") || args.includes("--markdown") ? "markdown" : "json";
+  const exported = runtime.exportSession(sessionId, { format });
+  if (format === "markdown") {
+    output.write(`\n${exported}\n`);
+    return;
+  }
+  printJson(exported);
 }
 
 function selectSession(runtime, state, sessionId: string): void {
@@ -420,6 +487,11 @@ function numberArg(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function requiredArg(value: string | undefined, label: string): string {
+  if (!value) throw new Error(`${label} is required`);
+  return value;
 }
 
 function formatValue(value: unknown): string {

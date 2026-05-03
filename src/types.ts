@@ -22,6 +22,8 @@ export type ToolPermission =
   | "git_reset"
   | "delete_file";
 
+export type PermissionMode = "read_only" | "workspace_write" | "danger_full_access";
+
 export interface ToolDefinition {
   name: ToolPermission;
   description: string;
@@ -38,6 +40,7 @@ export interface ToolHintResolution {
   allowed: ToolDefinition[];
   denied: string[];
   unknown: string[];
+  permissionMode?: PermissionMode;
 }
 
 export interface SkillDefinition {

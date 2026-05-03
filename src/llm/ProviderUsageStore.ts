@@ -248,6 +248,93 @@ export class ProviderUsageStore {
     };
   }
 
+  summaryForRuns(runIds: string[], { limit = 20 }: { limit?: number } = {}): ProviderUsageSummary {
+    const ids = unique(runIds.map(String).filter(Boolean));
+    const now = new Date();
+    if (!ids.length) {
+      return {
+        since: now.toISOString(),
+        until: now.toISOString(),
+        totals: emptyTotals(),
+        providers: [],
+        recent: [],
+      };
+    }
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`
+        SELECT provider_id, model,
+          COUNT(*) AS calls,
+          SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
+          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+          SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END) AS blocked,
+          SUM(input_tokens) AS inputTokens,
+          SUM(output_tokens) AS outputTokens,
+          SUM(total_tokens) AS totalTokens,
+          SUM(cost_usd) AS costUsd,
+          AVG(latency_ms) AS avgLatencyMs
+        FROM provider_usage
+        WHERE run_id IN (${placeholders})
+        GROUP BY provider_id, model
+        ORDER BY costUsd DESC, calls DESC
+      `)
+      .all(...ids) as Array<{
+        provider_id: string;
+        model: string;
+        calls: number;
+        success: number;
+        failed: number;
+        blocked: number;
+        inputTokens: number | null;
+        outputTokens: number | null;
+        totalTokens: number | null;
+        costUsd: number | null;
+        avgLatencyMs: number | null;
+      }>;
+    const providers = rows.map((row) => ({
+      providerId: row.provider_id,
+      model: row.model,
+      calls: row.calls,
+      success: row.success,
+      failed: row.failed,
+      blocked: row.blocked,
+      inputTokens: row.inputTokens || 0,
+      outputTokens: row.outputTokens || 0,
+      totalTokens: row.totalTokens || 0,
+      costUsd: row.costUsd || 0,
+      avgLatencyMs: Math.round(row.avgLatencyMs || 0),
+    }));
+    const totals = providers.reduce((acc, item) => ({
+      calls: acc.calls + item.calls,
+      success: acc.success + item.success,
+      failed: acc.failed + item.failed,
+      blocked: acc.blocked + item.blocked,
+      inputTokens: acc.inputTokens + item.inputTokens,
+      outputTokens: acc.outputTokens + item.outputTokens,
+      totalTokens: acc.totalTokens + item.totalTokens,
+      costUsd: acc.costUsd + item.costUsd,
+      avgLatencyMs: acc.avgLatencyMs + item.avgLatencyMs * item.calls,
+    }), emptyTotals());
+    if (totals.calls) totals.avgLatencyMs = Math.round(totals.avgLatencyMs / totals.calls);
+    return {
+      since: "",
+      until: now.toISOString(),
+      totals,
+      providers,
+      recent: this.recentForRuns(ids, { limit }),
+    };
+  }
+
+  recentForRuns(runIds: string[], { limit = 20 }: { limit?: number } = {}): ProviderUsageRecord[] {
+    const ids = unique(runIds.map(String).filter(Boolean));
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM provider_usage WHERE run_id IN (${placeholders}) ORDER BY created_at DESC LIMIT ?`)
+      .all(...ids, limit) as ProviderUsageRow[];
+    return rows.map(parseProviderUsage);
+  }
+
   recent({ since, until = new Date(), providerId, limit = 20 }: { since?: Date; until?: Date; providerId?: string; limit?: number } = {}): ProviderUsageRecord[] {
     const start = since || new Date(Date.now() - 24 * 60 * 60 * 1000);
     const rows = providerId
@@ -345,6 +432,10 @@ export class ProviderUsageStore {
       costUsd: row.costUsd || 0,
     };
   }
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 export function estimateTokens(value: string): number {

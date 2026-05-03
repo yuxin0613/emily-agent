@@ -2,6 +2,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
 import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
+import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { webAppHtml } from "./webUi.ts";
 
 export interface WebServerHandle {
@@ -18,7 +19,7 @@ export async function startWebServer({
   authToken = process.env.EMILY_WEB_TOKEN || randomUUID(),
 }: {
   runtime: {
-    handleUserMessage: (message: string, context: { sessionId?: string; source?: string }) => Promise<unknown>;
+    handleUserMessage: (message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown }) => Promise<unknown>;
     taskStore: { getLatestEvents: (options?: { afterId?: number; limit?: number }) => unknown[] };
     experienceStore: {
       listActive: () => unknown[];
@@ -28,7 +29,8 @@ export async function startWebServer({
     getTimeline: (options: { runId: string }) => unknown;
     getTaskTrace: (taskId: string) => unknown;
     diagnostics: (options?: { repair?: boolean }) => unknown;
-    securityAudit: () => Promise<unknown>;
+    securityAudit: (options?: { emit?: boolean }) => Promise<unknown>;
+    doctor: (options?: { deep?: boolean; repair?: boolean }) => Promise<unknown>;
     buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
     routeMessage: (input: string) => unknown;
     cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
@@ -70,6 +72,12 @@ export async function startWebServer({
     restoreSession: (sessionId: string) => unknown;
     trashSession: (sessionId: string, options?: { deleteAfterDays?: number; reason?: string }) => unknown;
     listSessionMessages: (options: { sessionId: string; limit?: number }) => unknown[];
+    resumeLatestSession: (options?: { includeHidden?: boolean }) => unknown;
+    exportSession: (sessionId: string, options?: { format?: "json" | "markdown" }) => unknown;
+    previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
+    sessionUsage: (sessionId: string) => unknown;
+    listCommands: () => unknown[];
+    runCommand: (name: string, options?: { args?: string[]; format?: "json" | "text" }) => Promise<unknown>;
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
@@ -117,6 +125,13 @@ export async function startWebServer({
         return sendJson(response, 200, runtime.taskStore.getLatestEvents({
           afterId: Number(url.searchParams.get("afterId") || 0),
           limit: parseLimit(url.searchParams.get("limit"), 50, 500),
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/doctor") {
+        return sendJson(response, 200, await runtime.doctor({
+          deep: url.searchParams.get("deep") === "true",
+          repair: url.searchParams.get("repair") === "true",
         }));
       }
 
@@ -178,6 +193,21 @@ export async function startWebServer({
 
       if (request.method === "GET" && url.pathname === "/skills") {
         return sendJson(response, 200, runtime.listSkills());
+      }
+
+      if (request.method === "GET" && url.pathname === "/commands") {
+        return sendJson(response, 200, runtime.listCommands());
+      }
+
+      if (request.method === "POST" && url.pathname === "/commands/run") {
+        const body = await readJson(request);
+        const result = await runtime.runCommand(String(body.name || body.command || ""), {
+          args: Array.isArray(body.args) ? body.args.map(String) : [],
+          format: body.format === "text" ? "text" : "json",
+        });
+        return body.format === "text"
+          ? sendText(response, 200, String(result), "text/plain; charset=utf-8")
+          : sendJson(response, 200, result);
       }
 
       if (request.method === "GET" && url.pathname === "/skill-candidates") {
@@ -254,6 +284,30 @@ export async function startWebServer({
           sessionId: String(url.searchParams.get("sessionId") || ""),
           limit: parseLimit(url.searchParams.get("limit"), 100, 500),
         }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/sessions/resume-latest") {
+        return sendJson(response, 200, runtime.resumeLatestSession({
+          includeHidden: url.searchParams.get("includeHidden") === "true",
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/sessions/export") {
+        const format = url.searchParams.get("format") === "markdown" ? "markdown" : "json";
+        const result = runtime.exportSession(String(url.searchParams.get("sessionId") || ""), { format });
+        return format === "markdown"
+          ? sendText(response, 200, String(result), "text/markdown; charset=utf-8")
+          : sendJson(response, 200, result);
+      }
+
+      if (request.method === "GET" && url.pathname === "/sessions/compact-preview") {
+        return sendJson(response, 200, runtime.previewSessionCompaction(String(url.searchParams.get("sessionId") || ""), {
+          maxMessages: parseLimit(url.searchParams.get("maxMessages"), 20, 200),
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/sessions/usage") {
+        return sendJson(response, 200, runtime.sessionUsage(String(url.searchParams.get("sessionId") || "")));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/new") {
@@ -400,13 +454,14 @@ export async function startWebServer({
         const result = await runtime.handleUserMessage(String(body.message || ""), {
           sessionId: String(body.sessionId || "web"),
           source: "web",
+          permissionMode: parsePermissionMode(body.permissionMode),
         });
         return sendJson(response, 200, result);
       }
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /commands", "POST /commands/run", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.statusCode : 500;
@@ -755,6 +810,13 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
 function sendHtml(response: ServerResponse, statusCode: number, payload: string): void {
   response.writeHead(statusCode, {
     "content-type": "text/html; charset=utf-8",
+  });
+  response.end(payload);
+}
+
+function sendText(response: ServerResponse, statusCode: number, payload: string, contentType: string): void {
+  response.writeHead(statusCode, {
+    "content-type": contentType,
   });
   response.end(payload);
 }

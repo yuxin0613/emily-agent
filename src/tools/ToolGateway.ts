@@ -1,4 +1,5 @@
-import type { RoleDefinition, ToolDefinition, ToolHintResolution, ToolPermission } from "../types.ts";
+import type { PermissionMode, RoleDefinition, ToolDefinition, ToolHintResolution, ToolPermission } from "../types.ts";
+import { filterToolsByPermissionMode, permissionModeToolList } from "./PermissionMode.ts";
 import { createDefaultToolRegistry, ToolRegistry } from "./ToolRegistry.ts";
 
 export class ToolGateway {
@@ -6,10 +7,15 @@ export class ToolGateway {
   allowedTools: Set<ToolPermission>;
   forbiddenTools: Set<ToolPermission>;
   registry: ToolRegistry;
+  permissionMode: PermissionMode;
 
-  constructor(definition: RoleDefinition, { registry = createDefaultToolRegistry() }: { registry?: ToolRegistry } = {}) {
+  constructor(
+    definition: RoleDefinition,
+    { registry = createDefaultToolRegistry(), permissionMode = "workspace_write" }: { registry?: ToolRegistry; permissionMode?: PermissionMode } = {},
+  ) {
     this.role = definition.role;
-    this.allowedTools = new Set(definition.allowedTools);
+    this.permissionMode = permissionMode;
+    this.allowedTools = new Set(filterToolsByPermissionMode(definition.allowedTools, permissionMode));
     this.forbiddenTools = new Set(definition.forbiddenTools);
     this.registry = registry;
   }
@@ -63,16 +69,21 @@ export class ToolGateway {
       }
     }
 
-    return { requested, allowed, denied, unknown };
+    return { requested, allowed, denied, unknown, permissionMode: this.permissionMode };
   }
 
   renderToolContext(resolution: ToolHintResolution): string[] {
     const relevant = resolution.allowed.length ? resolution.allowed : this.listAllowedDefinitions();
-    const lines = relevant.map((tool) => [
+    const modeTools = permissionModeToolList(this.permissionMode);
+    const lines = [
+      `Permission mode: ${this.permissionMode}`,
+      `Permission mode tools: ${Array.isArray(modeTools) ? modeTools.join(", ") : "role_defined"}`,
+    ];
+    lines.push(...relevant.map((tool) => [
       `- ${tool.name}: ${tool.description}`,
       `  category=${tool.category}; sideEffects=${tool.sideEffects}; approval=${tool.requiresApproval ? "required" : "not_required"}`,
       `  ${tool.instructions}`,
-    ].join("\n"));
+    ].join("\n")));
 
     if (resolution.denied.length) {
       lines.push(`Denied tool hints: ${resolution.denied.join(", ")}`);

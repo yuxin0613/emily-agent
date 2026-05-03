@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { Metadata, RoleDefinition, Task } from "../types.ts";
+import type { Metadata, PermissionMode, RoleDefinition, Task } from "../types.ts";
+import { filterToolsByPermissionMode, parsePermissionMode } from "../tools/PermissionMode.ts";
 
 export interface AgentProfile {
   id: string;
@@ -18,6 +19,8 @@ export interface AgentProfile {
   toolPolicy: {
     allowedTools: string[];
     forbiddenTools: string[];
+    effectiveAllowedTools: string[];
+    permissionMode: PermissionMode;
   };
   skillAllowlist: string[];
   capabilities: string[];
@@ -38,6 +41,7 @@ export async function createAgentProfile({
   workspaceDir?: string;
 }): Promise<AgentProfile> {
   const sessionScope = String(task.metadata.sessionId || "default");
+  const permissionMode = parsePermissionMode(task.metadata.permissionMode);
   const profile: AgentProfile = {
     id: agentId,
     role: definition.name,
@@ -54,6 +58,9 @@ export async function createAgentProfile({
     toolPolicy: {
       allowedTools: [...definition.allowedTools],
       forbiddenTools: [...definition.forbiddenTools],
+      effectiveAllowedTools: filterToolsByPermissionMode(definition.allowedTools, permissionMode)
+        .filter((tool) => !definition.forbiddenTools.includes(tool)),
+      permissionMode,
     },
     skillAllowlist: [...(definition.skillAllowlist || [])],
     capabilities: [...definition.capabilities],
@@ -77,7 +84,9 @@ export function renderAgentProfile(profile: AgentProfile): string[] {
     `- sessionScope: ${profile.sessionScope}`,
     `- memoryScope: ${profile.memoryScope}`,
     `- providerFallback: ${profile.providerBinding.fallback}`,
+    `- permissionMode: ${profile.toolPolicy.permissionMode}`,
     `- allowedTools: ${profile.toolPolicy.allowedTools.join(", ") || "(none)"}`,
+    `- effectiveAllowedTools: ${profile.toolPolicy.effectiveAllowedTools.join(", ") || "(none)"}`,
     `- forbiddenTools: ${profile.toolPolicy.forbiddenTools.join(", ") || "(none)"}`,
     `- skillAllowlist: ${profile.skillAllowlist.join(", ") || "(unrestricted)"}`,
   ];

@@ -7,6 +7,7 @@ import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
 import { SkillRegistry } from "../skills/SkillRegistry.ts";
+import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "../tasks/errors.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
@@ -146,6 +147,8 @@ async function runRoleTask({
       stateDir: profile.stateDir,
       skillAllowlist: profile.skillAllowlist,
       providerFallback: profile.providerBinding.fallback,
+      permissionMode: profile.toolPolicy.permissionMode,
+      effectiveAllowedTools: profile.toolPolicy.effectiveAllowedTools,
     },
   });
   let providerFallback: { requestedProviderId: string; fallbackProviderId: string; reason: string } | null = null;
@@ -167,7 +170,11 @@ async function runRoleTask({
       },
     });
   }
-  const toolGateway = new ToolGateway(definition, { registry: createDefaultToolRegistry() });
+  const permissionMode = parsePermissionMode(task.metadata.permissionMode);
+  const toolGateway = new ToolGateway(definition, {
+    registry: createDefaultToolRegistry(),
+    permissionMode,
+  });
   const skillRegistry = await SkillRegistry.create({ skillDir: process.env.EMILY_SKILL_DIR });
   const skillHints = unique([
     ...definition.skills,
@@ -277,6 +284,7 @@ async function runRoleTask({
           role,
         },
         tools: {
+          permissionMode,
           requested: toolResolution.requested,
           allowed: toolResolution.allowed.map((tool) => tool.name),
           denied: toolResolution.denied,
@@ -456,6 +464,7 @@ function recordToolSkillResolution({
     type: "tool.hints.resolved",
     taskId: task.id,
     payload: {
+      permissionMode: toolResolution.permissionMode || String(task.metadata.permissionMode || "workspace_write"),
       requested: toolResolution.requested,
       allowed: toolResolution.allowed.map((tool) => tool.name),
       denied: toolResolution.denied,

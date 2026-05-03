@@ -38,12 +38,14 @@ export async function runSecurityAudit({
   toolRegistry,
   skillRegistry,
   taskStore,
+  emit = true,
 }: {
   roleManager: RoleManager;
   providerRegistry: ProviderRegistry;
   toolRegistry: ToolRegistry;
   skillRegistry: SkillRegistry;
   taskStore: TaskStore;
+  emit?: boolean;
 }): Promise<SecurityAuditReport> {
   const findings: SecurityAuditFinding[] = [];
   const roles = await roleManager.listRoles();
@@ -134,14 +136,16 @@ export async function runSecurityAudit({
     },
     findings,
   };
-  taskStore.addEvent({
-    type: "security.audit",
-    payload: {
-      status: report.status,
-      findings: report.summary.findings,
-      critical,
-      warnings,
-    },
-  });
+  if (emit) {
+    taskStore.addEvent({
+      type: "security.audit",
+      payload: {
+        status: report.status,
+        findings: report.summary.findings,
+        critical,
+        warnings,
+      },
+    });
+  }
   return report;
 }

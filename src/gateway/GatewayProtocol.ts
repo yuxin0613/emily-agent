@@ -1,3 +1,5 @@
+import { parsePermissionMode } from "../tools/PermissionMode.ts";
+
 export interface GatewayRequest {
   type: "request";
   id: string;
@@ -41,8 +43,15 @@ export type GatewayMethod =
   | "experiences.recall"
   | "timeline.get"
   | "diagnostics.run"
+  | "doctor.run"
   | "maintenance.run"
   | "security.audit"
+  | "sessions.resume_latest"
+  | "sessions.export"
+  | "sessions.compact_preview"
+  | "sessions.usage"
+  | "commands.list"
+  | "commands.run"
   | "context.build"
   | "router.route";
 
@@ -65,8 +74,15 @@ export const GATEWAY_METHODS: GatewayMethod[] = [
   "experiences.recall",
   "timeline.get",
   "diagnostics.run",
+  "doctor.run",
   "maintenance.run",
   "security.audit",
+  "sessions.resume_latest",
+  "sessions.export",
+  "sessions.compact_preview",
+  "sessions.usage",
+  "commands.list",
+  "commands.run",
   "context.build",
   "router.route",
 ];
@@ -144,6 +160,7 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
       return runtime.handleUserMessage(String(params.message || ""), {
         sessionId: typeof params.sessionId === "string" ? params.sessionId : "gateway",
         source: typeof params.source === "string" ? params.source : "gateway",
+        permissionMode: parsePermissionMode(params.permissionMode),
       });
     case "sessions.list":
       return runtime.listSessions({
@@ -201,10 +218,31 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
       return runtime.getTimeline({ runId: String(params.runId || "") });
     case "diagnostics.run":
       return runtime.diagnostics({ repair: params.repair === true });
+    case "doctor.run":
+      return runtime.doctor({ deep: params.deep === true, repair: params.repair === true });
     case "maintenance.run":
       return runtime.maintenance({});
     case "security.audit":
       return runtime.securityAudit();
+    case "sessions.resume_latest":
+      return runtime.resumeLatestSession({ includeHidden: params.includeHidden === true });
+    case "sessions.export":
+      return runtime.exportSession(String(params.sessionId || ""), {
+        format: params.format === "markdown" ? "markdown" : "json",
+      });
+    case "sessions.compact_preview":
+      return runtime.previewSessionCompaction(String(params.sessionId || ""), {
+        maxMessages: parseLimit(params.maxMessages, 20, 200),
+      });
+    case "sessions.usage":
+      return runtime.sessionUsage(String(params.sessionId || ""));
+    case "commands.list":
+      return runtime.listCommands();
+    case "commands.run":
+      return runtime.runCommand(String(params.name || params.command || ""), {
+        args: Array.isArray(params.args) ? params.args.map(String) : [],
+        format: params.format === "text" ? "text" : "json",
+      });
     case "context.build":
       return runtime.buildContext({
         query: String(params.query || params.message || ""),
@@ -237,7 +275,7 @@ function parseSkillCandidateStatus(value: unknown): "proposed" | "approved" | "m
 }
 
 export interface GatewayRuntime {
-  handleUserMessage: (message: string, context: { sessionId?: string; source?: string }) => Promise<unknown>;
+  handleUserMessage: (message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown }) => Promise<unknown>;
   listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
   createSession: (options?: { title?: string; source?: string; metadata?: Record<string, unknown> }) => unknown;
   clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
@@ -271,8 +309,15 @@ export interface GatewayRuntime {
   };
   getTimeline: (options: { runId: string }) => unknown;
   diagnostics: (options?: { repair?: boolean }) => unknown;
+  doctor: (options?: { deep?: boolean; repair?: boolean }) => Promise<unknown>;
   maintenance: (options?: Record<string, unknown>) => Promise<unknown>;
   securityAudit: () => Promise<unknown>;
+  resumeLatestSession: (options?: { includeHidden?: boolean }) => unknown;
+  exportSession: (sessionId: string, options?: { format?: "json" | "markdown" }) => unknown;
+  previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
+  sessionUsage: (sessionId: string) => unknown;
+  listCommands: () => unknown[];
+  runCommand: (name: string, options?: { args?: string[]; format?: "json" | "text" }) => Promise<unknown>;
   buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
   routeMessage: (input: string) => unknown;
 }
