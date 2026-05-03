@@ -20,7 +20,10 @@ export async function startWebServer({
     cancelRun: (runId: string, reason?: string) => Promise<unknown>;
     listProviders: () => unknown[];
     checkProviders: (options?: { deep?: boolean }) => Promise<unknown[]>;
-    addProvider: (input: { id: string; type: "echo" | "openai" | "ollama"; model?: string; config?: Record<string, unknown> }) => Promise<unknown>;
+    addProvider: (input: { id: string; type: "echo" | "openai" | "ollama"; enabled?: boolean; model?: string; config?: Record<string, unknown> }) => Promise<unknown>;
+    enableProvider: (providerId: string) => Promise<unknown>;
+    disableProvider: (providerId: string) => Promise<unknown>;
+    removeProvider: (providerId: string) => Promise<unknown>;
     listRoles: () => Promise<unknown[]>;
     addRole: (input: {
       name: string;
@@ -72,9 +75,24 @@ export async function startWebServer({
         return sendJson(response, 200, await runtime.addProvider({
           id: String(body.id || ""),
           type: parseProviderType(body.type),
+          enabled: typeof body.enabled === "boolean" ? body.enabled : undefined,
           model: typeof body.model === "string" ? body.model : undefined,
           config: typeof body.config === "object" && body.config ? body.config as Record<string, unknown> : undefined,
         }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/providers/enable") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.enableProvider(String(body.id || body.providerId || "")));
+      }
+
+      if (request.method === "POST" && url.pathname === "/providers/disable") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.disableProvider(String(body.id || body.providerId || "")));
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/providers") {
+        return sendJson(response, 200, await runtime.removeProvider(String(url.searchParams.get("id") || url.searchParams.get("providerId") || "")));
       }
 
       if (request.method === "GET" && url.pathname === "/roles") {

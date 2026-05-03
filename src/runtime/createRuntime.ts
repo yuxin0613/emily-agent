@@ -24,7 +24,10 @@ export async function createRuntime(options: {
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
   await mkdir(dataDir, { recursive: true });
 
-  const requestedMainProviderId = options.mainProviderId || options.defaultProviderId || options.model?.id;
+  const requestedMainProviderId = options.mainProviderId || options.defaultProviderId;
+  if (options.model && !requestedMainProviderId) {
+    throw new Error("Injected main model requires mainProviderId/defaultProviderId so subagent fallback is explicit.");
+  }
   const providerRegistry = await ProviderRegistry.create({
     dataDir,
     providers: options.providers,
@@ -32,6 +35,9 @@ export async function createRuntime(options: {
     fallbackMode: options.providerFallbackMode || "strict",
   });
   const mainProviderId = requestedMainProviderId || providerRegistry.defaultProviderId;
+  if (options.model && options.model.id !== mainProviderId) {
+    throw new Error(`Injected main model id ${options.model.id} must match main provider ${mainProviderId}.`);
+  }
   let shouldWriteProviderRegistry = false;
   if (providerRegistry.defaultProviderId !== mainProviderId) {
     providerRegistry.defaultProviderId = mainProviderId;
@@ -42,6 +48,7 @@ export async function createRuntime(options: {
     providerRegistry.fallbackMode = options.providerFallbackMode;
     shouldWriteProviderRegistry = true;
   }
+  providerRegistry.getConfig(mainProviderId);
   if (shouldWriteProviderRegistry) await providerRegistry.write(dataDir);
   const model = options.model || providerRegistry.createProvider(mainProviderId);
   const memory = await MemorySystem.create({ dataDir });
@@ -128,6 +135,25 @@ export async function createRuntime(options: {
       await providerRegistry.write(dataDir);
       return providerRegistry.getConfig(config.id);
     },
+    async enableProvider(providerId: string) {
+      const provider = providerRegistry.enable(providerId);
+      await providerRegistry.write(dataDir);
+      return provider;
+    },
+    async disableProvider(providerId: string) {
+      const provider = providerRegistry.disable(providerId, {
+        referencedBy: await roleReferences(providerId),
+      });
+      await providerRegistry.write(dataDir);
+      return provider;
+    },
+    async removeProvider(providerId: string) {
+      const provider = providerRegistry.remove(providerId, {
+        referencedBy: await roleReferences(providerId),
+      });
+      await providerRegistry.write(dataDir);
+      return provider;
+    },
     listRoles() {
       return roleManager.listRoles();
     },
@@ -209,4 +235,9 @@ export async function createRuntime(options: {
       taskStore.close();
     },
   };
+
+  async function roleReferences(providerId: string): Promise<string[]> {
+    const roles = await roleManager.listRoles();
+    return roles.filter((role) => role.provider === providerId).map((role) => role.name);
+  }
 }

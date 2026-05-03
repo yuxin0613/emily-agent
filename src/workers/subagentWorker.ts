@@ -192,6 +192,10 @@ async function runRoleTask({
         providerId: response.provider.id,
         model: response.provider.model,
         latencyMs: response.provider.latencyMs,
+        attempts: response.provider.attempts,
+        finishReason: response.provider.finishReason,
+        rawProvider: response.provider.rawProvider,
+        usage: response.provider.usage,
       },
     }],
     memoryCandidates: [{

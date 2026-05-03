@@ -1,4 +1,6 @@
-import type { ModelCompleteInput, ModelProvider, ProviderConfig } from "./ModelProvider.ts";
+import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderConfig } from "./ModelProvider.ts";
+import { ProviderCallError } from "./ModelProvider.ts";
+import { classifyHttpStatus } from "./ProviderRuntime.ts";
 
 export class OllamaModelProvider implements ModelProvider {
   id: string;
@@ -15,7 +17,7 @@ export class OllamaModelProvider implements ModelProvider {
     this.timeoutMs = config.config?.timeoutMs || 60000;
   }
 
-  async complete({ agent, role, prompt }: ModelCompleteInput): Promise<string> {
+  async complete({ agent, role, prompt }: ModelCompleteInput): Promise<ModelCompleteResult> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -41,10 +43,35 @@ export class OllamaModelProvider implements ModelProvider {
       });
 
       if (!response.ok) {
-        throw new Error(`Ollama provider ${this.id} failed: ${response.status} ${await response.text()}`);
+        const classification = classifyHttpStatus(response.status);
+        throw new ProviderCallError({
+          providerId: this.id,
+          code: classification.code,
+          status: response.status,
+          retryable: classification.retryable,
+          message: `Ollama provider ${this.id} failed: ${response.status} ${await response.text()}`,
+        });
       }
-      const body = await response.json() as { response?: string };
-      return body.response || "";
+      const body = await response.json() as {
+        response?: string;
+        done_reason?: string;
+        prompt_eval_count?: number;
+        eval_count?: number;
+      };
+      return {
+        content: body.response || "",
+        finishReason: body.done_reason,
+        rawProvider: "ollama",
+        usage: {
+          inputTokens: body.prompt_eval_count,
+          outputTokens: body.eval_count,
+          totalTokens: typeof body.prompt_eval_count === "number" || typeof body.eval_count === "number"
+            ? (body.prompt_eval_count || 0) + (body.eval_count || 0)
+            : undefined,
+        },
+        providerId: this.id,
+        model: this.model,
+      };
     } finally {
       clearTimeout(timer);
     }

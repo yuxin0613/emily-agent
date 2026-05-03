@@ -1,3 +1,5 @@
+import { normalizeModelCompleteResult } from "../llm/ProviderRuntime.ts";
+
 export class SubAgent {
   constructor({ name, role, capabilities, model, memory }) {
     this.name = name;
@@ -26,16 +28,21 @@ export class SubAgent {
     ].join("\n");
 
     const startedAt = Date.now();
-    const content = await this.model.complete({
+    const result = normalizeModelCompleteResult(await this.model.complete({
       agent: this.name,
       role: this.role,
       prompt,
-    });
+    }), this.model);
+    const content = result.content;
     const latencyMs = Date.now() - startedAt;
     const provider = {
       id: this.model.id,
       model: this.model.model,
-      latencyMs,
+      latencyMs: result.latencyMs ?? latencyMs,
+      attempts: result.attempts,
+      finishReason: result.finishReason,
+      rawProvider: result.rawProvider,
+      usage: result.usage,
     };
 
     await this.memory.remember({
@@ -48,6 +55,10 @@ export class SubAgent {
         providerId: provider.id,
         model: provider.model,
         latencyMs: provider.latencyMs,
+        attempts: provider.attempts,
+        finishReason: provider.finishReason,
+        rawProvider: provider.rawProvider,
+        usage: provider.usage,
       },
     });
 

@@ -1,5 +1,6 @@
 import type { MemoryRecallResult, Task } from "../types.ts";
 import type { ModelProvider } from "../llm/ModelProvider.ts";
+import { normalizeModelCompleteResult } from "../llm/ProviderRuntime.ts";
 import type { MemorySystem } from "../memory/MemorySystem.ts";
 import type { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
@@ -337,11 +338,12 @@ export class MainAgent {
       "Write a concise, helpful response in Chinese.",
     ].join("\n");
 
-    return this.model.complete({
+    const result = normalizeModelCompleteResult(await this.model.complete({
       agent: this.name,
       role: "Communicate with the user and coordinate sub-agents.",
       prompt,
-    });
+    }), this.model);
+    return result.content;
   }
 }
 

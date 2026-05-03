@@ -160,7 +160,13 @@ provider 配置保存在 `.emily/providers.json`，默认会写入一个本地 `
       "model": "gpt-4.1-mini",
       "config": {
         "apiKeyEnv": "OPENAI_API_KEY",
-        "temperature": 0.2
+        "temperature": 0.2,
+        "timeoutMs": 60000,
+        "maxRetries": 1,
+        "retryBaseMs": 200,
+        "retryMaxMs": 5000,
+        "circuitBreakerFailureThreshold": 5,
+        "circuitBreakerCooldownMs": 60000
       }
     },
     {
@@ -196,10 +202,16 @@ provider / role 护栏：
 
 - provider id 和 role name 只能包含字母、数字、`.`、`_`、`-`。
 - `openai` provider 必须显式配置 `config.apiKeyEnv`。
-- `temperature` 必须在 `0..2`，`timeoutMs` 不能超过 10 分钟。
+- `baseUrl` 只允许 `http/https`，不能携带用户名密码；未知 config key 会被拒绝。
+- `temperature` 必须在 `0..2`，`timeoutMs` 不能超过 10 分钟；retry 和 circuit breaker 参数有上限校验。
+- provider 调用会返回结构化元数据：`content`、`usage`、`latencyMs`、`finishReason`、`rawProvider`、`attempts`。
+- provider 错误会归类为 `auth_error`、`timeout`、`rate_limited`、`server_error`、`bad_request`、`empty_response`、`network_error`、`circuit_open` 等。
+- `enabled: false` 可禁用 provider；禁用/删除 default provider 或仍被 role 引用的 provider 会失败。
 - role 的 `allowed_tools` 和 `forbidden_tools` 不能冲突。
+- `runtime.updateRoleProvider()` 是部分更新，未传字段会保留原值。
 - `providerFallbackMode` 默认为 `strict`；设置为 `fallback` 时，缺失 provider 会回退到 main agent 的 provider，并记录 `runtime.anomaly`。
-- `runtime.checkProviders({ deep })` 可检查 provider 健康；`deep: true` 时会 ping Ollama `/api/tags`。
+- 注入自定义 main model 时必须显式指定匹配的 `mainProviderId/defaultProviderId`，避免 subagent fallback 指向不可复用的内存对象。
+- `runtime.checkProviders({ deep })` 可检查 provider 健康；`deep: true` 时会 ping Ollama `/api/tags`，OpenAI-compatible provider 会检查 `/models`。
 
 runtime API：
 
@@ -207,6 +219,9 @@ runtime API：
 runtime.listProviders()
 await runtime.checkProviders()
 await runtime.addProvider({ id: "reviewer-fast", type: "echo", model: "echo-review" })
+await runtime.disableProvider("reviewer-fast")
+await runtime.enableProvider("reviewer-fast")
+await runtime.removeProvider("reviewer-fast")
 await runtime.addRole({
   name: "qa",
   role: "Check runtime behavior and return concise quality notes.",
@@ -243,6 +258,16 @@ curl -X POST http://127.0.0.1:3000/cancel-run \
 curl -X POST http://127.0.0.1:3000/providers \
   -H 'content-type: application/json' \
   -d '{"id":"qa-echo","type":"echo","model":"qa-model"}'
+
+curl -X POST http://127.0.0.1:3000/providers/disable \
+  -H 'content-type: application/json' \
+  -d '{"id":"qa-echo"}'
+
+curl -X POST http://127.0.0.1:3000/providers/enable \
+  -H 'content-type: application/json' \
+  -d '{"id":"qa-echo"}'
+
+curl -X DELETE 'http://127.0.0.1:3000/providers?id=qa-echo'
 
 curl -X POST http://127.0.0.1:3000/roles \
   -H 'content-type: application/json' \

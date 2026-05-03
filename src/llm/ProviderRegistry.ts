@@ -1,9 +1,10 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { EchoModelProvider } from "./EchoModelProvider.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealth } from "./ModelProvider.ts";
 import { OllamaModelProvider } from "./OllamaModelProvider.ts";
 import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
+import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
 import type { RoleDefinition } from "../types.ts";
 
 interface ProviderFile {
@@ -59,6 +60,7 @@ export class ProviderRegistry {
         id: this.defaultProviderId,
         type: "echo",
         model: "echo-local",
+        enabled: true,
       });
     }
   }
@@ -68,6 +70,12 @@ export class ProviderRegistry {
   }
 
   getConfig(providerId?: string | null): ProviderConfig {
+    const config = this.getConfigIncludingDisabled(providerId);
+    if (config.enabled === false) throw new Error(`Model provider is disabled: ${config.id}`);
+    return config;
+  }
+
+  getConfigIncludingDisabled(providerId?: string | null): ProviderConfig {
     const id = providerId || this.defaultProviderId;
     const config = this.providers.get(id);
     if (!config) throw new Error(`Unknown model provider: ${id}`);
@@ -80,19 +88,20 @@ export class ProviderRegistry {
   } = {}): ProviderConfig {
     const id = providerId || this.defaultProviderId;
     const config = this.providers.get(id);
-    if (config) return cloneProviderConfig(config);
+    if (config && config.enabled !== false) return cloneProviderConfig(config);
 
     const mode = options.fallbackMode || this.fallbackMode;
-    if (mode === "fallback") {
+    if (mode === "fallback" && id !== this.defaultProviderId) {
       const fallback = this.getConfig(this.defaultProviderId);
       options.onFallback?.({
         requestedProviderId: id,
         fallbackProviderId: fallback.id,
-        reason: `Unknown model provider: ${id}`,
+        reason: config?.enabled === false ? `Model provider is disabled: ${id}` : `Unknown model provider: ${id}`,
       });
       return fallback;
     }
 
+    if (config?.enabled === false) throw new Error(`Model provider is disabled: ${id}`);
     throw new Error(`Unknown model provider: ${id}`);
   }
 
@@ -101,10 +110,12 @@ export class ProviderRegistry {
     onFallback?: (input: { requestedProviderId: string; fallbackProviderId: string; reason: string }) => void;
   } = {}): ModelProvider {
     const config = this.withOverrides(this.resolveConfig(providerId, options), overrides);
-    if (config.type === "echo") return new EchoModelProvider({ id: config.id, model: config.model || "echo-local" });
-    if (config.type === "openai") return new OpenAIModelProvider(config);
-    if (config.type === "ollama") return new OllamaModelProvider(config);
-    throw new Error(`Unsupported provider type: ${(config as ProviderConfig).type}`);
+    let provider: ModelProvider;
+    if (config.type === "echo") provider = new EchoModelProvider({ id: config.id, model: config.model || "echo-local" });
+    else if (config.type === "openai") provider = new OpenAIModelProvider(config);
+    else if (config.type === "ollama") provider = new OllamaModelProvider(config);
+    else throw new Error(`Unsupported provider type: ${(config as ProviderConfig).type}`);
+    return new ResilientModelProvider(provider, config);
   }
 
   createForRole(definition: RoleDefinition, options: {
@@ -122,6 +133,30 @@ export class ProviderRegistry {
     this.providers.set(config.id, cloneProviderConfig(config));
   }
 
+  enable(providerId: string): ProviderConfig {
+    const config = this.getConfigIncludingDisabled(providerId);
+    config.enabled = true;
+    validateProviderConfig(config);
+    this.providers.set(providerId, cloneProviderConfig(config));
+    return cloneProviderConfig(config);
+  }
+
+  disable(providerId: string, { referencedBy = [] }: { referencedBy?: string[] } = {}): ProviderConfig {
+    this.assertProviderCanBeRemovedOrDisabled(providerId, referencedBy, "disable");
+    const config = this.getConfigIncludingDisabled(providerId);
+    config.enabled = false;
+    validateProviderConfig(config);
+    this.providers.set(providerId, cloneProviderConfig(config));
+    return cloneProviderConfig(config);
+  }
+
+  remove(providerId: string, { referencedBy = [] }: { referencedBy?: string[] } = {}): ProviderConfig {
+    this.assertProviderCanBeRemovedOrDisabled(providerId, referencedBy, "remove");
+    const config = this.getConfigIncludingDisabled(providerId);
+    this.providers.delete(providerId);
+    return config;
+  }
+
   async health({ deep = false }: { deep?: boolean } = {}): Promise<ProviderHealth[]> {
     const checks: ProviderHealth[] = [];
     for (const config of this.list()) {
@@ -132,11 +167,19 @@ export class ProviderRegistry {
 
   async write(dataDir: string): Promise<void> {
     await mkdir(dataDir, { recursive: true });
-    await writeFile(providerConfigPath(dataDir), JSON.stringify({
+    const targetPath = providerConfigPath(dataDir);
+    const tmpPath = path.join(dataDir, `.providers.${process.pid}.${Date.now()}.tmp`);
+    await writeFile(tmpPath, JSON.stringify({
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
       providers: this.list(),
     }, null, 2), "utf8");
+    try {
+      await rename(tmpPath, targetPath);
+    } catch (error) {
+      await unlink(tmpPath).catch(() => undefined);
+      throw error;
+    }
   }
 
   private withOverrides(config: ProviderConfig, overrides: { model?: string; temperature?: number }): ProviderConfig {
@@ -151,13 +194,38 @@ export class ProviderRegistry {
   }
 
   private async checkProvider(config: ProviderConfig, { deep }: { deep: boolean }): Promise<ProviderHealth> {
+    if (config.enabled === false) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: "Provider is disabled",
+        deepChecked: false,
+        disabled: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+
     if (config.type === "echo") {
-      return { id: config.id, type: config.type, model: config.model || "echo-local", ok: true, deepChecked: false };
+      return { id: config.id, type: config.type, model: config.model || "echo-local", ok: true, deepChecked: false, circuitOpen: isProviderCircuitOpen(config.id) };
     }
 
     if (config.type === "openai") {
-      const apiKeyEnv = config.config?.apiKeyEnv || "";
-      const ok = Boolean(apiKeyEnv && process.env[apiKeyEnv]);
+      return this.checkOpenAIProvider(config, { deep });
+    }
+
+    if (config.type === "ollama") {
+      return this.checkOllamaProvider(config, { deep });
+    }
+
+    return { id: config.id, type: config.type, model: config.model || "", ok: false, reason: "Unsupported provider type", deepChecked: false };
+  }
+
+  private async checkOpenAIProvider(config: ProviderConfig, { deep }: { deep: boolean }): Promise<ProviderHealth> {
+    const apiKeyEnv = config.config?.apiKeyEnv || "";
+    const ok = Boolean(apiKeyEnv && process.env[apiKeyEnv]);
+    if (!ok || !deep) {
       return {
         id: config.id,
         type: config.type,
@@ -165,42 +233,95 @@ export class ProviderRegistry {
         ok,
         reason: ok ? undefined : `Missing API key env ${apiKeyEnv || "(none)"}`,
         deepChecked: false,
+        circuitOpen: isProviderCircuitOpen(config.id),
       };
     }
-
-    if (config.type === "ollama") {
-      if (!deep) {
-        return { id: config.id, type: config.type, model: config.model || "", ok: true, deepChecked: false };
-      }
-      try {
-        const baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
-        const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/tags`);
-        return {
-          id: config.id,
-          type: config.type,
-          model: config.model || "",
-          ok: response.ok,
-          reason: response.ok ? undefined : `Ollama responded ${response.status}`,
-          deepChecked: true,
-        };
-      } catch (error) {
-        return {
-          id: config.id,
-          type: config.type,
-          model: config.model || "",
-          ok: false,
-          reason: error instanceof Error ? error.message : String(error),
-          deepChecked: true,
-        };
-      }
+    try {
+      const response = await fetchWithTimeout(`${(config.config?.baseUrl || "https://api.openai.com/v1").replace(/\/$/, "")}/models`, {
+        headers: {
+          authorization: `Bearer ${process.env[apiKeyEnv]}`,
+        },
+        timeoutMs: config.config?.timeoutMs || 60000,
+      });
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: response.ok,
+        reason: response.ok ? undefined : `OpenAI-compatible provider responded ${response.status}`,
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    } catch (error) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
     }
+  }
 
-    return { id: config.id, type: config.type, model: config.model || "", ok: false, reason: "Unsupported provider type", deepChecked: false };
+  private async checkOllamaProvider(config: ProviderConfig, { deep }: { deep: boolean }): Promise<ProviderHealth> {
+    if (!deep) {
+      return { id: config.id, type: config.type, model: config.model || "", ok: true, deepChecked: false, circuitOpen: isProviderCircuitOpen(config.id) };
+    }
+    try {
+      const baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
+      const response = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/api/tags`, {
+        timeoutMs: config.config?.timeoutMs || 60000,
+      });
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: response.ok,
+        reason: response.ok ? undefined : `Ollama responded ${response.status}`,
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    } catch (error) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+  }
+
+  private assertProviderCanBeRemovedOrDisabled(providerId: string, referencedBy: string[], operation: "disable" | "remove"): void {
+    this.getConfigIncludingDisabled(providerId);
+    if (providerId === this.defaultProviderId) {
+      throw new Error(`Cannot ${operation} default provider: ${providerId}`);
+    }
+    if (referencedBy.length) {
+      throw new Error(`Cannot ${operation} provider ${providerId}; referenced by roles: ${referencedBy.join(", ")}`);
+    }
   }
 }
 
 export function providerConfigPath(dataDir: string): string {
   return path.join(dataDir, "providers.json");
+}
+
+async function fetchWithTimeout(url: string, { headers = {}, timeoutMs }: { headers?: Record<string, string>; timeoutMs: number }): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      headers,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function readProviderFile(filePath: string): Promise<ProviderFile | null> {
@@ -227,6 +348,7 @@ function defaultProviderFile(defaultProviderId: string): ProviderFile {
       id: defaultProviderId,
       type: "echo",
       model: "echo-local",
+      enabled: true,
     }],
   };
 }
@@ -238,20 +360,69 @@ export function validateProviderConfig(config: ProviderConfig): void {
   if (config.type !== "echo" && config.type !== "openai" && config.type !== "ollama") {
     throw new Error(`Invalid provider type: ${config.type}`);
   }
-  if (config.config && hasUnsafeSecretField(config.config)) {
-    throw new Error("Provider config must not contain raw apiKey/authorization secrets; use apiKeyEnv instead.");
+  if (config.enabled !== undefined && typeof config.enabled !== "boolean") {
+    throw new Error("Provider enabled must be a boolean when provided.");
   }
+  if (config.config) validateProviderConfigObject(config);
   if (config.model !== undefined && !String(config.model).trim()) {
     throw new Error("Provider model must be non-empty when provided.");
   }
   if (config.type === "openai" && !config.config?.apiKeyEnv) {
     throw new Error("OpenAI provider requires config.apiKeyEnv.");
   }
-  if (config.config?.temperature !== undefined && (config.config.temperature < 0 || config.config.temperature > 2)) {
-    throw new Error("Provider temperature must be between 0 and 2.");
+}
+
+function validateProviderConfigObject(config: ProviderConfig): void {
+  const value = config.config || {};
+  if (hasUnsafeSecretField(value)) {
+    throw new Error("Provider config must not contain raw apiKey/authorization secrets; use apiKeyEnv instead.");
   }
-  if (config.config?.timeoutMs !== undefined && (config.config.timeoutMs <= 0 || config.config.timeoutMs > 10 * 60 * 1000)) {
-    throw new Error("Provider timeoutMs must be between 1 and 600000.");
+  const allowedKeys = new Set([
+    "baseUrl",
+    "apiKeyEnv",
+    "temperature",
+    "timeoutMs",
+    "maxRetries",
+    "retryBaseMs",
+    "retryMaxMs",
+    "circuitBreakerFailureThreshold",
+    "circuitBreakerCooldownMs",
+  ]);
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) throw new Error(`Unknown provider config key: ${key}`);
+  }
+  if (value.baseUrl !== undefined) validateBaseUrl(String(value.baseUrl));
+  if (value.apiKeyEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(value.apiKeyEnv))) {
+    throw new Error("Provider apiKeyEnv must be a valid environment variable name.");
+  }
+  assertNumberRange(value.temperature, "temperature", 0, 2);
+  assertNumberRange(value.timeoutMs, "timeoutMs", 1, 10 * 60 * 1000);
+  assertNumberRange(value.maxRetries, "maxRetries", 0, 5);
+  assertNumberRange(value.retryBaseMs, "retryBaseMs", 1, 60000);
+  assertNumberRange(value.retryMaxMs, "retryMaxMs", 1, 120000);
+  assertNumberRange(value.circuitBreakerFailureThreshold, "circuitBreakerFailureThreshold", 1, 100);
+  assertNumberRange(value.circuitBreakerCooldownMs, "circuitBreakerCooldownMs", 1000, 60 * 60 * 1000);
+}
+
+function assertNumberRange(value: unknown, key: string, min: number, max: number): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`Provider ${key} must be between ${min} and ${max}.`);
+  }
+}
+
+function validateBaseUrl(value: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error("Provider baseUrl must be a valid URL.");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Provider baseUrl protocol must be http or https.");
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error("Provider baseUrl must not contain credentials.");
   }
 }
 

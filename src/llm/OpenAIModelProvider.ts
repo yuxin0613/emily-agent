@@ -1,4 +1,6 @@
-import type { ModelCompleteInput, ModelProvider, ProviderConfig } from "./ModelProvider.ts";
+import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderConfig } from "./ModelProvider.ts";
+import { ProviderCallError } from "./ModelProvider.ts";
+import { classifyHttpStatus } from "./ProviderRuntime.ts";
 
 export class OpenAIModelProvider implements ModelProvider {
   id: string;
@@ -17,10 +19,14 @@ export class OpenAIModelProvider implements ModelProvider {
     this.timeoutMs = config.config?.timeoutMs || 60000;
   }
 
-  async complete({ agent, role, prompt }: ModelCompleteInput): Promise<string> {
+  async complete({ agent, role, prompt }: ModelCompleteInput): Promise<ModelCompleteResult> {
     const apiKey = process.env[this.apiKeyEnv];
     if (!apiKey) {
-      throw new Error(`Missing API key env ${this.apiKeyEnv} for provider ${this.id}`);
+      throw new ProviderCallError({
+        providerId: this.id,
+        code: "auth_error",
+        message: `Missing API key env ${this.apiKeyEnv} for provider ${this.id}`,
+      });
     }
 
     const controller = new AbortController();
@@ -50,12 +56,35 @@ export class OpenAIModelProvider implements ModelProvider {
       });
 
       if (!response.ok) {
-        throw new Error(`OpenAI provider ${this.id} failed: ${response.status} ${await response.text()}`);
+        const classification = classifyHttpStatus(response.status);
+        throw new ProviderCallError({
+          providerId: this.id,
+          code: classification.code,
+          status: response.status,
+          retryable: classification.retryable,
+          message: `OpenAI provider ${this.id} failed: ${response.status} ${await response.text()}`,
+        });
       }
       const body = await response.json() as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        };
       };
-      return body.choices?.[0]?.message?.content || "";
+      return {
+        content: body.choices?.[0]?.message?.content || "",
+        finishReason: body.choices?.[0]?.finish_reason,
+        rawProvider: "openai",
+        usage: body.usage ? {
+          inputTokens: body.usage.prompt_tokens,
+          outputTokens: body.usage.completion_tokens,
+          totalTokens: body.usage.total_tokens,
+        } : undefined,
+        providerId: this.id,
+        model: this.model,
+      };
     } finally {
       clearTimeout(timer);
     }

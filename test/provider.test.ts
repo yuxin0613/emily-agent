@@ -2,8 +2,62 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { EchoModelProvider } from "../src/llm/EchoModelProvider.ts";
+import { ProviderCallError, type ModelCompleteInput, type ModelCompleteResult, type ModelProvider } from "../src/llm/ModelProvider.ts";
+import { normalizeModelCompleteResult, resetProviderCircuit, ResilientModelProvider } from "../src/llm/ProviderRuntime.ts";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
+
+class FlakyProvider implements ModelProvider {
+  id: string;
+  model = "fake-model";
+  calls = 0;
+
+  constructor(id: string) {
+    this.id = id;
+  }
+
+  async complete(_input: ModelCompleteInput): Promise<ModelCompleteResult> {
+    this.calls += 1;
+    if (this.calls === 1) {
+      throw new ProviderCallError({
+        providerId: this.id,
+        code: "server_error",
+        message: "transient failure",
+        retryable: true,
+      });
+    }
+    return {
+      content: "retried ok",
+      usage: {
+        inputTokens: 1,
+        outputTokens: 2,
+        totalTokens: 3,
+      },
+      finishReason: "stop",
+    };
+  }
+}
+
+class FailingProvider implements ModelProvider {
+  id: string;
+  model = "fake-model";
+  calls = 0;
+
+  constructor(id: string) {
+    this.id = id;
+  }
+
+  async complete(_input: ModelCompleteInput): Promise<ModelCompleteResult> {
+    this.calls += 1;
+    throw new ProviderCallError({
+      providerId: this.id,
+      code: "server_error",
+      message: "provider down",
+      retryable: true,
+    });
+  }
+}
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-"));
 const roleDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-roles-"));
@@ -39,6 +93,25 @@ assert.rejects(() => runtime.addProvider({
   },
 }), /Provider id|raw apiKey/);
 
+await assert.rejects(() => runtime.addProvider({
+  id: "bad-url",
+  type: "ollama",
+  model: "bad",
+  config: {
+    baseUrl: "file:///tmp/model",
+  },
+}), /protocol/);
+
+await assert.rejects(() => runtime.addProvider({
+  id: "unknown-config",
+  type: "ollama",
+  model: "bad",
+  config: {
+    baseUrl: "http://127.0.0.1:11434",
+    extra: true,
+  },
+}), /Unknown provider config key/);
+
 await runtime.addProvider({
   id: "openai-missing-env",
   type: "openai",
@@ -66,6 +139,22 @@ assert.equal(role.name, "qa");
 assert.equal(role.provider, "qa-echo");
 assert.equal(role.model, "qa-special-model");
 
+await runtime.addProvider({
+  id: "spare-echo",
+  type: "echo",
+  model: "spare-model",
+});
+const disabledSpare = await runtime.disableProvider("spare-echo");
+assert.equal(disabledSpare.enabled, false);
+const disabledHealth = await runtime.checkProviders();
+assert.equal(disabledHealth.find((item) => item.id === "spare-echo")?.disabled, true);
+assert.throws(() => runtime.providerRegistry.createProvider("spare-echo"), /disabled/);
+const enabledSpare = await runtime.enableProvider("spare-echo");
+assert.equal(enabledSpare.enabled, true);
+const removedSpare = await runtime.removeProvider("spare-echo");
+assert.equal(removedSpare.id, "spare-echo");
+await assert.rejects(() => runtime.disableProvider("main-echo"), /default provider/);
+
 await assert.rejects(() => runtime.addRole({
   name: "bad role",
   role: "Invalid role",
@@ -89,6 +178,13 @@ const updated = await runtime.updateRoleProvider("qa", {
   temperature: 0,
 });
 assert.equal(updated.model, "qa-updated-model");
+const partialUpdated = await runtime.updateRoleProvider("qa", {
+  model: "qa-partial-model",
+});
+assert.equal(partialUpdated.provider, "qa-echo");
+assert.equal(partialUpdated.model, "qa-partial-model");
+assert.equal(partialUpdated.temperature, 0);
+await assert.rejects(() => runtime.removeProvider("qa-echo"), /referenced by roles: qa/);
 
 const task = runtime.taskStore.createTask({
   role: "qa",
@@ -107,9 +203,54 @@ const result = parseTaskResult(finished.result);
 assert.equal(finished.status, "done");
 assert.ok(result);
 assert.match(result.summary, /Provider: qa-echo/);
-assert.match(result.summary, /Model: qa-updated-model/);
+assert.match(result.summary, /Model: qa-partial-model/);
 assert.equal(result.artifacts[0]?.metadata?.providerId, "qa-echo");
 assert.equal(typeof result.artifacts[0]?.metadata?.latencyMs, "number");
+assert.equal(typeof result.artifacts[0]?.metadata?.attempts, "number");
+
+const flakyProvider = new FlakyProvider("flaky-provider");
+const retryModel = new ResilientModelProvider(flakyProvider, {
+  id: flakyProvider.id,
+  type: "echo",
+  model: flakyProvider.model,
+  config: {
+    maxRetries: 1,
+    retryBaseMs: 1,
+    retryMaxMs: 1,
+  },
+});
+const retryResult = normalizeModelCompleteResult(await retryModel.complete({
+  agent: "qa",
+  role: "retry",
+  prompt: "retry once",
+}), retryModel);
+assert.equal(retryResult.content, "retried ok");
+assert.equal(retryResult.attempts, 2);
+assert.equal(retryResult.usage?.totalTokens, 3);
+
+resetProviderCircuit("circuit-provider");
+const failingProvider = new FailingProvider("circuit-provider");
+const circuitModel = new ResilientModelProvider(failingProvider, {
+  id: failingProvider.id,
+  type: "echo",
+  model: failingProvider.model,
+  config: {
+    maxRetries: 0,
+    circuitBreakerFailureThreshold: 1,
+    circuitBreakerCooldownMs: 1000,
+  },
+});
+await assert.rejects(() => circuitModel.complete({
+  agent: "qa",
+  role: "circuit",
+  prompt: "fail",
+}), (error: unknown) => error instanceof ProviderCallError && error.code === "server_error");
+await assert.rejects(() => circuitModel.complete({
+  agent: "qa",
+  role: "circuit",
+  prompt: "fail fast",
+}), (error: unknown) => error instanceof ProviderCallError && error.code === "circuit_open");
+assert.equal(failingProvider.calls, 1);
 
 const roles = await runtime.listRoles();
 assert.ok(roles.some((item) => item.name === "qa"));
@@ -117,6 +258,16 @@ const defaults = await runtime.initializeDefaultRoles();
 assert.ok(defaults.some((item) => item.name === "planner"));
 
 await runtime.shutdown();
+
+await assert.rejects(async () => {
+  const customDataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-custom-model-"));
+  const customRoleDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-custom-model-roles-"));
+  await createRuntime({
+    dataDir: customDataDir,
+    roleDir: customRoleDir,
+    model: new EchoModelProvider({ id: "custom-main", model: "custom-model" }),
+  });
+}, /requires mainProviderId/);
 
 const fallbackDataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-fallback-"));
 const fallbackRoleDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-fallback-roles-"));
