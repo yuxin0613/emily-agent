@@ -45,7 +45,8 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
     let rejected = 0;
     for (const candidate of taskStore.getPendingMemoryCandidates({ runId, limit: 100 })) {
       const decision = mainAgent.memoryCandidatePolicy.decide(candidate);
-      taskStore.decideMemoryCandidate(candidate.id, decision);
+      const decided = taskStore.decidePendingMemoryCandidate(candidate.id, decision);
+      if (!decided.changed) continue;
       if (decision === "rejected") {
         rejected += 1;
         continue;
@@ -98,8 +99,12 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
       return renderTimeline(taskStore.getTimeline({ runId }));
     },
     health,
-    async maintenance(options: { day?: Date } = {}) {
+    async maintenance(options: { day?: Date; staleRunMs?: number } = {}) {
       const reconcile = await roleAgentManager.reconcile();
+      const taskGraphs = taskStore.refreshTaskGraphStatuses();
+      const staleRuns = taskStore.recoverStaleRuns({
+        olderThanMs: options.staleRunMs ?? 5 * 60 * 1000,
+      });
       const memoryCandidates = await approvePendingMemoryCandidates();
       const experiences = experienceBuilder.buildDailyExperiences({
         day: options.day || new Date(),
@@ -109,6 +114,12 @@ export async function createRuntime(options: { dataDir?: string; model?: EchoMod
           expiredLeaseTasks: reconcile.expiredLeaseTasks.length,
           needsInspectionTasks: reconcile.needsInspectionTasks.length,
           unacknowledgedTerminalTasks: reconcile.unacknowledgedTerminalTasks.length,
+        },
+        taskGraphs: {
+          updated: taskGraphs.length,
+        },
+        staleRuns: {
+          recovered: staleRuns.length,
         },
         memoryCandidates,
         experiences,

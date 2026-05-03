@@ -305,9 +305,45 @@ export class TaskStore {
     return this.addEvent(RuntimeEventFactory.runCompleted(runId, status));
   }
 
+  updateRunStatus(runId: string, status: Run["status"]): number {
+    this.db
+      .prepare("UPDATE runs SET status = ?, completed_at = CASE WHEN ? IN ('done', 'failed', 'blocked', 'partially_done', 'waiting_user') THEN ? ELSE completed_at END WHERE id = ?")
+      .run(status, status, new Date().toISOString(), runId);
+    return this.addEvent({
+      type: "run.status",
+      payload: { runId, status },
+    });
+  }
+
   getRun(runId: string): Run | null {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(runId) as RunRow | undefined;
     return row ? parseRun(row) : null;
+  }
+
+  getActiveRuns({ olderThanMs = 0 }: { olderThanMs?: number } = {}): Run[] {
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM runs
+        WHERE status IN ('running', 'reviewing', 'recovering')
+          AND started_at <= ?
+        ORDER BY started_at ASC
+      `)
+      .all(cutoff) as RunRow[];
+    return rows.map(parseRun);
+  }
+
+  recoverStaleRuns({ olderThanMs = 5 * 60 * 1000 }: { olderThanMs?: number } = {}): Run[] {
+    const recovered: Run[] = [];
+    for (const run of this.getActiveRuns({ olderThanMs })) {
+      const tasks = this.getTasksForRun(run.id);
+      const status = recoverableRunStatusFromTasks(tasks);
+      if (!status) continue;
+      this.completeRun(run.id, status);
+      const refreshed = this.getRun(run.id);
+      if (refreshed) recovered.push(refreshed);
+    }
+    return recovered;
   }
 
   addTaskDependency(taskId: string, dependsOnTaskId: string, dependencyType: TaskDependency["dependencyType"] = "success"): void {
@@ -347,6 +383,43 @@ export class TaskStore {
       type: "task_graph.completed",
       payload: { graphId, status },
     });
+  }
+
+  getTaskGraph(graphId: string): TaskGraph | null {
+    const row = this.db
+      .prepare("SELECT * FROM task_graphs WHERE id = ?")
+      .get(graphId) as TaskGraphRow | undefined;
+    return row ? parseTaskGraph(row) : null;
+  }
+
+  getOpenTaskGraphs(): TaskGraph[] {
+    const rows = this.db
+      .prepare("SELECT * FROM task_graphs WHERE status IN ('pending', 'running') ORDER BY created_at ASC")
+      .all() as TaskGraphRow[];
+    return rows.map(parseTaskGraph);
+  }
+
+  refreshTaskGraphStatuses(): TaskGraph[] {
+    const updated: TaskGraph[] = [];
+    for (const graph of this.getOpenTaskGraphs()) {
+      const tasks = this.getTasksForGraph(graph.id);
+      const nextStatus = graphStatusFromTasks(tasks);
+      if (nextStatus === graph.status) continue;
+      if (nextStatus === "done" || nextStatus === "failed") {
+        this.completeTaskGraph(graph.id, nextStatus);
+      } else {
+        this.db
+          .prepare("UPDATE task_graphs SET status = ?, completed_at = NULL WHERE id = ?")
+          .run(nextStatus, graph.id);
+        this.addEvent({
+          type: "task_graph.status",
+          payload: { graphId: graph.id, status: nextStatus },
+        });
+      }
+      const refreshed = this.getTaskGraph(graph.id);
+      if (refreshed) updated.push(refreshed);
+    }
+    return updated;
   }
 
   getDependencies(taskId: string): TaskDependency[] {
@@ -410,19 +483,41 @@ export class TaskStore {
   }
 
   claimNextQueuedTask(role: string, agentId: string, leaseMs: number): Task | null {
-    const row = this.db
+    const rows = this.db
       .prepare(
-        "SELECT * FROM role_queues WHERE role = ? AND status = 'queued' ORDER BY priority DESC, id ASC LIMIT 1",
+        "SELECT * FROM role_queues WHERE role = ? AND status = 'queued' ORDER BY priority DESC, id ASC LIMIT 10",
       )
-      .get(role) as { task_id: string } | undefined;
-    if (!row) return null;
+      .all(role) as Array<{ task_id: string }>;
 
-    const queueUpdate = this.db
-      .prepare("UPDATE role_queues SET status = 'running', updated_at = ? WHERE task_id = ?")
-      .run(new Date().toISOString(), row.task_id);
-    if (queueUpdate.changes === 0) return null;
-    this.claimTask(row.task_id, agentId, { leaseMs });
-    return this.getTask(row.task_id);
+    for (const row of rows) {
+      const task = this.getTask(row.task_id);
+      if (!task) {
+        this.completeQueueItem(row.task_id, "failed");
+        continue;
+      }
+      if (task.status !== "queued") {
+        this.completeQueueItem(row.task_id, queueStatusForTask(task));
+        continue;
+      }
+
+      try {
+        this.claimTask(row.task_id, agentId, { leaseMs });
+      } catch (error) {
+        if (error instanceof IllegalTaskTransitionError || error instanceof TaskTransitionConflictError) {
+          const latest = this.getTask(row.task_id);
+          if (latest) this.completeQueueItem(row.task_id, queueStatusForTask(latest));
+          continue;
+        }
+        throw error;
+      }
+
+      this.db
+        .prepare("UPDATE role_queues SET status = 'running', updated_at = ? WHERE task_id = ?")
+        .run(new Date().toISOString(), row.task_id);
+      return this.getTask(row.task_id);
+    }
+
+    return null;
   }
 
   completeQueueItem(taskId: string, status: "done" | "failed" | "dead_letter" = "done"): void {
@@ -635,17 +730,27 @@ export class TaskStore {
   }
 
   decideMemoryCandidate(candidateId: string, status: "approved" | "rejected"): MemoryCandidate {
-    this.db
-      .prepare("UPDATE memory_candidates SET status = ?, decided_at = ? WHERE id = ?")
+    return this.decidePendingMemoryCandidate(candidateId, status).candidate;
+  }
+
+  decidePendingMemoryCandidate(candidateId: string, status: "approved" | "rejected"): {
+    candidate: MemoryCandidate;
+    changed: boolean;
+  } {
+    const result = this.db
+      .prepare("UPDATE memory_candidates SET status = ?, decided_at = ? WHERE id = ? AND status = 'pending'")
       .run(status, new Date().toISOString(), candidateId);
     const candidate = this.getMemoryCandidate(candidateId);
     if (!candidate) throw new Error(`Memory candidate not found: ${candidateId}`);
+    if (result.changes === 0) {
+      return { candidate, changed: false };
+    }
     this.addEvent({
       type: status === "approved" ? "memory.candidate.approved" : "memory.candidate.rejected",
       taskId: candidate.taskId,
       payload: RuntimeEventFactory.candidateLifecycle(candidateId, candidate.runId, status),
     });
-    return candidate;
+    return { candidate, changed: true };
   }
 
   getPendingMemoryCandidates({ runId, limit = 20 }: { runId?: string; limit?: number } = {}): MemoryCandidate[] {
@@ -808,6 +913,13 @@ export class TaskStore {
     return rows.map(parseTask);
   }
 
+  getQueuedRoles(): string[] {
+    const rows = this.db
+      .prepare("SELECT DISTINCT role FROM role_queues WHERE status = 'queued' ORDER BY role ASC")
+      .all() as Array<{ role: string }>;
+    return rows.map((row) => row.role);
+  }
+
   getTerminalTasksBetween({
     start,
     end,
@@ -871,19 +983,32 @@ export class TaskStore {
     return rows.map(parseTask);
   }
 
+  getTasksForGraph(graphId: string): Task[] {
+    const rows = this.db
+      .prepare("SELECT * FROM tasks WHERE json_extract(metadata, '$.graphId') = ? ORDER BY created_at ASC")
+      .all(graphId) as TaskRow[];
+    return rows.map(parseTask);
+  }
+
   health(): {
     pendingTasks: number;
     runningTasks: number;
+    activeRuns: number;
     expiredLeases: number;
     unacknowledgedTerminalTasks: number;
     pendingMemoryCandidates: number;
+    queuedRoles: string[];
+    openTaskGraphs: number;
   } {
     return {
       pendingTasks: count(this.db, "SELECT COUNT(*) AS count FROM tasks WHERE status IN ('pending', 'queued')"),
       runningTasks: count(this.db, "SELECT COUNT(*) AS count FROM tasks WHERE status = 'running'"),
+      activeRuns: count(this.db, "SELECT COUNT(*) AS count FROM runs WHERE status IN ('running', 'reviewing', 'recovering')"),
       expiredLeases: this.getExpiredLeaseTasks().length,
       unacknowledgedTerminalTasks: this.getUnacknowledgedTerminalTasks().length,
       pendingMemoryCandidates: count(this.db, "SELECT COUNT(*) AS count FROM memory_candidates WHERE status = 'pending'"),
+      queuedRoles: this.getQueuedRoles(),
+      openTaskGraphs: count(this.db, "SELECT COUNT(*) AS count FROM task_graphs WHERE status IN ('pending', 'running')"),
     };
   }
 
@@ -973,6 +1098,14 @@ interface RunRow {
   completed_at: string | null;
 }
 
+interface TaskGraphRow {
+  id: string;
+  run_id: string | null;
+  status: TaskGraph["status"];
+  created_at: string;
+  completed_at: string | null;
+}
+
 interface TaskDependencyRow {
   task_id: string;
   depends_on_task_id: string;
@@ -1048,6 +1181,16 @@ function parseRun(row: RunRow): Run {
   };
 }
 
+function parseTaskGraph(row: TaskGraphRow): TaskGraph {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    status: row.status,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+  };
+}
+
 function parseDependency(row: TaskDependencyRow): TaskDependency {
   return {
     taskId: row.task_id,
@@ -1070,6 +1213,35 @@ function parseMemoryCandidate(row: MemoryCandidateRow): MemoryCandidate {
     createdAt: row.created_at,
     decidedAt: row.decided_at,
   };
+}
+
+function queueStatusForTask(task: Task): "done" | "failed" | "dead_letter" {
+  if (task.status === "done") return "done";
+  if (task.status === "dead_letter") return "dead_letter";
+  return "failed";
+}
+
+function graphStatusFromTasks(tasks: Task[]): TaskGraph["status"] {
+  if (!tasks.length) return "pending";
+  if (tasks.some((task) => task.status === "failed" || task.status === "dead_letter" || task.status === "blocked")) {
+    return "failed";
+  }
+  if (tasks.every((task) => task.status === "done")) return "done";
+  if (tasks.some((task) => task.status === "queued" || task.status === "running" || task.status === "needs_inspection")) {
+    return "running";
+  }
+  return "pending";
+}
+
+function recoverableRunStatusFromTasks(tasks: Task[]): Run["status"] | null {
+  if (!tasks.length) return "failed";
+  if (tasks.some((task) => task.status === "pending" || task.status === "queued" || task.status === "running" || task.status === "needs_inspection")) {
+    return null;
+  }
+  if (tasks.every((task) => task.status === "done")) return "done";
+  if (tasks.some((task) => task.status === "blocked")) return "blocked";
+  if (tasks.some((task) => task.status === "done")) return "partially_done";
+  return "failed";
 }
 
 function count(db: DatabaseSync, sql: string): number {

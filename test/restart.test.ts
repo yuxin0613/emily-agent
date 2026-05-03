@@ -16,16 +16,30 @@ const queued = prebootStore.createTask({
   },
 });
 prebootStore.enqueueTask(queued.id);
+const dynamicQueued = prebootStore.createTask({
+  role: "qa",
+  title: "dynamic role queued before restart",
+  input: "Verify a role outside the default list can drain after runtime restart.",
+  metadata: {
+    sessionId: "restart",
+  },
+});
+prebootStore.enqueueTask(dynamicQueued.id);
 prebootStore.close();
 
 const runtime = await createRuntime({ dataDir });
 const finished = await runtime.roleAgentManager.waitForTask(queued.id, {
   timeoutMs: 10000,
 });
+const dynamicFinished = await runtime.roleAgentManager.waitForTask(dynamicQueued.id, {
+  timeoutMs: 10000,
+});
 
 assert.equal(finished.status, "done");
+assert.equal(dynamicFinished.status, "done");
 const trace = runtime.getTaskTrace(queued.id);
 assert.ok(trace.events.some((event) => event.type === "task.done"));
+assert.ok(runtime.taskStore.getQueuedRoles().length === 0);
 
 await runtime.shutdown();
 

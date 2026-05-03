@@ -4,6 +4,8 @@ import type { Task, TaskEvent } from "../types.ts";
 import type { TaskStore } from "./TaskStore.ts";
 import { RecoveryPolicy } from "../recovery/RecoveryPolicy.ts";
 
+const DEFAULT_ROLES = ["planner", "developer", "researcher", "reviewer", "inspector", "memory-curator"];
+
 interface RoleState {
   role: string;
   child: ChildProcess | null;
@@ -26,6 +28,8 @@ export class RoleAgentManager extends EventEmitter {
   recoveryPolicy: RecoveryPolicy;
   roles: Map<string, RoleState>;
   shuttingDown: boolean;
+  started: boolean;
+  reconciling: boolean;
   reconcileTimer: NodeJS.Timeout | null;
 
   constructor({
@@ -50,10 +54,15 @@ export class RoleAgentManager extends EventEmitter {
     this.recoveryPolicy = new RecoveryPolicy();
     this.roles = new Map();
     this.shuttingDown = false;
+    this.started = false;
+    this.reconciling = false;
     this.reconcileTimer = null;
   }
 
   async start(): Promise<void> {
+    if (this.started) return;
+    this.started = true;
+    this.shuttingDown = false;
     await this.reconcile();
     this.reconcileTimer = setInterval(() => {
       this.reconcile().catch((error) => this.emit("error", error));
@@ -146,24 +155,34 @@ export class RoleAgentManager extends EventEmitter {
     needsInspectionTasks: Task[];
     unacknowledgedTerminalTasks: Task[];
   }> {
-    const expiredLeaseTasks = this.taskStore.getExpiredLeaseTasks();
-    for (const task of expiredLeaseTasks) {
-      await this.enqueueInspection(task, "lease expired");
+    if (this.reconciling) {
+      return { expiredLeaseTasks: [], needsInspectionTasks: [], unacknowledgedTerminalTasks: [] };
     }
 
-    const needsInspectionTasks = this.taskStore.getNeedsInspectionWithoutInspector();
-    for (const task of needsInspectionTasks) {
-      await this.enqueueInspection(task, "needs inspection without inspector task");
+    this.reconciling = true;
+    try {
+      const expiredLeaseTasks = this.taskStore.getExpiredLeaseTasks();
+      for (const task of expiredLeaseTasks) {
+        await this.recoverTask(task, "lease expired");
+      }
+
+      const needsInspectionTasks = this.taskStore.getNeedsInspectionWithoutInspector();
+      for (const task of needsInspectionTasks) {
+        await this.enqueueInspection(task, "needs inspection without inspector task");
+      }
+
+      const unacknowledgedTerminalTasks = this.taskStore.getUnacknowledgedTerminalTasks();
+      for (const task of unacknowledgedTerminalTasks) {
+        this.emitTaskEvent("task.changed", task.id, null);
+      }
+
+      this.taskStore.refreshTaskGraphStatuses();
+      this.drainAllRoles();
+
+      return { expiredLeaseTasks, needsInspectionTasks, unacknowledgedTerminalTasks };
+    } finally {
+      this.reconciling = false;
     }
-
-    const unacknowledgedTerminalTasks = this.taskStore.getUnacknowledgedTerminalTasks();
-    for (const task of unacknowledgedTerminalTasks) {
-      this.emitTaskEvent("task.changed", task.id, null);
-    }
-
-    this.drainAllRoles();
-
-    return { expiredLeaseTasks, needsInspectionTasks, unacknowledgedTerminalTasks };
   }
 
   getRoleState(role: string): RoleState {
@@ -187,18 +206,41 @@ export class RoleAgentManager extends EventEmitter {
 
     const child = this.ensureWorker(roleState);
     roleState.activeTaskId = task.id;
-    child.send?.({
-      type: "task.start",
-      taskId: task.id,
-      role,
-      agentId: roleState.agentId,
-      dataDir: this.dataDir,
-      leaseMs: this.leaseMs,
+    this.taskStore.upsertAgent({
+      id: roleState.agentId,
+      role: roleState.role,
+      status: "running",
+      currentTaskId: task.id,
     });
+
+    if (!child.connected || !child.send) {
+      roleState.activeTaskId = null;
+      this.recoverTask(task, "worker IPC send failed").then(() => {
+        this.drainAllRoles();
+      }).catch((error) => this.emit("error", error));
+      return;
+    }
+
+    try {
+      child.send({
+        type: "task.start",
+        taskId: task.id,
+        role,
+        agentId: roleState.agentId,
+        dataDir: this.dataDir,
+        leaseMs: this.leaseMs,
+      });
+    } catch (error) {
+      roleState.activeTaskId = null;
+      this.recoverTask(task, `worker IPC send threw: ${error instanceof Error ? error.message : String(error)}`).then(() => {
+        this.drainAllRoles();
+      }).catch((innerError) => this.emit("error", innerError));
+    }
   }
 
   drainAllRoles(): void {
-    for (const role of ["planner", "developer", "researcher", "reviewer", "inspector", "memory-curator"]) {
+    const roles = new Set([...DEFAULT_ROLES, ...this.roles.keys(), ...this.taskStore.getQueuedRoles()]);
+    for (const role of roles) {
       this.drainRole(role);
     }
   }
@@ -250,12 +292,14 @@ export class RoleAgentManager extends EventEmitter {
 
     if (payload.type === "task.finished" && payload.taskId) {
       const task = this.taskStore.getTask(payload.taskId);
-      roleState.activeTaskId = null;
-      this.taskStore.upsertAgent({
-        id: roleState.agentId,
-        role: roleState.role,
-        status: "idle",
-      });
+      if (roleState.activeTaskId === payload.taskId) {
+        roleState.activeTaskId = null;
+        this.taskStore.upsertAgent({
+          id: roleState.agentId,
+          role: roleState.role,
+          status: "idle",
+        });
+      }
       await this.taskStore.writeTaskMarkdown(payload.taskId);
       this.emitTaskEvent("task.finished", payload.taskId, payload.eventId ?? null);
       if (task?.status && this.taskStore.isTerminalStatus(task.status)) {
@@ -357,6 +401,7 @@ export class RoleAgentManager extends EventEmitter {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.started = false;
     if (this.reconcileTimer) clearInterval(this.reconcileTimer);
     const exits: Array<Promise<unknown>> = [];
 

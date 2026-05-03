@@ -78,11 +78,13 @@ flowchart LR
 - `getTaskTrace(taskId)`: 返回单个 task 的事件轨迹。
 - `renderTimeline(runId)`: 把结构化 timeline 渲染成人类可读 replay 文本。
 - `health()`: 返回 pending/running task、过期 lease、未 ack 终态 task、待处理记忆候选和 active experience 数量。
-- `maintenance()`: 执行 reconcile、处理遗留 memory candidates、生成每日经验，并返回维护后的健康状态。
+- `maintenance()`: 执行 reconcile、刷新 task graph、收敛孤儿 run、处理遗留 memory candidates、生成每日经验，并返回维护后的健康状态。
 - 状态机更新使用 `WHERE id = ? AND status = ?` 做乐观并发防护，晚到的写入会失败。
 - 状态机错误分成 `IllegalTaskTransitionError` 和 `TaskTransitionConflictError`。
 - runtime event payload 统一通过 `RuntimeEventFactory` 生成，避免事件结构散落在各处。
 - worker 异常退出统一走 `RecoveryPolicy`，可按任务状态选择 finish、retry、dead-letter 或 inspector 复核。
+- `RoleAgentManager` 会从 `role_queues` 动态发现角色，不要求所有角色预先写死在主进程。
+- memory candidate 审批使用 `WHERE status = 'pending'` 条件更新，避免 main agent 和 maintenance 并发重复写入长期记忆。
 
 ## 第二轮核心优化
 
@@ -99,6 +101,19 @@ flowchart LR
 9. runtime 暴露 `health()`，Web 端 `GET /health` 返回详细健康状态。
 10. runtime 暴露 `maintenance()`，Web 端 `POST /maintenance` 可手动触发 reconcile、候选记忆审批和每日经验提炼。
 
+## 当前健壮性加固
+
+继续加固后的运行保障：
+
+- `RoleAgentManager.start()` 幂等，周期性 reconcile 不会重入。
+- `drainAllRoles()` 会合并默认角色、已启动角色和 SQLite 队列里的动态角色。
+- `claimNextQueuedTask()` 会清理 stale queue item，先确认 task 仍可 claim，再把 queue item 标记为 running。
+- IPC 发送失败会走 `RecoveryPolicy`，不会把 task 留在已领取但无人执行的状态。
+- worker 晚到的 `task.finished` 不会误清当前 role 的 active task。
+- `refreshTaskGraphStatuses()` 会把 graph 从 pending/running 收敛到 done/failed。
+- `recoverStaleRuns()` 会把 task 已经终态但 run 仍处于 running/reviewing/recovering 的孤儿 run 收敛到最终状态。
+- `health()` 现在包含 active run、queued role 和 open task graph 指标。
+
 Web API：
 
 ```bash
@@ -109,7 +124,7 @@ curl 'http://127.0.0.1:3000/task-trace?taskId=...'
 
 curl -X POST http://127.0.0.1:3000/maintenance \
   -H 'content-type: application/json' \
-  -d '{"day":"2026-05-03"}'
+  -d '{"day":"2026-05-03","staleRunMs":300000}'
 ```
 
 ## 经验记忆
@@ -240,10 +255,11 @@ npm run check
 
 - 正常主 agent 到 subagent 的任务派发和三层记忆写入。
 - worker 崩溃后 inspector 自动检查并落最终状态。
-- runtime 重启后继续 drain 已持久化 queued task。
+- runtime 重启后继续 drain 已持久化 queued task，包括动态角色。
 - Task 状态机、非法跳转、retry 和 dead-letter。
 - run/timeline、reviewer flow、memory candidates。
-- reviewer verdict parser、memory candidate policy、runtime health/maintenance。
+- reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
+- task graph 状态刷新和孤儿 run 收敛。
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
 - 经验相似匹配、applicability/contraindications、feedback/reuse 和 schema migration 记录。
 

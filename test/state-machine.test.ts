@@ -66,6 +66,17 @@ store.finishTask(graph.a.id, {
   agentId: "planner-test",
 });
 assert.equal(store.getTaskOrThrow(graph.b.id).status, "queued");
+const graphId = String(graph.a.metadata.graphId);
+const runningGraphs = store.refreshTaskGraphStatuses();
+assert.ok(runningGraphs.some((item) => item.id === graphId && item.status === "running"));
+store.claimTask(graph.b.id, "developer-test", { leaseMs: 1000 });
+store.finishTask(graph.b.id, {
+  result: "b done",
+  agentId: "developer-test",
+});
+const completedGraphs = store.refreshTaskGraphStatuses();
+assert.ok(completedGraphs.some((item) => item.id === graphId && item.status === "done"));
+assert.equal(store.getTaskGraph(graphId)?.completedAt !== null, true);
 
 const retryTask = store.createTask({
   role: "developer",
@@ -95,6 +106,29 @@ store.failTask(retryTask.id, {
 const deadLetter = store.getTaskOrThrow(retryTask.id);
 assert.equal(deadLetter.status, "dead_letter");
 assert.equal(deadLetter.metadata.deadLetterReason, "max retries exceeded");
+
+const staleRun = store.createRun({
+  sessionId: "state-machine",
+  source: "test",
+  userInput: "recover stale run",
+});
+const staleRunTask = store.createTask({
+  role: "developer",
+  title: "stale run task",
+  input: "finish before run completion",
+  metadata: {
+    runId: staleRun.id,
+  },
+});
+store.enqueueTask(staleRunTask.id);
+store.claimTask(staleRunTask.id, "developer-test", { leaseMs: 1000 });
+store.finishTask(staleRunTask.id, {
+  result: "run task done",
+  agentId: "developer-test",
+});
+const recoveredRuns = store.recoverStaleRuns({ olderThanMs: 0 });
+assert.ok(recoveredRuns.some((run) => run.id === staleRun.id && run.status === "done"));
+assert.equal(store.getRun(staleRun.id)?.completedAt !== null, true);
 
 store.close();
 

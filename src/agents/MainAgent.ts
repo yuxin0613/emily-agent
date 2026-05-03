@@ -75,69 +75,101 @@ export class MainAgent {
       source,
       userInput: normalizedInput,
     });
-
-    await this.memory.remember({
-      scope: sessionId,
-      kind: "message:user",
-      content: normalizedInput,
-      metadata: { source, runId: run.id },
-    });
-
-    const relevantMemory = await this.memory.recall(normalizedInput, {
-      scope: sessionId,
-      limit: 5,
-    });
-    const relevantExperiences = this.experienceStore.recall(normalizedInput, {
-      scope: "project",
-      limit: 3,
-    });
-
     const selectedAgents = this.selectSubAgents(normalizedInput);
-    const { subResults, reviewerVerdict } = await this.delegateTasks({
-      input: normalizedInput,
-      sessionId,
-      source,
-      runId: run.id,
-      selectedAgents,
-    });
+    let subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }> = [];
+    let reviewerVerdict: ReviewerVerdict | undefined;
 
-    const content = await this.synthesizeResponse({
-      input: normalizedInput,
-      relevantMemory,
-      relevantExperiences,
-      subResults,
-    });
-    for (const experience of relevantExperiences) {
-      this.experienceStore.recordUse(experience.id);
-    }
+    try {
+      await this.memory.remember({
+        scope: sessionId,
+        kind: "message:user",
+        content: normalizedInput,
+        metadata: { source, runId: run.id },
+      });
 
-    await this.memory.remember({
-      scope: context.sessionId || "default",
-      kind: "message:assistant",
-      content,
-      metadata: {
-        source: "main-agent",
+      const relevantMemory = await this.memory.recall(normalizedInput, {
+        scope: sessionId,
+        limit: 5,
+      });
+      const relevantExperiences = this.experienceStore.recall(normalizedInput, {
+        scope: "project",
+        limit: 3,
+      });
+
+      const delegated = await this.delegateTasks({
+        input: normalizedInput,
+        sessionId,
+        source,
         runId: run.id,
+        selectedAgents,
+      });
+      subResults = delegated.subResults;
+      reviewerVerdict = delegated.reviewerVerdict;
+
+      const content = await this.synthesizeResponse({
+        input: normalizedInput,
+        relevantMemory,
+        relevantExperiences,
+        subResults,
+      });
+      for (const experience of relevantExperiences) {
+        this.experienceStore.recordUse(experience.id);
+      }
+
+      await this.memory.remember({
+        scope: context.sessionId || "default",
+        kind: "message:assistant",
+        content,
+        metadata: {
+          source: "main-agent",
+          runId: run.id,
+          delegatedTo: selectedAgents,
+        },
+      });
+
+      for (const result of subResults) {
+        this.taskStore.acknowledgeTask(result.taskId);
+      }
+      await this.approveRunMemoryCandidates(run.id);
+      this.taskStore.completeRun(run.id, runStatusFrom({ subResults, reviewerVerdict }));
+
+      return {
+        agent: this.name,
+        runId: run.id,
+        content,
         delegatedTo: selectedAgents,
-      },
-    });
-
-    for (const result of subResults) {
-      this.taskStore.acknowledgeTask(result.taskId);
+        memory: relevantMemory,
+        experiences: relevantExperiences,
+        subResults,
+        reviewerVerdict,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.taskStore.completeRun(run.id, "failed");
+      const content = `这次运行没有完成：${message}`;
+      try {
+        await this.memory.remember({
+          scope: sessionId,
+          kind: "message:assistant:error",
+          content,
+          metadata: {
+            source: "main-agent",
+            runId: run.id,
+            delegatedTo: selectedAgents,
+          },
+        });
+      } catch {
+        // The run status in SQLite is the recovery source of truth even if memory write fails.
+      }
+      return {
+        agent: this.name,
+        runId: run.id,
+        content,
+        delegatedTo: selectedAgents,
+        subResults,
+        reviewerVerdict,
+      };
     }
-    await this.approveRunMemoryCandidates(run.id);
-    this.taskStore.completeRun(run.id, runStatusFrom({ subResults, reviewerVerdict }));
-
-    return {
-      agent: this.name,
-      runId: run.id,
-      content,
-      delegatedTo: selectedAgents,
-      memory: relevantMemory,
-      experiences: relevantExperiences,
-      subResults,
-      reviewerVerdict,
-    };
   }
 
   async delegateTasks({
@@ -194,6 +226,7 @@ export class MainAgent {
     }
 
     if (results.some((result) => result.role !== "planner" && result.status === "done")) {
+      this.taskStore.updateRunStatus(runId, "reviewing");
       const reviewTask = this.taskStore.createTask({
         role: "reviewer",
         title: `reviewer: ${input.slice(0, 60)}`,
@@ -226,10 +259,11 @@ export class MainAgent {
   async approveRunMemoryCandidates(runId: string): Promise<void> {
     for (const candidate of this.taskStore.getPendingMemoryCandidates({ runId, limit: 100 })) {
       if (this.memoryCandidatePolicy.decide(candidate) === "rejected") {
-        this.taskStore.decideMemoryCandidate(candidate.id, "rejected");
+        this.taskStore.decidePendingMemoryCandidate(candidate.id, "rejected");
         continue;
       }
-      this.taskStore.decideMemoryCandidate(candidate.id, "approved");
+      const decision = this.taskStore.decidePendingMemoryCandidate(candidate.id, "approved");
+      if (!decision.changed) continue;
       await this.memory.remember({
         scope: candidate.scope,
         kind: candidate.kind,

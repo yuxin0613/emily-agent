@@ -18,7 +18,7 @@ export async function startWebServer({
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
-    maintenance: (options?: { day?: Date }) => Promise<unknown>;
+    maintenance: (options?: { day?: Date; staleRunMs?: number }) => Promise<unknown>;
     roleAgentManager: NodeJS.EventEmitter;
   };
   port: number;
@@ -72,6 +72,7 @@ export async function startWebServer({
         const body = await readJson(request);
         const result = await runtime.maintenance({
           day: typeof body.day === "string" ? new Date(body.day) : new Date(),
+          staleRunMs: typeof body.staleRunMs === "number" ? body.staleRunMs : undefined,
         });
         return sendJson(response, 200, result);
       }
