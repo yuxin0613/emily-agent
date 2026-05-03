@@ -47,6 +47,12 @@ function printHelp(): void {
     "  :providers                    list providers",
     "  :roles                        list roles",
     "  :commands                     list command registry entries",
+    "  :cron                         list cron jobs",
+    "  :cron-add <name> <cron> <msg>  schedule a chat cron job",
+    "  :cron-pause <id>               pause cron job",
+    "  :cron-resume <id>              resume cron job",
+    "  :cron-run <id>                 run cron job now",
+    "  :cron-delete <id>              delete cron job",
     "  :sessions [all|hidden|trash]  list sessions",
     "  :resume latest [hidden]       resume latest session",
     "  :export-session <id> [md]     export session",
@@ -106,6 +112,36 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     case "commands":
       printCommands(runtime.listCommands());
+      return;
+    case "cron":
+      printText(await runtime.runCommand("cron.list", { format: "text" }));
+      return;
+    case "cron-add":
+      await addCron(runtime, state, args);
+      return;
+    case "cron-pause":
+      printText(await runtime.runCommand("cron.pause", {
+        input: { id: requiredArg(args[0], "cron id") },
+        format: "text",
+      }));
+      return;
+    case "cron-resume":
+      printText(await runtime.runCommand("cron.resume", {
+        input: { id: requiredArg(args[0], "cron id") },
+        format: "text",
+      }));
+      return;
+    case "cron-run":
+      printText(await runtime.runCommand("cron.run", {
+        input: { id: requiredArg(args[0], "cron id") },
+        format: "text",
+      }));
+      return;
+    case "cron-delete":
+      printText(await runtime.runCommand("cron.delete", {
+        input: { id: requiredArg(args[0], "cron id") },
+        format: "text",
+      }));
       return;
     case "sessions":
       printText(await runtime.runCommand("session.list", { input: sessionListOptions(args[0]), format: "text" }));
@@ -252,6 +288,23 @@ async function startNewSession(runtime, state, args: string[] = []): Promise<voi
   state.sessionId = session.id;
   state.lastRunId = "";
   output.write(`\nNew session: ${session.id}\n\n`);
+}
+
+async function addCron(runtime, state, args: string[]): Promise<void> {
+  const name = requiredArg(args[0], "cron name");
+  const schedule = requiredArg(args[1], "cron schedule");
+  const message = args.slice(2).join(" ").trim();
+  if (!message) throw new Error("cron message is required");
+  printText(await runtime.runCommand("cron.create", {
+    input: {
+      name,
+      schedule,
+      message,
+      sessionId: state.sessionId,
+      source: "tui-cron",
+    },
+    format: "text",
+  }));
 }
 
 async function resumeLatest(runtime, state, args: string[]): Promise<void> {

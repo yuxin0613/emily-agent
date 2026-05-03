@@ -300,6 +300,7 @@ curl 'http://127.0.0.1:3000/commands' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/tools' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/skills' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/providers' -H "x-emily-token: $TOKEN"
+curl 'http://127.0.0.1:3000/cron' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 ```
 
@@ -324,7 +325,50 @@ Request shape:
 }
 ```
 
-Gateway methods include chat, sessions, provider management, roles, tools, skills, experiences, timeline, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
+Gateway methods include chat, sessions, provider management, roles, tools, skills, cron jobs, experiences, timeline, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
+
+## Cron Jobs
+
+AgentOS includes an internal cron scheduler. It runs while the TUI, WebUI, or `--cron` process is alive; it does not install system crontab entries. Cron jobs are stored in `.emily/cron.json` or `EMILY_DATA_DIR/cron.json`.
+
+Supported schedules are standard five-field cron expressions:
+
+```text
+minute hour day-of-month month day-of-week
+```
+
+Aliases are also supported: `@hourly`, `@daily`, `@weekly`, and `@monthly`.
+
+Create a scheduled chat job:
+
+```bash
+emily --web
+curl -X POST 'http://127.0.0.1:3000/cron' \
+  -H "x-emily-token: $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name":"daily review","schedule":"0 9 * * *","message":"总结昨天的重要工作并沉淀经验","sessionId":"daily"}'
+```
+
+Create a scheduled command job:
+
+```bash
+curl -X POST 'http://127.0.0.1:3000/cron' \
+  -H "x-emily-token: $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"name":"daily maintenance","schedule":"@daily","command":"maintenance.run"}'
+```
+
+Run only the cron daemon:
+
+```bash
+emily --cron
+```
+
+Trigger due jobs once, useful from a system cron if you prefer external scheduling:
+
+```bash
+emily --cron-once
+```
 
 ## Sessions
 

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
 import { createCommandRegistry } from "../commands/CommandRegistry.ts";
 import { ContextEngine } from "../context/ContextEngine.ts";
+import { CronScheduler, type CronJobInput } from "../cron/CronScheduler.ts";
 import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
 import { GATEWAY_METHODS } from "../gateway/GatewayProtocol.ts";
@@ -44,6 +45,7 @@ export async function createRuntime(options: {
   workerPath?: string;
   skillDir?: string;
   vectorStore?: VectorStoreConfig;
+  enableCron?: boolean;
 } = {}) {
   const dataDir = options.dataDir || process.env.EMILY_DATA_DIR || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
@@ -346,7 +348,58 @@ export async function createRuntime(options: {
     };
   }
 
-  const commandRegistry = createCommandRegistry({
+  async function handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}) {
+    const sessionId = context.sessionId || "default";
+    const source = context.source || "unknown";
+    const permissionMode = parsePermissionMode(context.permissionMode);
+    const normalizedInput = String(input || "").trim();
+    if (normalizedInput) {
+      taskStore.addSessionMessage({
+        sessionId,
+        role: "user",
+        content: normalizedInput,
+        metadata: { source, permissionMode },
+      });
+    }
+    const result = await mainAgent.handleUserMessage(input, {
+      ...context,
+      permissionMode,
+    });
+    taskStore.addSessionMessage({
+      sessionId,
+      runId: typeof result.runId === "string" ? result.runId : null,
+      role: result.content.startsWith("这次运行没有完成") ? "error" : "assistant",
+      content: result.content,
+      delegatedTo: Array.isArray(result.delegatedTo) ? result.delegatedTo : [],
+      metadata: {
+        source: "main-agent",
+        needsUserInput: Boolean(result.needsUserInput),
+        permissionMode,
+      },
+    });
+    return result;
+  }
+
+  let commandRegistry: ReturnType<typeof createCommandRegistry>;
+  const cronScheduler = await CronScheduler.create({
+    dataDir,
+    taskStore,
+    execute: async (job) => {
+      if (job.action.type === "chat") {
+        return handleUserMessage(job.action.message, {
+          sessionId: job.action.sessionId,
+          source: job.action.source || "cron",
+          permissionMode: job.action.permissionMode,
+        });
+      }
+      return commandRegistry.run(job.action.command, job.action.args, {
+        input: job.action.input,
+        format: job.action.format,
+      });
+    },
+  });
+
+  commandRegistry = createCommandRegistry({
     health,
     doctor,
     listTools: () => toolRegistry.list(),
@@ -432,7 +485,15 @@ export async function createRuntime(options: {
       return taskStore.getRun(runId);
     },
     executeTool,
+    listCronJobs: (input = {}) => cronScheduler.list(input),
+    createCronJob: (input: CronJobInput) => cronScheduler.createJob(input),
+    updateCronJob: (id: string, input: Partial<CronJobInput>) => cronScheduler.updateJob(id, input),
+    pauseCronJob: (id: string) => cronScheduler.pauseJob(id),
+    resumeCronJob: (id: string) => cronScheduler.resumeJob(id),
+    deleteCronJob: (id: string) => cronScheduler.deleteJob(id),
+    runCronJob: (id: string) => cronScheduler.runJob(id),
   });
+  if (options.enableCron !== false) cronScheduler.start();
 
   return {
     dataDir,
@@ -447,6 +508,7 @@ export async function createRuntime(options: {
     experienceStore,
     experienceBuilder,
     skillBuilder,
+    cronScheduler,
     model,
     taskStore,
     roleAgentManager,
@@ -547,37 +609,7 @@ export async function createRuntime(options: {
     listSessionMessages(options: Parameters<TaskStore["listSessionMessages"]>[0]) {
       return taskStore.listSessionMessages(options);
     },
-    async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}) {
-      const sessionId = context.sessionId || "default";
-      const source = context.source || "unknown";
-      const permissionMode = parsePermissionMode(context.permissionMode);
-      const normalizedInput = String(input || "").trim();
-      if (normalizedInput) {
-        taskStore.addSessionMessage({
-          sessionId,
-          role: "user",
-          content: normalizedInput,
-          metadata: { source, permissionMode },
-        });
-      }
-      const result = await mainAgent.handleUserMessage(input, {
-        ...context,
-        permissionMode,
-      });
-      taskStore.addSessionMessage({
-        sessionId,
-        runId: typeof result.runId === "string" ? result.runId : null,
-        role: result.content.startsWith("这次运行没有完成") ? "error" : "assistant",
-        content: result.content,
-        delegatedTo: Array.isArray(result.delegatedTo) ? result.delegatedTo : [],
-        metadata: {
-          source: "main-agent",
-          needsUserInput: Boolean(result.needsUserInput),
-          permissionMode,
-        },
-      });
-      return result;
-    },
+    handleUserMessage,
     buildDailyExperiences(options = {}) {
       return experienceBuilder.buildDailyExperiences(options);
     },
@@ -615,6 +647,27 @@ export async function createRuntime(options: {
     runCommand(name: string, options: { args?: string[]; format?: "json" | "text"; input?: Record<string, unknown> } = {}) {
       return commandRegistry.run(name, options.args || [], { format: options.format || "json", input: options.input || {} });
     },
+    listCronJobs(options: Parameters<CronScheduler["list"]>[0] = {}) {
+      return cronScheduler.list(options);
+    },
+    createCronJob(input: CronJobInput) {
+      return cronScheduler.createJob(input);
+    },
+    updateCronJob(id: string, input: Partial<CronJobInput>) {
+      return cronScheduler.updateJob(id, input);
+    },
+    pauseCronJob(id: string) {
+      return cronScheduler.pauseJob(id);
+    },
+    resumeCronJob(id: string) {
+      return cronScheduler.resumeJob(id);
+    },
+    deleteCronJob(id: string) {
+      return cronScheduler.deleteJob(id);
+    },
+    runCronJob(id: string) {
+      return cronScheduler.runJob(id);
+    },
     async cancelTask(taskId: string, reason?: string) {
       return roleAgentManager.cancelTask(taskId, reason);
     },
@@ -628,6 +681,7 @@ export async function createRuntime(options: {
     health,
     maintenance,
     async shutdown() {
+      cronScheduler.stop();
       await roleAgentManager.shutdown();
       providerUsageStore.close();
       experienceStore.close();

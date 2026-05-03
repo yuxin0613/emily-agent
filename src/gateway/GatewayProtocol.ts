@@ -67,6 +67,13 @@ export type GatewayMethod =
   | "sessions.usage"
   | "commands.list"
   | "commands.run"
+  | "cron.list"
+  | "cron.create"
+  | "cron.update"
+  | "cron.pause"
+  | "cron.resume"
+  | "cron.delete"
+  | "cron.run"
   | "context.build"
   | "router.route";
 
@@ -112,6 +119,13 @@ export const GATEWAY_METHODS: GatewayMethod[] = [
   "sessions.usage",
   "commands.list",
   "commands.run",
+  "cron.list",
+  "cron.create",
+  "cron.update",
+  "cron.pause",
+  "cron.resume",
+  "cron.delete",
+  "cron.run",
   "context.build",
   "router.route",
 ];
@@ -375,6 +389,22 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         input: params.input && typeof params.input === "object" && !Array.isArray(params.input) ? params.input as Record<string, unknown> : params,
         format: params.format === "text" ? "text" : "json",
       });
+    case "cron.list":
+      return runtime.runCommand("cron.list", {
+        input: { includePaused: params.includePaused !== false },
+      });
+    case "cron.create":
+      return runtime.runCommand("cron.create", { input: params });
+    case "cron.update":
+      return runtime.runCommand("cron.update", { input: params });
+    case "cron.pause":
+      return runtime.runCommand("cron.pause", { input: { id: String(params.id || "") } });
+    case "cron.resume":
+      return runtime.runCommand("cron.resume", { input: { id: String(params.id || "") } });
+    case "cron.delete":
+      return runtime.runCommand("cron.delete", { input: { id: String(params.id || "") } });
+    case "cron.run":
+      return runtime.runCommand("cron.run", { input: { id: String(params.id || "") } });
     case "context.build":
       return runtime.runCommand("context.build", {
         input: {

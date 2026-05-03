@@ -1,3 +1,4 @@
+import type { CronJobInput } from "../cron/CronScheduler.ts";
 import type { ToolApproval } from "../tools/ToolExecutor.ts";
 
 export type CommandPermission = "read" | "write" | "danger";
@@ -79,6 +80,7 @@ export function createCommandRegistry(runtime: CommandRuntime): CommandRegistry 
   for (const command of providerCommands(runtime)) registry.add(command);
   for (const command of roleCommands(runtime)) registry.add(command);
   for (const command of skillCandidateCommands(runtime)) registry.add(command);
+  for (const command of cronCommands(runtime)) registry.add(command);
   for (const command of runtimeControlCommands(runtime)) registry.add(command);
   return registry;
 }
@@ -139,6 +141,13 @@ interface CommandRuntime {
   maintenance: (options?: Record<string, unknown>) => Promise<unknown>;
   cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
   cancelRun: (runId: string, reason?: string) => Promise<unknown>;
+  listCronJobs: (options?: { includePaused?: boolean }) => unknown[];
+  createCronJob: (input: CronJobInput) => Promise<unknown>;
+  updateCronJob: (id: string, input: Partial<CronJobInput>) => Promise<unknown>;
+  pauseCronJob: (id: string) => Promise<unknown>;
+  resumeCronJob: (id: string) => Promise<unknown>;
+  deleteCronJob: (id: string) => Promise<unknown>;
+  runCronJob: (id: string) => Promise<unknown>;
   executeTool: (input: {
     tool: string;
     args?: Record<string, unknown>;
@@ -149,6 +158,107 @@ interface CommandRuntime {
     runId?: string;
     sessionId?: string;
   }) => Promise<unknown>;
+}
+
+function cronCommands(runtime: CommandRuntime): RuntimeCommand[] {
+  return [
+    {
+      name: "cron.list",
+      aliases: ["cron", "crons"],
+      description: "List cron jobs.",
+      permission: "read",
+      inputSchema: {
+        args: ["[all|active]"],
+        examples: ["cron.list", "cron.list active"],
+        properties: { includePaused: "boolean" },
+      },
+      run: ({ args, input }) => runtime.listCronJobs({
+        includePaused: input.includePaused === true || args[0] !== "active",
+      }),
+      renderText: (result) => renderCronJobs(result),
+    },
+    {
+      name: "cron.create",
+      aliases: ["cron-add", "cron.create_chat"],
+      description: "Create a cron job for a chat message or command.",
+      permission: "write",
+      inputSchema: {
+        args: ["<name>", "<schedule>", "[message]"],
+        examples: ['cron.create "daily build" "0 9 * * *" "整理昨天的工作"', 'cron.create -- command maintenance.run @daily'],
+        required: ["name", "schedule"],
+        properties: {
+          name: "string",
+          schedule: "string",
+          message: "string",
+          command: "string",
+          args: "array",
+          input: "object",
+          format: "string",
+          sessionId: "string",
+          source: "string",
+          permissionMode: "string",
+          status: "string",
+        },
+      },
+      run: ({ args, input }) => runtime.createCronJob({
+        name: stringInput(input.name, args[0], "name"),
+        schedule: stringInput(input.schedule, args[1], "schedule"),
+        message: stringOptional(input.message) || args.slice(2).join(" ").trim() || undefined,
+        command: stringOptional(input.command),
+        args: Array.isArray(input.args) ? input.args.map(String) : [],
+        input: objectInput(input.input),
+        format: input.format === "text" ? "text" : "json",
+        sessionId: stringOptional(input.sessionId),
+        source: stringOptional(input.source) || "cron",
+        permissionMode: input.permissionMode,
+        status: input.status === "paused" ? "paused" : "active",
+      }),
+      renderText: (result) => renderCronJobs([result]),
+    },
+    {
+      name: "cron.update",
+      aliases: ["cron-edit"],
+      description: "Update cron job name, schedule, action, or status.",
+      permission: "write",
+      inputSchema: {
+        args: ["<id>"],
+        examples: ['cron.update job_123 -- input.schedule="*/10 * * * *"'],
+        required: ["id"],
+        properties: {
+          id: "string",
+          name: "string",
+          schedule: "string",
+          message: "string",
+          command: "string",
+          args: "array",
+          input: "object",
+          format: "string",
+          sessionId: "string",
+          source: "string",
+          permissionMode: "string",
+          status: "string",
+        },
+      },
+      run: ({ args, input }) => runtime.updateCronJob(stringInput(input.id, args[0], "id"), {
+        name: stringOptional(input.name),
+        schedule: stringOptional(input.schedule),
+        message: stringOptional(input.message),
+        command: stringOptional(input.command),
+        args: Array.isArray(input.args) ? input.args.map(String) : undefined,
+        input: input.input && typeof input.input === "object" && !Array.isArray(input.input) ? input.input as Record<string, unknown> : undefined,
+        format: input.format === "text" ? "text" : input.format === "json" ? "json" : undefined,
+        sessionId: stringOptional(input.sessionId),
+        source: stringOptional(input.source),
+        permissionMode: input.permissionMode,
+        status: input.status === "paused" ? "paused" : input.status === "active" ? "active" : undefined,
+      }),
+      renderText: (result) => renderCronJobs([result]),
+    },
+    simpleCronCommand(runtime, "cron.pause", ["cron-pause"], "Pause a cron job.", (runtime, id) => runtime.pauseCronJob(id)),
+    simpleCronCommand(runtime, "cron.resume", ["cron-resume"], "Resume a cron job.", (runtime, id) => runtime.resumeCronJob(id)),
+    simpleCronCommand(runtime, "cron.delete", ["cron-delete", "cron.remove"], "Delete a cron job.", (runtime, id) => runtime.deleteCronJob(id)),
+    simpleCronCommand(runtime, "cron.run", ["cron-run"], "Run a cron job now.", (runtime, id) => runtime.runCronJob(id), renderCronRun),
+  ];
 }
 
 function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
@@ -862,6 +972,30 @@ function simpleProviderCommand(
   };
 }
 
+function simpleCronCommand(
+  runtime: CommandRuntime,
+  name: string,
+  aliases: string[],
+  description: string,
+  handler: (runtime: CommandRuntime, id: string) => Promise<unknown>,
+  renderText: (result: unknown) => string = (result) => renderCronJobs([result]),
+): RuntimeCommand {
+  return {
+    name,
+    aliases,
+    description,
+    permission: "write",
+    inputSchema: {
+      args: ["<id>"],
+      examples: [`${name} cron_123`],
+      required: ["id"],
+      properties: { id: "string" },
+    },
+    run: ({ args, input }) => handler(runtime, stringInput(input.id, args[0], "id")),
+    renderText,
+  };
+}
+
 function validateInput(command: RuntimeCommand, input: Record<string, unknown>, args: string[]): void {
   const positionalArgs = requiredPositionalArgs(command.inputSchema.args);
   for (const key of command.inputSchema.required || []) {
@@ -1082,6 +1216,39 @@ function renderToolExecution(result: unknown): string {
     value.error ? `error: ${value.error}` : "",
     value.output === undefined ? "" : `output: ${formatCell(value.output)}`,
   ].filter(Boolean).join("\n");
+}
+
+function renderCronJobs(result: unknown): string {
+  return renderTable("Cron Jobs", Array.isArray(result) ? result : [result], [
+    ["ID", (item) => shortId(item.id)],
+    ["Name", "name"],
+    ["Schedule", "schedule"],
+    ["Status", "status"],
+    ["Action", (item) => actionSummary(item.action)],
+    ["Next", "nextRunAt"],
+    ["Runs", "runCount"],
+    ["Errors", "errorCount"],
+  ]);
+}
+
+function renderCronRun(result: unknown): string {
+  if (!result || typeof result !== "object") return String(result ?? "");
+  const value = result as { ok?: boolean; manual?: boolean; error?: string; job?: Record<string, unknown> };
+  return [
+    `Cron Run: ${formatCell(value.job?.name || value.job?.id)}`,
+    `ok: ${value.ok === true}`,
+    `manual: ${value.manual === true}`,
+    value.error ? `error: ${value.error}` : "",
+    value.job ? renderCronJobs([value.job]) : "",
+  ].filter(Boolean).join("\n");
+}
+
+function actionSummary(action: unknown): string {
+  if (!action || typeof action !== "object" || Array.isArray(action)) return "";
+  const value = action as Record<string, unknown>;
+  if (value.type === "command") return `command:${formatCell(value.command)}`;
+  if (value.type === "chat") return `chat:${formatCell(value.sessionId)}`;
+  return formatCell(value.type);
 }
 
 function asRecordArray(result: unknown): Array<Record<string, unknown>> {

@@ -212,6 +212,43 @@ export async function startWebServer({
         return sendJson(response, 200, runtime.listCommands());
       }
 
+      if (request.method === "GET" && url.pathname === "/cron") {
+        return sendJson(response, 200, await runtime.runCommand("cron.list", {
+          input: { includePaused: url.searchParams.get("activeOnly") !== "true" },
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/cron") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.runCommand("cron.create", { input: body }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/cron/update") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.runCommand("cron.update", { input: body }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/cron/pause") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.runCommand("cron.pause", { input: { id: String(body.id || "") } }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/cron/resume") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.runCommand("cron.resume", { input: { id: String(body.id || "") } }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/cron/run") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runtime.runCommand("cron.run", { input: { id: String(body.id || "") } }));
+      }
+
+      if (request.method === "DELETE" && url.pathname === "/cron") {
+        return sendJson(response, 200, await runtime.runCommand("cron.delete", {
+          input: { id: String(url.searchParams.get("id") || "") },
+        }));
+      }
+
       if (request.method === "POST" && url.pathname === "/commands/run") {
         const body = await readJson(request);
         const result = await runtime.runCommand(String(body.name || body.command || ""), {
@@ -498,7 +535,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.statusCode : 500;

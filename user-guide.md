@@ -325,6 +325,39 @@ Maintenance:
 
 Use the WebUI, gateway `maintenance.run`, or command registry.
 
+Cron:
+
+```bash
+emily --cron
+emily --cron-once
+```
+
+TUI commands:
+
+```text
+:cron
+:cron-add "daily review" "0 9 * * *" "总结昨天的重要工作并沉淀经验"
+:cron-pause <id>
+:cron-resume <id>
+:cron-run <id>
+:cron-delete <id>
+```
+
+Gateway methods:
+
+```json
+{
+  "type": "request",
+  "id": "cron-1",
+  "method": "cron.create",
+  "params": {
+    "name": "daily maintenance",
+    "schedule": "@daily",
+    "command": "maintenance.run"
+  }
+}
+```
+
 Provider usage:
 
 ```text
