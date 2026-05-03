@@ -8,7 +8,8 @@
 
 ```mermaid
 flowchart LR
-  UI["WebUI / TUI"] --> Main["MainAgent: 沟通 + 编排 + 汇总"]
+  UI["WebUI / TUI / WebSocket Apps"] --> Gateway["Gateway Protocol: typed WebSocket + REST"]
+  Gateway --> Main["MainAgent: 沟通 + 编排 + 汇总"]
   Main --> Store["SQLite TaskStore"]
   Store --> Queue["role_queues: 持久化 inbox"]
   Queue --> Manager["RoleAgentManager"]
@@ -24,6 +25,8 @@ flowchart LR
   Inspector -. "IPC recovery result" .-> Manager
   Manager --> Events["SSE /events"]
   Main <--> Memory["MemorySystem + MemoryCurator"]
+  Main <--> Context["ContextEngine: active/deep context budget"]
+  Main <--> Router["AgentRouter: deterministic routing"]
   Main <--> Experience["ExperienceStore: active best practices"]
   Experience --> Revisions["experience_revisions: archived versions"]
   Experience --> Compressed["experience_vectors: compressed active index"]
@@ -32,6 +35,7 @@ flowchart LR
   Memory --> RAM["短期内存"]
   Memory --> File["文件记忆: .emily/memory/events.jsonl"]
   Memory --> Vector["长期语义索引: .emily/memory/vector-index.json"]
+  Manager --> Profile["AgentProfile: role/workspace/state/memory/tool/skill isolation"]
 ```
 
 ## 已实现的 10 个可靠性优化
@@ -250,7 +254,10 @@ Tools 和 skills 是两层不同的能力描述：
 - `ToolGateway`: 按 role 的 `allowed_tools` / `forbidden_tools` 做硬过滤；task 的 `toolHints` 和 skill 自带 `tool_hints` 只会影响提示词，不会自动授予权限。
 - `SkillRegistry`: 内置常用技能，也会加载 `skills/<name>/skill.md`。skill 是可复用工作流 prompt，可以声明 `capabilities`、`aliases` 和需要的 `tool_hints`。
 - worker 执行前会合并 `agent.md` 的 `skills` 与 task metadata 的 `skillHints`，解析后注入 `Skill context`；工具解析结果注入 `Tool context`。
+- Skill 采用渐进披露：`SkillRegistry.resolveForTask()` 会先看 role/task hints，再根据 trigger/capability 自动少量命中；`renderSkillContext(..., { mode: "progressive" })` 只注入命中的 skill 元数据和流程，避免把所有技能 prompt 塞进上下文。
+- role 可以通过 `skill_allowlist` 收紧技能边界；未配置时保持兼容，允许 task hints 临时请求其它已注册 skill。
 - 每次解析都会写入 `tool.hints.resolved` 和 `skill.hints.resolved` 事件；被拒绝或未知的 hint 会写入 `runtime.anomaly`。
+- 命中的 skill 会记录 `skill.used`，用于后续 skill decay、merge 和候选更新判断。
 - `SkillBuilder`: 在 maintenance 或手动触发时扫描近 1-2 天 terminal task，按 workflow key 聚类，只把高频、成功率高、流程相似、有验证步骤的操作提议为 skill。
 - `SkillCandidateStore`: skill 先进入 `proposed`，审批后才写入 `skills/<name>/skill.md`；如果已有 file skill 相似度高，候选会标记为 `update` 并合并到旧 skill。
 
@@ -284,6 +291,10 @@ tool_hints:
   - run_tests
 aliases:
   - developer
+triggers:
+  - implement scoped code changes
+anti_triggers:
+  - purely conceptual discussion
 ---
 
 Inspect existing patterns, keep edits scoped, and return verification notes.
@@ -299,6 +310,47 @@ runtime.listSkillCandidates({ status: "proposed" })
 await runtime.approveSkillCandidate("candidate-id")
 runtime.rejectSkillCandidate("candidate-id", "too narrow")
 ```
+
+## 平台层能力
+
+这轮把 AgentOS 从“一个多 agent 应用”推进成可被其它 agent 应用复用的底座：
+
+- `ContextEngine`: 构建有预算的上下文包。默认 `active` 模式只带短期内存和长期语义印象；需要追溯时用 `deep` 模式再搜索文件记忆和 session 历史，避免每轮把长历史全塞给模型。
+- `Gateway Protocol`: Web adapter 提供 `/gateway` WebSocket。消息是严格 typed request/response/event，适合其它业务应用接入，而不是只依赖 WebUI。
+- `AgentRouter`: 主 agent 的初始路由使用确定性规则，返回 selected roles、命中规则和 fallback role，planner 仍负责后续结构化任务图。
+- `AgentProfile`: 每个 worker 运行前生成 profile，记录 role、workspace、stateDir、sessionScope、memoryScope、provider fallback、tool policy 和 skill allowlist，并写入 `agent.profile.created` 事件。
+- `LifecycleHooks`: runtime 暴露 `addLifecycleHook()`，可订阅 `beforeRun`、`afterRun`、`beforeTaskRun`、`afterTaskRun`、`beforeMemoryCommit`、`afterMemoryCommit`、`beforeContextBuild`、`afterContextBuild`。
+- `securityAudit()`: 检查 role 高危工具、approval-sensitive 工具、provider secret-like config、未知 skill 和 runtime critical diagnostics；CLI 可用 `node src/index.ts --security-audit`。
+- Skills 渐进披露与 telemetry: skill frontmatter 支持 `triggers` / `anti_triggers`，worker 会记录 `skill.used` 和 blocked/autoSelected 信息。
+- WebSocket events: Gateway 客户端会收到 `gateway.ready` 和 runtime event 转发；业务应用可以用同一个连接发指令并监听任务状态。
+
+Gateway request 示例：
+
+```json
+{
+  "type": "request",
+  "id": "chat-1",
+  "method": "chat.send",
+  "params": {
+    "sessionId": "demo",
+    "message": "POC 实现一个订单审核 agent 应用"
+  }
+}
+```
+
+常用 method：
+
+- `chat.send`
+- `sessions.list` / `sessions.create` / `sessions.clear` / `sessions.restore`
+- `tasks.cancel` / `runs.cancel`
+- `providers.list` / `providers.health` / `providers.usage`
+- `roles.list` / `roles.add`
+- `tools.list` / `skills.list` / `skills.candidates.list`
+- `experiences.recall`
+- `timeline.get`
+- `diagnostics.run` / `maintenance.run` / `security.audit`
+- `context.build`
+- `router.route`
 
 provider / role 护栏：
 
@@ -502,6 +554,25 @@ http://127.0.0.1:3000/
 
 Web/API 默认启用本地 token 防护。启动时会打印一次性 token，也可以用 `EMILY_WEB_TOKEN=... npm run web` 固定 token。除 `/` 和 `/health` 外，请求需要带 `x-emily-token` 或 `Authorization: Bearer ...`；浏览器 WebUI 会自动携带。
 
+其它 agent 应用建议优先走 WebSocket：
+
+```text
+ws://127.0.0.1:3000/gateway?token=$TOKEN
+```
+
+REST 也新增了平台层调试入口：
+
+```bash
+curl 'http://127.0.0.1:3000/context?q=websocket%20gateway&sessionId=demo&mode=deep' \
+  -H "x-emily-token: $TOKEN"
+
+curl 'http://127.0.0.1:3000/route?q=开发一个API' \
+  -H "x-emily-token: $TOKEN"
+
+curl 'http://127.0.0.1:3000/security/audit' \
+  -H "x-emily-token: $TOKEN"
+```
+
 WebUI 采用 Wiki.js 风格的信息架构：左侧分组导航、顶部搜索、内容工作区和管理面板，覆盖 chat、sessions、timeline、providers、roles、tools、skills、skill candidates、experiences 和 diagnostics。Chat 页底部是发送区，顶部使用 session 下拉框切换会话，并提供 New / Clear / Restore 管理入口；切换 session 会重新加载该 session 的消息历史和 last run。
 
 请求示例：
@@ -533,6 +604,12 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 ## 模块边界
 
 - `src/agents/MainAgent.ts`: 主 agent，负责用户沟通、记忆召回、角色路由、任务派发和结果汇总。
+- `src/context/ContextEngine.ts`: active/deep 上下文构建，整合短期记忆、长期召回、session 历史、经验和图状态。
+- `src/gateway/GatewayProtocol.ts`: typed WebSocket request/response/event 协议和 dispatch。
+- `src/routing/AgentRouter.ts`: 确定性 role 路由规则。
+- `src/runtime/LifecycleHooks.ts`: runtime 生命周期 hook 注册和触发。
+- `src/security/SecurityAudit.ts`: 底座安全审计报告。
+- `src/agents/AgentProfile.ts`: subagent profile 隔离描述和 prompt 渲染。
 - `src/agents/SubAgent.ts`: subagent 基类，按角色定义执行具体任务；结果由 worker 写入候选记忆，审批后再进入 MemorySystem。
 - `src/agents/RoleWorkProduct.ts`: developer / researcher / reviewer 的本地工作产物增强层，补充代码库上下文、研究结构和 JSON review verdict。
 - `src/tasks/TaskStore.ts`: SQLite task、session、agent、event、role queue、状态机、lease、retry/dead-letter。
@@ -570,7 +647,7 @@ curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 - `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
 - `src/memory/MemoryCandidatePolicy.ts`: 决定候选记忆是否进入长期记忆。
 - `src/adapters/tui.ts`: 命令行交互入口，提供 chat、health、provider、tool、skill、timeline、diagnostics 和 maintenance 命令。
-- `src/adapters/web.ts`: Web/API 入口，提供 `GET /` WebUI、`GET /health`、`GET /events`、`POST /chat`。
+- `src/adapters/web.ts`: Web/API/Gateway 入口，提供 `GET /` WebUI、`GET /health`、`GET /events`、`POST /chat` 和 `/gateway` WebSocket。
 - `src/adapters/webUi.ts`: Wiki.js 风格 WebUI HTML/CSS/JS。
 - `agents/<role>/agent.md`: 角色定义，描述该类型 subagent 的工作流程、能力和限制。
 - `skills/<skill>/skill.md`: 技能定义，描述可复用工作流、aliases、capabilities 和 tool hints。
@@ -608,6 +685,7 @@ npm run check
 - skill candidate 生成、评分、审批写入、已有 skill 更新、拒绝和 schema migration。
 - session 生命周期和消息隔离：new、clear/hide、restore、trash、session 内消息历史和 30 天后删除。
 - TUI/WebUI 静态渲染入口和 WebUI 基础结构。
+- WebSocket Gateway、ContextEngine active/deep 召回、确定性路由、LifecycleHooks 和 security audit。
 - run/timeline、reviewer flow、memory candidates。
 - reviewer verdict parser、memory candidate policy、候选记忆并发审批、runtime health/maintenance。
 - task graph 状态刷新和孤儿 run 收敛。

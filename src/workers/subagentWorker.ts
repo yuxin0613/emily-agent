@@ -1,4 +1,5 @@
 import { SubAgent } from "../agents/SubAgent.ts";
+import { createAgentProfile, renderAgentProfile } from "../agents/AgentProfile.ts";
 import { buildRoleWorkProduct } from "../agents/RoleWorkProduct.ts";
 import type { ModelProvider } from "../llm/ModelProvider.ts";
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
@@ -128,6 +129,25 @@ async function runRoleTask({
   taskStore: TaskStore;
 }): Promise<TaskResult> {
   const definition = await readRoleDefinition(role, { roleDir: process.env.EMILY_ROLE_DIR });
+  const profile = await createAgentProfile({
+    agentId: String(task.assignedAgentId || `${role}-${process.pid}`),
+    definition,
+    task,
+    dataDir: process.env.EMILY_DATA_DIR || process.cwd(),
+  });
+  taskStore.addEvent({
+    type: "agent.profile.created",
+    taskId: task.id,
+    agentId: profile.id,
+    payload: {
+      role: profile.role,
+      sessionScope: profile.sessionScope,
+      memoryScope: profile.memoryScope,
+      stateDir: profile.stateDir,
+      skillAllowlist: profile.skillAllowlist,
+      providerFallback: profile.providerBinding.fallback,
+    },
+  });
   let providerFallback: { requestedProviderId: string; fallbackProviderId: string; reason: string } | null = null;
   const model: ModelProvider = providerRegistry.createForRole(definition, {
     onFallback: (fallback) => {
@@ -153,7 +173,11 @@ async function runRoleTask({
     ...definition.skills,
     ...readStringArray(task.metadata.skillHints),
   ]);
-  const skillResolution = skillRegistry.resolveHints(skillHints);
+  const skillResolution = skillRegistry.resolveForTask({
+    input: task.input,
+    hints: skillHints,
+    allowlist: profile.skillAllowlist,
+  });
   const toolHints = unique([
     ...readStringArray(task.metadata.toolHints),
     ...skillResolution.matched.flatMap((skill) => skill.toolHints),
@@ -170,7 +194,7 @@ async function runRoleTask({
   }
 
   const relevantMemory = await memory.recall(task.input, {
-    scope: String(task.metadata.sessionId || "default"),
+    scope: profile.memoryScope,
     limit: 5,
   });
 
@@ -193,12 +217,15 @@ async function runRoleTask({
       ...toolGateway.renderToolContext(toolResolution),
       "",
       "Skill context:",
-      ...skillRegistry.renderSkillContext(skillResolution),
+      ...skillRegistry.renderSkillContext(skillResolution, { mode: "progressive" }),
+      "",
+      "Agent profile:",
+      ...renderAgentProfile(profile),
       "",
       "Task:",
       task.input,
     ].join("\n"),
-    sessionId: String(task.metadata.sessionId || "default"),
+    sessionId: profile.sessionScope,
     relevantMemory,
     taskId: task.id,
     runId: typeof task.metadata.runId === "string" ? task.metadata.runId : undefined,
@@ -259,7 +286,10 @@ async function runRoleTask({
           requested: skillResolution.requested,
           matched: skillResolution.matched.map((skill) => skill.name),
           unknown: skillResolution.unknown,
+          blocked: skillResolution.blocked || [],
+          autoSelected: skillResolution.autoSelected || [],
         },
+        profile,
       },
     }],
     memoryCandidates: [{
@@ -439,8 +469,20 @@ function recordToolSkillResolution({
       requested: skillResolution.requested,
       matched: skillResolution.matched.map((skill) => skill.name),
       unknown: skillResolution.unknown,
+      blocked: skillResolution.blocked || [],
+      autoSelected: skillResolution.autoSelected || [],
     },
   });
+  if (skillResolution.matched.length) {
+    taskStore.addEvent({
+      type: "skill.used",
+      taskId: task.id,
+      payload: {
+        skills: skillResolution.matched.map((skill) => skill.name),
+        autoSelected: skillResolution.autoSelected || [],
+      },
+    });
+  }
 
   if (toolResolution.denied.length || toolResolution.unknown.length) {
     taskStore.addEvent({
@@ -456,7 +498,7 @@ function recordToolSkillResolution({
       },
     });
   }
-  if (skillResolution.unknown.length) {
+  if (skillResolution.unknown.length || skillResolution.blocked?.length) {
     taskStore.addEvent({
       type: "runtime.anomaly",
       taskId: task.id,
@@ -465,6 +507,7 @@ function recordToolSkillResolution({
         code: "skill_hints_unknown",
         message: "Some requested skill hints are not registered.",
         unknown: skillResolution.unknown,
+        blocked: skillResolution.blocked || [],
         repaired: true,
       },
     });

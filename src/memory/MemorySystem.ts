@@ -76,6 +76,16 @@ export class MemorySystem {
     };
   }
 
+  async recallActive(query: string, options: { scope?: string; limit?: number } = {}): Promise<MemoryRecallResult> {
+    const scope = options.scope || "default";
+    const limit = options.limit || 5;
+    return {
+      shortTerm: this.shortTerm.search(query, { scope, limit }),
+      files: [],
+      semantic: await this.vectorLayer.search(query, { scope, limit }),
+    };
+  }
+
   async compact(options: { maxFileRecords?: number; maxVectorRecords?: number } = {}): Promise<{
     file: { before: number; after: number; removed: number };
     vector: { before: number; after: number; removed: number; algorithm: string };

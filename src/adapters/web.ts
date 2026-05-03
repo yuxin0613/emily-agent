@@ -1,5 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import type { Socket } from "node:net";
+import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
 import { webAppHtml } from "./webUi.ts";
 
 export interface WebServerHandle {
@@ -26,6 +28,9 @@ export async function startWebServer({
     getTimeline: (options: { runId: string }) => unknown;
     getTaskTrace: (taskId: string) => unknown;
     diagnostics: (options?: { repair?: boolean }) => unknown;
+    securityAudit: () => Promise<unknown>;
+    buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
+    routeMessage: (input: string) => unknown;
     cancelTask: (taskId: string, reason?: string) => Promise<unknown>;
     cancelRun: (runId: string, reason?: string) => Promise<unknown>;
     listProviders: () => unknown[];
@@ -52,6 +57,7 @@ export async function startWebServer({
       forbiddenTools?: string[];
       capabilities?: string[];
       skills?: string[];
+      skillAllowlist?: string[];
       outputContract?: string;
       instructions: string;
     }) => Promise<unknown>;
@@ -96,7 +102,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/health") {
-        return sendJson(response, 200, { ok: true, runtime: runtime.health() });
+        return sendJson(response, 200, { ok: true, runtime: runtime.health(), gateway: gatewayProtocolSpec() });
       }
 
       if (!isAuthorized(request, url, authToken)) {
@@ -220,6 +226,7 @@ export async function startWebServer({
           forbiddenTools: Array.isArray(body.forbiddenTools) ? body.forbiddenTools.map(String) : undefined,
           capabilities: Array.isArray(body.capabilities) ? body.capabilities.map(String) : undefined,
           skills: Array.isArray(body.skills) ? body.skills.map(String) : undefined,
+          skillAllowlist: Array.isArray(body.skillAllowlist) ? body.skillAllowlist.map(String) : undefined,
           outputContract: typeof body.outputContract === "string" ? body.outputContract : undefined,
           instructions: String(body.instructions || "Follow the task requirements and return a concise result."),
         }));
@@ -319,6 +326,24 @@ export async function startWebServer({
         }));
       }
 
+      if (request.method === "GET" && url.pathname === "/security/audit") {
+        return sendJson(response, 200, await runtime.securityAudit());
+      }
+
+      if (request.method === "GET" && url.pathname === "/context") {
+        return sendJson(response, 200, await runtime.buildContext({
+          query: String(url.searchParams.get("q") || url.searchParams.get("query") || ""),
+          sessionId: String(url.searchParams.get("sessionId") || "web"),
+          runId: url.searchParams.get("runId"),
+          role: String(url.searchParams.get("role") || "web"),
+          mode: url.searchParams.get("mode") === "deep" ? "deep" : "active",
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/route") {
+        return sendJson(response, 200, runtime.routeMessage(String(url.searchParams.get("q") || url.searchParams.get("input") || "")));
+      }
+
       if (request.method === "POST" && url.pathname === "/diagnostics/repair") {
         return sendJson(response, 200, runtime.diagnostics({ repair: true }));
       }
@@ -381,7 +406,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /skills", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.statusCode : 500;
@@ -389,6 +414,23 @@ export async function startWebServer({
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  });
+
+  server.on("upgrade", (request, socket, head) => {
+    const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
+    if (url.pathname !== "/gateway" && url.pathname !== "/ws") {
+      rejectUpgrade(socket, 404, "Not Found");
+      return;
+    }
+    if (!isAuthorized(request, url, authToken)) {
+      rejectUpgrade(socket, 401, "Unauthorized");
+      return;
+    }
+    if (!isAllowedOrigin(request, url)) {
+      rejectUpgrade(socket, 403, "Forbidden origin");
+      return;
+    }
+    acceptGatewaySocket({ runtime, request, socket, head });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -517,6 +559,190 @@ function streamEvents({
 function writeSse(response: ServerResponse, event: string, payload: unknown): void {
   response.write(`event: ${event}\n`);
   response.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function acceptGatewaySocket({
+  runtime,
+  request,
+  socket,
+  head,
+}: {
+  runtime: {
+    taskStore: { addEvent?: (input: { type: string; payload?: Record<string, unknown> }) => number };
+    roleAgentManager: NodeJS.EventEmitter;
+  } & Parameters<typeof dispatchGatewayRequest>[0];
+  request: IncomingMessage;
+  socket: Socket;
+  head: Buffer;
+}): void {
+  const key = request.headers["sec-websocket-key"];
+  if (typeof key !== "string") {
+    rejectUpgrade(socket, 400, "Missing Sec-WebSocket-Key");
+    return;
+  }
+  const accept = createHash("sha1")
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+  socket.write([
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${accept}`,
+    "",
+    "",
+  ].join("\r\n"));
+
+  const connection = new WebSocketConnection(socket);
+  runtime.taskStore.addEvent?.({
+    type: "gateway.connected",
+    payload: { remoteAddress: socket.remoteAddress || "" },
+  });
+
+  const onRuntimeEvent = (event: unknown) => {
+    connection.send(gatewayEvent("runtime.event", event));
+  };
+  runtime.roleAgentManager.on("event", onRuntimeEvent);
+  socket.on("close", () => {
+    runtime.roleAgentManager.off("event", onRuntimeEvent);
+  });
+  connection.onMessage = async (message) => {
+    let requestId = "";
+    try {
+      const parsed = parseGatewayRequest(JSON.parse(message));
+      requestId = parsed.id;
+      runtime.taskStore.addEvent?.({
+        type: "gateway.request",
+        payload: { id: parsed.id, method: parsed.method },
+      });
+      const response = await dispatchGatewayRequest(runtime, parsed);
+      runtime.taskStore.addEvent?.({
+        type: "gateway.response",
+        payload: { id: response.id, ok: response.ok, method: parsed.method },
+      });
+      connection.send(response);
+    } catch (error) {
+      connection.send({
+        type: "response",
+        id: requestId || "unknown",
+        ok: false,
+        error: {
+          code: "invalid_gateway_message",
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
+  };
+  if (head.length) connection.push(head);
+  connection.send(gatewayEvent("gateway.ready", gatewayProtocolSpec()));
+}
+
+class WebSocketConnection {
+  socket: Socket;
+  buffer = Buffer.alloc(0);
+  onMessage: (message: string) => void | Promise<void> = () => undefined;
+
+  constructor(socket: Socket) {
+    this.socket = socket;
+    socket.on("data", (chunk) => this.push(chunk));
+  }
+
+  push(chunk: Buffer): void {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (this.buffer.length >= 2) {
+      let frame: { opcode: number; payload: Buffer; bytes: number } | null;
+      try {
+        frame = readFrame(this.buffer);
+      } catch (error) {
+        this.send({
+          type: "response",
+          id: "unknown",
+          ok: false,
+          error: {
+            code: "invalid_websocket_frame",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+        this.socket.end();
+        return;
+      }
+      if (!frame) return;
+      this.buffer = this.buffer.subarray(frame.bytes);
+      if (frame.opcode === 8) {
+        this.socket.end();
+        return;
+      }
+      if (frame.opcode === 9) {
+        this.writeFrame(frame.payload, 10);
+        continue;
+      }
+      if (frame.opcode !== 1) continue;
+      Promise.resolve(this.onMessage(frame.payload.toString("utf8"))).catch((error) => {
+        this.send({
+          type: "response",
+          id: "unknown",
+          ok: false,
+          error: {
+            code: "gateway_handler_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      });
+    }
+  }
+
+  send(payload: unknown): void {
+    this.writeFrame(Buffer.from(JSON.stringify(payload), "utf8"), 1);
+  }
+
+  private writeFrame(payload: Buffer, opcode: number): void {
+    const header: number[] = [0x80 | opcode];
+    if (payload.length < 126) {
+      header.push(payload.length);
+    } else if (payload.length <= 0xffff) {
+      header.push(126, (payload.length >> 8) & 0xff, payload.length & 0xff);
+    } else {
+      header.push(127, 0, 0, 0, 0, (payload.length / 2 ** 24) & 0xff, (payload.length >> 16) & 0xff, (payload.length >> 8) & 0xff, payload.length & 0xff);
+    }
+    this.socket.write(Buffer.concat([Buffer.from(header), payload]));
+  }
+}
+
+function readFrame(buffer: Buffer): { opcode: number; payload: Buffer; bytes: number } | null {
+  const first = buffer[0];
+  const second = buffer[1];
+  const opcode = first & 0x0f;
+  const masked = (second & 0x80) !== 0;
+  let length = second & 0x7f;
+  let offset = 2;
+  if (length === 126) {
+    if (buffer.length < offset + 2) return null;
+    length = buffer.readUInt16BE(offset);
+    offset += 2;
+  } else if (length === 127) {
+    if (buffer.length < offset + 8) return null;
+    const high = buffer.readUInt32BE(offset);
+    const low = buffer.readUInt32BE(offset + 4);
+    if (high !== 0) throw new Error("WebSocket frame is too large.");
+    length = low;
+    offset += 8;
+  }
+  if (length > 1024 * 1024) throw new Error("WebSocket frame exceeds 1048576 bytes.");
+  const maskOffset = offset;
+  if (masked) offset += 4;
+  if (buffer.length < offset + length) return null;
+  const payload = Buffer.from(buffer.subarray(offset, offset + length));
+  if (masked) {
+    const mask = buffer.subarray(maskOffset, maskOffset + 4);
+    for (let index = 0; index < payload.length; index += 1) {
+      payload[index] ^= mask[index % 4];
+    }
+  }
+  return { opcode, payload, bytes: offset + length };
+}
+
+function rejectUpgrade(socket: Socket, statusCode: number, reason: string): void {
+  socket.write(`HTTP/1.1 ${statusCode} ${reason}\r\nConnection: close\r\n\r\n`);
+  socket.destroy();
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {

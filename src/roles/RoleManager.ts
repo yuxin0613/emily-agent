@@ -31,6 +31,7 @@ export class RoleManager {
     maxConcurrentTasks?: number;
     capabilities?: string[];
     skills?: string[];
+    skillAllowlist?: string[];
     outputContract?: string;
     instructions: string;
   }): Promise<RoleDefinition> {
@@ -46,6 +47,7 @@ export class RoleManager {
       maxConcurrentTasks: input.maxConcurrentTasks,
       capabilities: input.capabilities,
       skills: input.skills,
+      skillAllowlist: input.skillAllowlist,
       outputContract: input.outputContract,
       instructions: input.instructions,
     }, { roleDir: this.roleDir });
@@ -103,6 +105,7 @@ export class RoleManager {
     forbiddenTools?: RoleDefinition["forbiddenTools"];
     capabilities?: string[];
     skills?: string[];
+    skillAllowlist?: string[];
     outputContract?: string;
     instructions: string;
   }): void {
@@ -126,6 +129,11 @@ export class RoleManager {
     for (const skill of input.skills || []) {
       if (!/^[A-Za-z0-9._-]+$/.test(skill)) {
         throw new Error(`Skill name must contain only letters, numbers, dot, underscore, or dash: ${skill}`);
+      }
+    }
+    for (const skill of input.skillAllowlist || []) {
+      if (!/^[A-Za-z0-9._-]+$/.test(skill)) {
+        throw new Error(`Skill allowlist entry must contain only letters, numbers, dot, underscore, or dash: ${skill}`);
       }
     }
   }

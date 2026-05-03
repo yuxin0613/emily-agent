@@ -47,6 +47,8 @@ export interface SkillDefinition {
   capabilities: string[];
   toolHints: ToolPermission[];
   aliases: string[];
+  triggers: string[];
+  antiTriggers: string[];
   instructions: string;
   source: "builtin" | "file";
 }
@@ -110,6 +112,8 @@ export interface SkillHintResolution {
   requested: string[];
   matched: SkillDefinition[];
   unknown: string[];
+  blocked?: string[];
+  autoSelected?: string[];
 }
 
 export type JsonValue =
@@ -274,6 +278,7 @@ export type RuntimeEventType =
   | "task.cancel_ignored"
   | "task.dead_letter"
   | "task.acknowledged"
+  | "agent.profile.created"
   | "task_graph.created"
   | "task_graph.status"
   | "task_graph.completed"
@@ -282,6 +287,12 @@ export type RuntimeEventType =
   | "task_graph.waiting_user"
   | "tool.hints.resolved"
   | "skill.hints.resolved"
+  | "skill.used"
+  | "context.built"
+  | "gateway.connected"
+  | "gateway.request"
+  | "gateway.response"
+  | "security.audit"
   | "memory.candidate.created"
   | "memory.candidate.approved"
   | "memory.candidate.rejected"
@@ -307,6 +318,7 @@ export interface RoleDefinition {
   maxConcurrentTasks: number;
   capabilities: string[];
   skills: string[];
+  skillAllowlist?: string[];
   outputContract?: string;
   instructions: string;
 }

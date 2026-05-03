@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import type { Task, TaskEvent } from "../types.ts";
 import type { TaskStore } from "./TaskStore.ts";
 import { RecoveryPolicy } from "../recovery/RecoveryPolicy.ts";
+import type { LifecycleHooks } from "../runtime/LifecycleHooks.ts";
 
 const DEFAULT_ROLES = ["planner", "developer", "researcher", "reviewer", "inspector", "memory-curator"];
 
@@ -30,6 +31,7 @@ export class RoleAgentManager extends EventEmitter {
   staleTaskMs: number;
   leaseMs: number;
   recoveryPolicy: RecoveryPolicy;
+  hooks: LifecycleHooks | null;
   roles: Map<string, RoleState>;
   shuttingDown: boolean;
   started: boolean;
@@ -44,6 +46,7 @@ export class RoleAgentManager extends EventEmitter {
     skillDir = process.env.EMILY_SKILL_DIR || `${process.cwd()}/skills`,
     staleTaskMs = 30000,
     leaseMs = 30000,
+    hooks = null,
   }: {
     dataDir: string;
     taskStore: TaskStore;
@@ -52,6 +55,7 @@ export class RoleAgentManager extends EventEmitter {
     skillDir?: string;
     staleTaskMs?: number;
     leaseMs?: number;
+    hooks?: LifecycleHooks | null;
   }) {
     super();
     this.dataDir = dataDir;
@@ -62,6 +66,7 @@ export class RoleAgentManager extends EventEmitter {
     this.staleTaskMs = staleTaskMs;
     this.leaseMs = leaseMs;
     this.recoveryPolicy = new RecoveryPolicy();
+    this.hooks = hooks;
     this.roles = new Map();
     this.shuttingDown = false;
     this.started = false;
@@ -80,6 +85,10 @@ export class RoleAgentManager extends EventEmitter {
   }
 
   async enqueue(task: Task): Promise<void> {
+    await this.hooks?.emit("beforeTaskRun", {
+      task,
+      payload: { role: task.role, status: task.status },
+    });
     const eventId = this.taskStore.enqueueTask(task.id);
     await this.taskStore.writeTaskMarkdown(task.id);
     this.emitTaskEvent("task.changed", task.id, eventId);
@@ -355,6 +364,10 @@ export class RoleAgentManager extends EventEmitter {
       }
       await this.taskStore.writeTaskMarkdown(payload.taskId);
       this.emitTaskEvent("task.finished", payload.taskId, payload.eventId ?? null);
+      await this.hooks?.emit("afterTaskRun", {
+        task: this.taskStore.getTask(payload.taskId),
+        payload: { role: roleState.role, eventId: payload.eventId ?? 0 },
+      });
       if (task?.status && this.taskStore.isTerminalStatus(task.status)) {
         this.taskStore.completeQueueItem(payload.taskId, task.status === "done" ? "done" : task.status === "cancelled" ? "cancelled" : "failed");
       }

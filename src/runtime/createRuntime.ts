@@ -2,13 +2,16 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
+import { ContextEngine } from "../context/ContextEngine.ts";
 import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
 import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
+import { AgentRouter } from "../routing/AgentRouter.ts";
 import { RoleManager } from "../roles/RoleManager.ts";
+import { runSecurityAudit } from "../security/SecurityAudit.ts";
 import { SkillBuilder } from "../skills/SkillBuilder.ts";
 import { SkillCandidateStore } from "../skills/SkillCandidateStore.ts";
 import { SkillRegistry } from "../skills/SkillRegistry.ts";
@@ -16,6 +19,7 @@ import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import { renderTimeline } from "../timeline/renderTimeline.ts";
+import { LifecycleHooks, type LifecycleHookHandler, type LifecycleHookName } from "./LifecycleHooks.ts";
 
 export async function createRuntime(options: {
   dataDir?: string;
@@ -69,6 +73,14 @@ export async function createRuntime(options: {
   const skillRegistry = await SkillRegistry.create({ skillDir });
   const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });
   const roleManager = new RoleManager({ roleDir, providerRegistry });
+  const hooks = new LifecycleHooks();
+  const router = new AgentRouter();
+  const contextEngine = new ContextEngine({
+    memory,
+    taskStore,
+    experienceStore,
+    hooks,
+  });
   const experienceBuilder = new ExperienceBuilder({
     taskStore,
     experienceStore,
@@ -84,6 +96,7 @@ export async function createRuntime(options: {
     workerPath: options.workerPath || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "workers", "subagentWorker.ts"),
     roleDir,
     skillDir,
+    hooks,
   });
   await roleAgentManager.start();
 
@@ -94,6 +107,9 @@ export async function createRuntime(options: {
     taskStore,
     experienceStore,
     roleAgentManager,
+    contextEngine,
+    hooks,
+    router,
   });
 
   async function approvePendingMemoryCandidates({ runId }: { runId?: string } = {}): Promise<{
@@ -150,11 +166,23 @@ export async function createRuntime(options: {
     taskStore,
     roleAgentManager,
     mainAgent,
+    hooks,
+    contextEngine,
+    router,
+    addLifecycleHook(name: LifecycleHookName, handler: LifecycleHookHandler) {
+      return hooks.on(name, handler);
+    },
     listTools() {
       return toolRegistry.list();
     },
     listSkills() {
       return skillRegistry.list();
+    },
+    buildContext(options: Parameters<ContextEngine["build"]>[0]) {
+      return contextEngine.build(options);
+    },
+    routeMessage(input: string) {
+      return router.route(input);
     },
     listProviders() {
       return providerRegistry.list();
@@ -286,6 +314,15 @@ export async function createRuntime(options: {
     },
     diagnostics(options: { repair?: boolean } = {}) {
       return taskStore.diagnostics(options);
+    },
+    securityAudit() {
+      return runSecurityAudit({
+        roleManager,
+        providerRegistry,
+        toolRegistry,
+        skillRegistry,
+        taskStore,
+      });
     },
     async cancelTask(taskId: string, reason?: string) {
       return roleAgentManager.cancelTask(taskId, reason);

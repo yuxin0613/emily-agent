@@ -48,11 +48,13 @@ export class SkillRegistry {
     return matches[0] ? cloneSkillDefinition(matches[0]) : null;
   }
 
-  resolveHints(hints: string[]): SkillHintResolution {
+  resolveHints(hints: string[], options: { allowlist?: string[] } = {}): SkillHintResolution {
     const requested = unique(hints.map(String).map((hint) => hint.trim()).filter(Boolean));
     const matched: SkillDefinition[] = [];
     const unknown: string[] = [];
+    const blocked: string[] = [];
     const seen = new Set<string>();
+    const allowlist = normalizeAllowlist(options.allowlist);
 
     for (const hint of requested) {
       const matches = this.resolveAll(hint);
@@ -61,24 +63,71 @@ export class SkillRegistry {
         continue;
       }
       for (const match of matches) {
+        if (allowlist && !allowlist.has(normalizeSkillName(match.name))) {
+          if (!blocked.includes(hint)) blocked.push(hint);
+          continue;
+        }
         if (seen.has(match.name)) continue;
         seen.add(match.name);
         matched.push(match);
       }
     }
 
-    return { requested, matched, unknown };
+    return { requested, matched, unknown, blocked };
   }
 
-  renderSkillContext(resolution: SkillHintResolution): string[] {
+  resolveForTask({
+    input,
+    hints = [],
+    allowlist,
+    limit = 4,
+  }: {
+    input: string;
+    hints?: string[];
+    allowlist?: string[];
+    limit?: number;
+  }): SkillHintResolution {
+    const explicit = this.resolveHints(hints, { allowlist });
+    const allow = normalizeAllowlist(allowlist);
+    const seen = new Set(explicit.matched.map((skill) => skill.name));
+    const autoSelected: string[] = [];
+    const autoMatches = [...this.skills.values()]
+      .filter((skill) => !seen.has(skill.name))
+      .filter((skill) => !allow || allow.has(normalizeSkillName(skill.name)))
+      .map((skill) => ({ skill, score: scoreSkillForInput(skill, input) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.max(0, limit - explicit.matched.length));
+
+    const matched = [...explicit.matched];
+    for (const { skill } of autoMatches) {
+      matched.push(cloneSkillDefinition(skill));
+      autoSelected.push(skill.name);
+    }
+
+    return {
+      ...explicit,
+      matched,
+      autoSelected,
+    };
+  }
+
+  renderSkillContext(resolution: SkillHintResolution, options: { mode?: "full" | "progressive" } = {}): string[] {
     const lines: string[] = [];
+    const progressive = options.mode === "progressive";
     for (const skill of resolution.matched) {
       lines.push([
         `## ${skill.title} (${skill.name})`,
         skill.description,
+        skill.triggers.length ? `Use when: ${skill.triggers.join("; ")}` : null,
+        skill.antiTriggers.length ? `Avoid when: ${skill.antiTriggers.join("; ")}` : null,
         skill.toolHints.length ? `Tool hints: ${skill.toolHints.join(", ")}` : "Tool hints: (none)",
+        progressive ? "Procedure:" : null,
         skill.instructions.trim(),
-      ].join("\n"));
+      ].filter((line): line is string => Boolean(line)).join("\n"));
+    }
+    if (resolution.blocked?.length) {
+      lines.push(`Blocked skill hints by profile allowlist: ${resolution.blocked.join(", ")}`);
     }
     if (resolution.unknown.length) {
       lines.push(`Unknown skill hints: ${resolution.unknown.join(", ")}`);
@@ -131,6 +180,8 @@ export function parseSkillMarkdown(content: string, fallbackName: string): Skill
     capabilities: listValue(frontmatter.capabilities, [name]),
     toolHints: listValue(frontmatter.tool_hints, []).map((tool) => tool as ToolPermission),
     aliases: listValue(frontmatter.aliases, []),
+    triggers: listValue(frontmatter.triggers ?? frontmatter.trigger, []),
+    antiTriggers: listValue(frontmatter.anti_triggers ?? frontmatter.antiTrigger, []),
     instructions: body.trim() || "Apply this skill only when it directly helps the assigned task.",
     source: "file",
   };
@@ -206,7 +257,26 @@ function cloneSkillDefinition(definition: SkillDefinition): SkillDefinition {
     capabilities: [...definition.capabilities],
     toolHints: [...definition.toolHints],
     aliases: [...definition.aliases],
+    triggers: [...definition.triggers],
+    antiTriggers: [...definition.antiTriggers],
   };
+}
+
+function normalizeAllowlist(allowlist?: string[]): Set<string> | null {
+  const normalized = unique((allowlist || []).map(String).map(normalizeSkillName).filter(Boolean));
+  return normalized.length ? new Set(normalized) : null;
+}
+
+function scoreSkillForInput(skill: SkillDefinition, input: string): number {
+  const normalized = input.toLowerCase();
+  const antiHits = skill.antiTriggers.filter((trigger) => normalized.includes(trigger.toLowerCase())).length;
+  if (antiHits) return 0;
+  let score = 0;
+  for (const value of [skill.name, skill.title, ...skill.aliases, ...skill.capabilities, ...skill.triggers]) {
+    const key = value.toLowerCase();
+    if (key && normalized.includes(key)) score += key === skill.name ? 3 : 1;
+  }
+  return score;
 }
 
 const DEFAULT_SKILLS: SkillDefinition[] = [
@@ -217,6 +287,8 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
     capabilities: ["planning", "task decomposition", "architecture", "requirements"],
     toolHints: ["read_file"],
     aliases: ["plan", "task-decomposition"],
+    triggers: ["planning", "decompose", "architecture", "requirements", "拆分", "规划", "架构"],
+    antiTriggers: [],
     source: "builtin",
     instructions: [
       "Identify the smallest useful next tasks.",
@@ -231,6 +303,8 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
     capabilities: ["coding", "implementation", "debugging"],
     toolHints: ["read_file", "write_file", "run_tests"],
     aliases: ["implementation", "developer"],
+    triggers: ["coding", "implementation", "debugging", "fix", "开发", "实现", "修复", "代码"],
+    antiTriggers: [],
     source: "builtin",
     instructions: [
       "Inspect existing patterns before proposing edits.",
@@ -245,6 +319,8 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
     capabilities: ["research", "summarization", "context gathering", "comparison"],
     toolHints: ["read_file"],
     aliases: ["requirements", "analysis"],
+    triggers: ["research", "summarize", "compare", "analysis", "调研", "总结", "对比", "分析"],
+    antiTriggers: [],
     source: "builtin",
     instructions: [
       "Separate facts, assumptions, and open questions.",
@@ -259,6 +335,8 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
     capabilities: ["review", "quality", "validation", "verification", "quality gate"],
     toolHints: ["read_file"],
     aliases: ["qa", "quality"],
+    triggers: ["review", "quality", "validation", "verification", "测试", "验收", "审查", "验证"],
+    antiTriggers: [],
     source: "builtin",
     instructions: [
       "Check the result against the task acceptance criteria.",
@@ -273,6 +351,8 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
     capabilities: ["recovery", "task inspection"],
     toolHints: ["read_file", "inspect_task"],
     aliases: ["inspect", "inspection"],
+    triggers: ["recovery", "inspect", "stale", "failure", "恢复", "检查", "失败"],
+    antiTriggers: [],
     source: "builtin",
     instructions: [
       "Read the persisted task state before drawing conclusions.",
@@ -287,6 +367,8 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
     capabilities: ["memory curation", "experience extraction", "best-practice revision"],
     toolHints: ["read_file", "inspect_task"],
     aliases: ["experience", "memory-curator"],
+    triggers: ["memory", "experience", "lesson", "best practice", "经验", "记忆", "沉淀"],
+    antiTriggers: [],
     source: "builtin",
     instructions: [
       "Prefer updating an existing lesson over creating duplicates.",

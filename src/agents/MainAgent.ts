@@ -6,6 +6,9 @@ import type { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
 import type { ExperienceStore } from "../experience/ExperienceStore.ts";
 import type { ExperienceRecallResult } from "../types.ts";
+import type { ContextEngine } from "../context/ContextEngine.ts";
+import type { LifecycleHooks } from "../runtime/LifecycleHooks.ts";
+import type { AgentRouter } from "../routing/AgentRouter.ts";
 import { parseReviewerVerdict, type ReviewerVerdict } from "../review/ReviewerVerdict.ts";
 import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
 import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts";
@@ -65,6 +68,9 @@ export class MainAgent {
   experienceStore: ExperienceStore;
   roleAgentManager: RoleAgentManager;
   memoryCandidatePolicy: MemoryCandidatePolicy;
+  contextEngine: ContextEngine | null;
+  hooks: LifecycleHooks | null;
+  router: AgentRouter | null;
 
   constructor({
     name,
@@ -73,6 +79,9 @@ export class MainAgent {
     taskStore,
     experienceStore,
     roleAgentManager,
+    contextEngine = null,
+    hooks = null,
+    router = null,
   }: {
     name: string;
     model: ModelProvider;
@@ -80,6 +89,9 @@ export class MainAgent {
     taskStore: TaskStore;
     experienceStore: ExperienceStore;
     roleAgentManager: RoleAgentManager;
+    contextEngine?: ContextEngine | null;
+    hooks?: LifecycleHooks | null;
+    router?: AgentRouter | null;
   }) {
     this.name = name;
     this.model = model;
@@ -88,6 +100,9 @@ export class MainAgent {
     this.experienceStore = experienceStore;
     this.roleAgentManager = roleAgentManager;
     this.memoryCandidatePolicy = new MemoryCandidatePolicy();
+    this.contextEngine = contextEngine;
+    this.hooks = hooks;
+    this.router = router;
   }
 
   async handleUserMessage(input: string, context: { sessionId?: string; source?: string } = {}): Promise<MainAgentResult> {
@@ -107,6 +122,10 @@ export class MainAgent {
       source,
       userInput: normalizedInput,
     });
+    await this.hooks?.emit("beforeRun", {
+      run,
+      payload: { input: normalizedInput, sessionId, source },
+    });
     const selectedAgents = this.selectSubAgents(normalizedInput);
     let delegatedTo = selectedAgents;
     let planSummary: MainAgentResult["plan"];
@@ -114,7 +133,7 @@ export class MainAgent {
     let reviewerVerdict: ReviewerVerdict | undefined;
 
     try {
-      await this.memory.remember({
+      await this.remember({
         scope: sessionId,
         kind: "message:user",
         content: normalizedInput,
@@ -124,7 +143,7 @@ export class MainAgent {
       if (requiresDeliveryLevelClarification(normalizedInput)) {
         const content = deliveryLevelQuestion(normalizedInput);
         this.taskStore.completeRun(run.id, "waiting_user");
-        await this.memory.remember({
+        await this.remember({
           scope: sessionId,
           kind: "message:assistant",
           content,
@@ -133,6 +152,10 @@ export class MainAgent {
             runId: run.id,
             waitingFor: "delivery_level",
           },
+        });
+        await this.hooks?.emit("afterRun", {
+          run: this.taskStore.getRun(run.id) || run,
+          payload: { status: "waiting_user", waitingFor: "delivery_level" },
         });
         return {
           agent: this.name,
@@ -143,14 +166,23 @@ export class MainAgent {
         };
       }
 
-      const relevantMemory = await this.memory.recall(normalizedInput, {
+      const contextBundle = this.contextEngine
+        ? await this.contextEngine.build({
+          query: normalizedInput,
+          sessionId,
+          runId: run.id,
+          role: this.name,
+          mode: shouldUseDeepContext(normalizedInput) ? "deep" : "active",
+        })
+        : null;
+      const relevantMemory = contextBundle?.memory || await this.memory.recall(normalizedInput, {
         scope: sessionId,
         limit: 5,
       });
-      const relevantExperiences = this.experienceStore.recall(normalizedInput, {
+      const relevantExperiences = (contextBundle?.experiences || this.experienceStore.recall(normalizedInput, {
         scope: "project",
         limit: 3,
-      }).filter((experience) => experienceApplies(experience, normalizedInput));
+      })).filter((experience) => experienceApplies(experience, normalizedInput));
 
       const delegated = await this.delegateTasks({
         input: normalizedInput,
@@ -171,7 +203,7 @@ export class MainAgent {
         }
         await this.approveRunMemoryCandidates(run.id);
         this.taskStore.completeRun(run.id, "waiting_user");
-        await this.memory.remember({
+        await this.remember({
           scope: sessionId,
           kind: "message:assistant",
           content,
@@ -189,6 +221,10 @@ export class MainAgent {
               source: delegated.pause.source,
             },
           },
+        });
+        await this.hooks?.emit("afterRun", {
+          run: this.taskStore.getRun(run.id) || run,
+          payload: { status: "waiting_user", waitingFor: "user_input", delegatedTo },
         });
         return {
           agent: this.name,
@@ -220,7 +256,7 @@ export class MainAgent {
         this.experienceStore.recordUse(experience.id);
       }
 
-      await this.memory.remember({
+      await this.remember({
         scope: context.sessionId || "default",
         kind: "message:assistant",
         content,
@@ -237,6 +273,13 @@ export class MainAgent {
       }
       await this.approveRunMemoryCandidates(run.id);
       this.taskStore.completeRun(run.id, runStatusFrom({ subResults, reviewerVerdict }));
+      await this.hooks?.emit("afterRun", {
+        run: this.taskStore.getRun(run.id) || run,
+        payload: {
+          status: this.taskStore.getRun(run.id)?.status || "done",
+          delegatedTo,
+        },
+      });
 
       return {
         agent: this.name,
@@ -254,7 +297,7 @@ export class MainAgent {
       this.taskStore.completeRun(run.id, "failed");
       const content = `这次运行没有完成：${message}`;
       try {
-        await this.memory.remember({
+        await this.remember({
           scope: sessionId,
           kind: "message:assistant:error",
           content,
@@ -267,6 +310,14 @@ export class MainAgent {
       } catch {
         // The run status in SQLite is the recovery source of truth even if memory write fails.
       }
+      await this.hooks?.emit("afterRun", {
+        run: this.taskStore.getRun(run.id) || run,
+        payload: {
+          status: "failed",
+          error: message,
+          delegatedTo,
+        },
+      });
       return {
         agent: this.name,
         runId: run.id,
@@ -475,7 +526,7 @@ export class MainAgent {
       }
       const decision = this.taskStore.decidePendingMemoryCandidate(candidate.id, "approved");
       if (!decision.changed) continue;
-      await this.memory.remember({
+      await this.remember({
         scope: candidate.scope,
         kind: candidate.kind,
         content: candidate.content,
@@ -489,6 +540,24 @@ export class MainAgent {
     }
   }
 
+  private async remember(record: Parameters<MemorySystem["remember"]>[0]) {
+    await this.hooks?.emit("beforeMemoryCommit", {
+      payload: {
+        scope: record.scope || "default",
+        kind: record.kind || "note",
+      },
+    });
+    const saved = await this.memory.remember(record);
+    await this.hooks?.emit("afterMemoryCommit", {
+      payload: {
+        id: saved.id,
+        scope: saved.scope,
+        kind: saved.kind,
+      },
+    });
+    return saved;
+  }
+
   formatTaskResult(role: string, finishedTask: Task): { agent: string; role: string; taskId: string; status: string; content: string } {
     return {
       agent: role,
@@ -500,16 +569,7 @@ export class MainAgent {
   }
 
   selectSubAgents(input: string): string[] {
-    const lower = input.toLowerCase();
-    const agents = ["planner"];
-
-    if (/(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口)/i.test(lower)) {
-      agents.push("developer");
-    } else {
-      agents.push("researcher");
-    }
-
-    return agents;
+    return this.router?.route(input).selectedRoles || legacySelectSubAgents(input);
   }
 
   async synthesizeResponse({
@@ -633,6 +693,21 @@ function formatPlan(plan: PlanSpec): string[] {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function legacySelectSubAgents(input: string): string[] {
+  const lower = input.toLowerCase();
+  const agents = ["planner"];
+  if (/(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口)/i.test(lower)) {
+    agents.push("developer");
+  } else {
+    agents.push("researcher");
+  }
+  return agents;
+}
+
+function shouldUseDeepContext(input: string): boolean {
+  return /(之前|历史|上下文|session|会话|记得|remember|history|long[- ]?term|deep)/i.test(input);
 }
 
 function formatUserInputPause(pause: UserInputPause): string {
