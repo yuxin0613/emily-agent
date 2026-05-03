@@ -1,6 +1,7 @@
 import type { ExperienceCandidate, Task } from "../types.ts";
 import type { ExperienceStore } from "./ExperienceStore.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
+import { makeTopicKey } from "./ExperienceMatcher.ts";
 
 interface BuildResult {
   candidates: ExperienceCandidate[];
@@ -66,15 +67,14 @@ export class ExperienceBuilder {
 
   private taskToCandidate(task: Task): ExperienceCandidate | null {
     const text = [task.title, task.input, task.result, task.error].filter(Boolean).join("\n");
-    const topicKey = makeTopicKey(text, task.role);
     const value = estimateValue(task, text);
     if (value.importance < 0.58) return null;
 
     if (task.status === "failed" || task.status === "dead_letter") {
-      return {
+      const candidate: ExperienceCandidate = {
         scope: "project",
         type: "failure",
-        topicKey,
+        topicKey: "",
         title: `Failure pattern: ${task.title}`,
         summary: compact(task.error || task.result || task.input, 240),
         problemPattern: compact(task.input, 220),
@@ -87,12 +87,16 @@ export class ExperienceBuilder {
         importance: value.importance,
         changeReason: "Daily curator found a high-value failure or dead-letter task.",
       };
+      return {
+        ...candidate,
+        topicKey: makeTopicKey(candidate),
+      };
     }
 
-    return {
+    const candidate: ExperienceCandidate = {
       scope: "project",
       type: classifyExperienceType(text),
-      topicKey,
+      topicKey: "",
       title: `Best practice: ${task.title}`,
       summary: compact(task.result || task.input, 260),
       problemPattern: compact(task.input, 220),
@@ -102,6 +106,10 @@ export class ExperienceBuilder {
       confidence: value.confidence,
       importance: value.importance,
       changeReason: "Daily curator promoted useful task output into reusable experience.",
+    };
+    return {
+      ...candidate,
+      topicKey: makeTopicKey(candidate),
     };
   }
 }
@@ -131,17 +139,6 @@ function classifyExperienceType(text: string): ExperienceCandidate["type"] {
   if (/(决定|采用|约定|限制)/.test(text)) return "decision";
   if (/(步骤|流程|workflow|procedure)/i.test(text)) return "procedure";
   return "solution";
-}
-
-function makeTopicKey(text: string, role: string): string {
-  const normalized = text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .split(/\s+/)
-    .filter((token) => token.length > 1)
-    .slice(0, 8)
-    .join("_");
-  return `${role}_${normalized || "general"}`.slice(0, 96);
 }
 
 function compact(text: string, maxLength: number): string {

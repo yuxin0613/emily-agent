@@ -92,6 +92,9 @@ export class MainAgent {
       relevantExperiences,
       subResults,
     });
+    for (const experience of relevantExperiences) {
+      this.experienceStore.recordUse(experience.id);
+    }
 
     await this.memory.remember({
       scope: context.sessionId || "default",

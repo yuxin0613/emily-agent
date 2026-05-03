@@ -152,3 +152,13 @@ export interface ExperienceRevision {
 export interface ExperienceRecallResult extends Experience {
   score: number;
 }
+
+export type ExperienceFeedbackRating = "useful" | "wrong" | "outdated" | "duplicate";
+
+export interface ExperienceFeedback {
+  id: string;
+  experienceId: string;
+  rating: ExperienceFeedbackRating;
+  comment: string;
+  createdAt: string;
+}

@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentStatus, Metadata, Task, TaskEvent, TaskStatus } from "../types.ts";
+import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "dead_letter"]);
 
@@ -56,67 +57,75 @@ export class TaskStore {
   }
 
   migrate(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS agents (
-        id TEXT PRIMARY KEY,
-        role TEXT NOT NULL,
-        status TEXT NOT NULL,
-        current_task_id TEXT,
-        heartbeat_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
+    new SchemaMigrator({ db: this.db, namespace: "task" }).apply([
+      {
+        version: 1,
+        name: "create_task_runtime_tables",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS agents (
+              id TEXT PRIMARY KEY,
+              role TEXT NOT NULL,
+              status TEXT NOT NULL,
+              current_task_id TEXT,
+              heartbeat_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_role ON agents(role);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_role ON agents(role);
 
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY,
-        role TEXT NOT NULL,
-        status TEXT NOT NULL,
-        title TEXT NOT NULL,
-        input TEXT NOT NULL,
-        result TEXT,
-        error TEXT,
-        assigned_agent_id TEXT,
-        parent_task_id TEXT,
-        metadata TEXT NOT NULL,
-        retry_count INTEGER NOT NULL DEFAULT 0,
-        max_retries INTEGER NOT NULL DEFAULT 1,
-        lease_owner TEXT,
-        lease_expires_at TEXT,
-        heartbeat_at TEXT,
-        main_ack_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
+            CREATE TABLE IF NOT EXISTS tasks (
+              id TEXT PRIMARY KEY,
+              role TEXT NOT NULL,
+              status TEXT NOT NULL,
+              title TEXT NOT NULL,
+              input TEXT NOT NULL,
+              result TEXT,
+              error TEXT,
+              assigned_agent_id TEXT,
+              parent_task_id TEXT,
+              metadata TEXT NOT NULL,
+              retry_count INTEGER NOT NULL DEFAULT 0,
+              max_retries INTEGER NOT NULL DEFAULT 1,
+              lease_owner TEXT,
+              lease_expires_at TEXT,
+              heartbeat_at TEXT,
+              main_ack_at TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
-      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-      CREATE INDEX IF NOT EXISTS idx_tasks_role_status ON tasks(role, status);
-      CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(assigned_agent_id);
-      CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(status, lease_expires_at);
-      CREATE INDEX IF NOT EXISTS idx_tasks_ack ON tasks(status, main_ack_at);
+            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_role_status ON tasks(role, status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(assigned_agent_id);
+            CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(status, lease_expires_at);
+            CREATE INDEX IF NOT EXISTS idx_tasks_ack ON tasks(status, main_ack_at);
 
-      CREATE TABLE IF NOT EXISTS role_queues (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT NOT NULL,
-        task_id TEXT NOT NULL UNIQUE,
-        priority INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
+            CREATE TABLE IF NOT EXISTS role_queues (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              role TEXT NOT NULL,
+              task_id TEXT NOT NULL UNIQUE,
+              priority INTEGER NOT NULL DEFAULT 0,
+              status TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
-      CREATE INDEX IF NOT EXISTS idx_role_queues_next ON role_queues(role, status, priority DESC, id ASC);
+            CREATE INDEX IF NOT EXISTS idx_role_queues_next ON role_queues(role, status, priority DESC, id ASC);
 
-      CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT NOT NULL,
-        task_id TEXT,
-        agent_id TEXT,
-        payload TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-    `);
+            CREATE TABLE IF NOT EXISTS events (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              type TEXT NOT NULL,
+              task_id TEXT,
+              agent_id TEXT,
+              payload TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+          `);
+        },
+      },
+    ]);
 
     this.ensureColumn("tasks", "retry_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("tasks", "max_retries", "INTEGER NOT NULL DEFAULT 1");

@@ -8,7 +8,11 @@ export async function startWebServer({
   runtime: {
     handleUserMessage: (message: string, context: { sessionId?: string; source?: string }) => Promise<unknown>;
     taskStore: { getLatestEvents: (options?: { afterId?: number; limit?: number }) => unknown[] };
-    experienceStore: { listActive: () => unknown[]; recall: (query: string, options?: { scope?: "project"; limit?: number }) => unknown[] };
+    experienceStore: {
+      listActive: () => unknown[];
+      recall: (query: string, options?: { scope?: "project"; limit?: number }) => unknown[];
+      addFeedback: (input: { experienceId: string; rating: "useful" | "wrong" | "outdated" | "duplicate"; comment?: string }) => unknown;
+    };
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     roleAgentManager: NodeJS.EventEmitter;
   };
@@ -43,6 +47,16 @@ export async function startWebServer({
         return sendJson(response, 200, result);
       }
 
+      if (request.method === "POST" && url.pathname === "/experiences/feedback") {
+        const body = await readJson(request);
+        const result = runtime.experienceStore.addFeedback({
+          experienceId: String(body.experienceId || ""),
+          rating: parseFeedbackRating(body.rating),
+          comment: String(body.comment || ""),
+        });
+        return sendJson(response, 200, result);
+      }
+
       if (request.method === "POST" && url.pathname === "/chat") {
         const body = await readJson(request);
         const result = await runtime.handleUserMessage(String(body.message || ""), {
@@ -54,7 +68,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /health", "GET /events", "GET /experiences", "POST /experiences/build-daily", "POST /chat"],
+        routes: ["GET /health", "GET /events", "GET /experiences", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       sendJson(response, 500, {
@@ -68,6 +82,11 @@ export async function startWebServer({
     server.listen(port, host, resolve);
   });
   console.log(`Emily Agent web adapter listening on http://${host}:${port}`);
+}
+
+function parseFeedbackRating(value: unknown): "useful" | "wrong" | "outdated" | "duplicate" {
+  if (value === "useful" || value === "wrong" || value === "outdated" || value === "duplicate") return value;
+  throw new Error("Invalid feedback rating");
 }
 
 function streamEvents({

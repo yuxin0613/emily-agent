@@ -1,0 +1,43 @@
+import type { DatabaseSync } from "node:sqlite";
+
+export interface Migration {
+  version: number;
+  name: string;
+  up: () => void;
+}
+
+export class SchemaMigrator {
+  db: DatabaseSync;
+  namespace: string;
+
+  constructor({ db, namespace }: { db: DatabaseSync; namespace: string }) {
+    this.db = db;
+    this.namespace = namespace;
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        namespace TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        PRIMARY KEY (namespace, version)
+      );
+    `);
+  }
+
+  apply(migrations: Migration[]): void {
+    for (const migration of migrations.sort((a, b) => a.version - b.version)) {
+      if (this.hasMigration(migration.version)) continue;
+      migration.up();
+      this.db
+        .prepare("INSERT INTO schema_migrations (namespace, version, name, applied_at) VALUES (?, ?, ?, ?)")
+        .run(this.namespace, migration.version, migration.name, new Date().toISOString());
+    }
+  }
+
+  hasMigration(version: number): boolean {
+    const row = this.db
+      .prepare("SELECT version FROM schema_migrations WHERE namespace = ? AND version = ?")
+      .get(this.namespace, version);
+    return Boolean(row);
+  }
+}

@@ -58,6 +58,32 @@ const recalled = experienceStore.recall("worker exits and sqlite lease expires",
 assert.equal(recalled[0].id, active[0].id);
 assert.equal(recalled[0].revision, 2);
 
+const similar = experienceStore.upsertExperience({
+  scope: "project",
+  type: "solution",
+  topicKey: "",
+  title: "Best practice: recover worker crash with sqlite lease",
+  summary: "Worker crash recovery should rely on SQLite leases, heartbeat renewal, and inspector fallback.",
+  problemPattern: "Worker process exits before notifying the main agent",
+  solutionPattern: "Use SQLite lease expiration and an inspector task to verify final state before retrying.",
+  evidenceTaskIds: ["manual-evidence"],
+  evidenceEventIds: [],
+  confidence: 0.93,
+  importance: 0.93,
+  changeReason: "Manual refined best practice for the same recovery topic.",
+});
+assert.equal(similar.action, "replace");
+assert.equal(similar.experience.id, active[0].id);
+assert.equal(similar.experience.revision, 3);
+
+const feedback = experienceStore.addFeedback({
+  experienceId: similar.experience.id,
+  rating: "useful",
+  comment: "This is the right recovery pattern.",
+});
+assert.equal(feedback.rating, "useful");
+assert.equal(experienceStore.getFeedback(similar.experience.id).length, 1);
+
 experienceStore.close();
 taskStore.close();
 

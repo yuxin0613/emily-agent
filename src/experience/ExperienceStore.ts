@@ -4,11 +4,15 @@ import path from "node:path";
 import type {
   Experience,
   ExperienceCandidate,
+  ExperienceFeedback,
+  ExperienceFeedbackRating,
   ExperienceRecallResult,
   ExperienceRevision,
   ExperienceUpdateAction,
 } from "../types.ts";
+import { ExperienceMatcher } from "./ExperienceMatcher.ts";
 import { ScalarQuantCompressor, type CompressedVector, type VectorCompressor } from "./VectorCompressor.ts";
+import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
 
 interface ExperienceRow {
   id: string;
@@ -56,9 +60,18 @@ interface ExperienceVectorRow {
   created_at: string;
 }
 
+interface ExperienceFeedbackRow {
+  id: string;
+  experience_id: string;
+  rating: ExperienceFeedbackRating;
+  comment: string;
+  created_at: string;
+}
+
 export class ExperienceStore {
   db: DatabaseSync;
   compressor: VectorCompressor;
+  matcher: ExperienceMatcher;
 
   static create({
     dataDir,
@@ -78,6 +91,7 @@ export class ExperienceStore {
   constructor({ dbPath, compressor }: { dbPath: string; compressor: VectorCompressor }) {
     this.db = new DatabaseSync(dbPath);
     this.compressor = compressor;
+    this.matcher = new ExperienceMatcher({ compressor });
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
@@ -86,79 +100,105 @@ export class ExperienceStore {
   }
 
   migrate(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS experiences (
-        id TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        scope TEXT NOT NULL,
-        type TEXT NOT NULL,
-        topic_key TEXT NOT NULL UNIQUE,
-        title TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        problem_pattern TEXT NOT NULL,
-        solution_pattern TEXT NOT NULL,
-        evidence_task_ids TEXT NOT NULL,
-        evidence_event_ids TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        importance REAL NOT NULL,
-        reuse_count INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
+    new SchemaMigrator({ db: this.db, namespace: "experience" }).apply([
+      {
+        version: 1,
+        name: "create_experience_tables",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS experiences (
+              id TEXT PRIMARY KEY,
+              revision INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              scope TEXT NOT NULL,
+              type TEXT NOT NULL,
+              topic_key TEXT NOT NULL UNIQUE,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              problem_pattern TEXT NOT NULL,
+              solution_pattern TEXT NOT NULL,
+              evidence_task_ids TEXT NOT NULL,
+              evidence_event_ids TEXT NOT NULL,
+              confidence REAL NOT NULL,
+              importance REAL NOT NULL,
+              reuse_count INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
 
-      CREATE INDEX IF NOT EXISTS idx_experiences_active ON experiences(status, scope, type, importance DESC);
+            CREATE INDEX IF NOT EXISTS idx_experiences_active ON experiences(status, scope, type, importance DESC);
 
-      CREATE TABLE IF NOT EXISTS experience_revisions (
-        id TEXT PRIMARY KEY,
-        experience_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        summary TEXT NOT NULL,
-        problem_pattern TEXT NOT NULL,
-        solution_pattern TEXT NOT NULL,
-        confidence REAL NOT NULL,
-        importance REAL NOT NULL,
-        evidence_task_ids TEXT NOT NULL,
-        evidence_event_ids TEXT NOT NULL,
-        change_reason TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
+            CREATE TABLE IF NOT EXISTS experience_revisions (
+              id TEXT PRIMARY KEY,
+              experience_id TEXT NOT NULL,
+              revision INTEGER NOT NULL,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              problem_pattern TEXT NOT NULL,
+              solution_pattern TEXT NOT NULL,
+              confidence REAL NOT NULL,
+              importance REAL NOT NULL,
+              evidence_task_ids TEXT NOT NULL,
+              evidence_event_ids TEXT NOT NULL,
+              change_reason TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
 
-      CREATE INDEX IF NOT EXISTS idx_experience_revisions_exp ON experience_revisions(experience_id, revision DESC);
+            CREATE INDEX IF NOT EXISTS idx_experience_revisions_exp ON experience_revisions(experience_id, revision DESC);
 
-      CREATE TABLE IF NOT EXISTS experience_vectors (
-        experience_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        algorithm TEXT NOT NULL,
-        dimensions INTEGER NOT NULL,
-        payload TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (experience_id, revision)
-      );
+            CREATE TABLE IF NOT EXISTS experience_vectors (
+              experience_id TEXT NOT NULL,
+              revision INTEGER NOT NULL,
+              status TEXT NOT NULL,
+              algorithm TEXT NOT NULL,
+              dimensions INTEGER NOT NULL,
+              payload TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              PRIMARY KEY (experience_id, revision)
+            );
 
-      CREATE INDEX IF NOT EXISTS idx_experience_vectors_active ON experience_vectors(status, algorithm);
-    `);
+            CREATE INDEX IF NOT EXISTS idx_experience_vectors_active ON experience_vectors(status, algorithm);
+          `);
+        },
+      },
+      {
+        version: 2,
+        name: "create_experience_feedback",
+        up: () => {
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS experience_feedback (
+              id TEXT PRIMARY KEY,
+              experience_id TEXT NOT NULL,
+              rating TEXT NOT NULL,
+              comment TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_experience_feedback_exp ON experience_feedback(experience_id, rating);
+          `);
+        },
+      },
+    ]);
   }
 
   upsertExperience(candidate: ExperienceCandidate): { action: ExperienceUpdateAction; experience: Experience } {
-    const existing = this.getActiveByTopicKey(candidate.topicKey);
+    const normalized = this.matcher.normalizeCandidate(candidate);
+    const existing = this.matcher.findMatch(normalized, this.listActive());
     if (!existing) {
       return {
         action: "create",
-        experience: this.createExperience(candidate),
+        experience: this.createExperience(normalized),
       };
     }
 
-    const action = this.chooseUpdateAction(existing, candidate);
+    const action = this.chooseUpdateAction(existing, normalized);
     if (action === "skip") {
       return { action, experience: existing };
     }
 
     return {
       action,
-      experience: this.updateExperience(existing, candidate, action),
+      experience: this.updateExperience(existing, normalized, action),
     };
   }
 
@@ -186,8 +226,43 @@ export class ExperienceStore {
         ...parseExperience(row),
         score: this.compressor.similarity(queryVector, JSON.parse(row.payload) as CompressedVector),
       }))
-      .sort((a, b) => (b.score + b.importance * 0.2 + b.confidence * 0.1) - (a.score + a.importance * 0.2 + a.confidence * 0.1))
+      .sort((a, b) => scoreRecall(b, this.feedbackScore(b.id)) - scoreRecall(a, this.feedbackScore(a.id)))
       .slice(0, limit);
+  }
+
+  recordUse(experienceId: string): void {
+    this.db
+      .prepare("UPDATE experiences SET reuse_count = reuse_count + 1, updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), experienceId);
+  }
+
+  addFeedback({
+    experienceId,
+    rating,
+    comment = "",
+  }: {
+    experienceId: string;
+    rating: ExperienceFeedbackRating;
+    comment?: string;
+  }): ExperienceFeedback {
+    const feedback: ExperienceFeedback = {
+      id: randomUUID(),
+      experienceId,
+      rating,
+      comment,
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare("INSERT INTO experience_feedback (id, experience_id, rating, comment, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(feedback.id, feedback.experienceId, feedback.rating, feedback.comment, feedback.createdAt);
+    return feedback;
+  }
+
+  getFeedback(experienceId: string): ExperienceFeedback[] {
+    const rows = this.db
+      .prepare("SELECT * FROM experience_feedback WHERE experience_id = ? ORDER BY created_at DESC")
+      .all(experienceId) as ExperienceFeedbackRow[];
+    return rows.map(parseFeedback);
   }
 
   getActiveByTopicKey(topicKey: string): Experience | null {
@@ -312,11 +387,23 @@ export class ExperienceStore {
   }
 
   private chooseUpdateAction(existing: Experience, candidate: ExperienceCandidate): ExperienceUpdateAction {
+    const feedbackPenalty = Math.min(0.16, Math.abs(Math.min(0, this.feedbackScore(existing.id))) * 0.1);
     const stronger = candidate.importance > existing.importance + 0.05 || candidate.confidence > existing.confidence + 0.08;
     const sameEvidence = candidate.evidenceTaskIds.every((id) => existing.evidenceTaskIds.includes(id));
     if (sameEvidence && !stronger) return "skip";
-    if (stronger || candidate.solutionPattern.length > existing.solutionPattern.length * 1.15) return "replace";
+    if (stronger || feedbackPenalty > 0 || candidate.solutionPattern.length > existing.solutionPattern.length * 1.15) return "replace";
     return "merge";
+  }
+
+  private feedbackScore(experienceId: string): number {
+    const feedback = this.getFeedback(experienceId);
+    return feedback.reduce((score, item) => {
+      if (item.rating === "useful") return score + 1;
+      if (item.rating === "wrong") return score - 2;
+      if (item.rating === "outdated") return score - 1.5;
+      if (item.rating === "duplicate") return score - 1;
+      return score;
+    }, 0);
   }
 
   private archiveRevision(existing: Experience, changeReason: string): void {
@@ -422,6 +509,24 @@ function parseRevision(row: ExperienceRevisionRow): ExperienceRevision {
     changeReason: row.change_reason,
     createdAt: row.created_at,
   };
+}
+
+function parseFeedback(row: ExperienceFeedbackRow): ExperienceFeedback {
+  return {
+    id: row.id,
+    experienceId: row.experience_id,
+    rating: row.rating,
+    comment: row.comment,
+    createdAt: row.created_at,
+  };
+}
+
+function scoreRecall(experience: ExperienceRecallResult, feedbackScore: number): number {
+  return experience.score
+    + experience.importance * 0.2
+    + experience.confidence * 0.1
+    + Math.min(0.15, experience.reuseCount * 0.02)
+    + Math.max(-0.4, Math.min(0.25, feedbackScore * 0.08));
 }
 
 function mergeText(left: string, right: string): string {

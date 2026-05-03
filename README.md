@@ -68,9 +68,10 @@ flowchart LR
 核心规则：
 
 - 每天整理时最多产出或更新 3 条高质量经验。
-- 同一类经验使用稳定 `topicKey`，只保留一个 `active` 当前最佳实践。
+- 同一类经验使用稳定 `topicKey`，只保留一个 `active` 当前最佳实践；如果 `topicKey` 不完全一致，会再用 scope/type、向量相似度和关键词重合做相似匹配。
 - 旧版本进入 `experience_revisions`，用于审计、回滚和解释，不参与默认召回。
 - 经验向量只索引 active 当前版本，避免新旧经验同时命中。
+- 召回排序会考虑相似度、重要性、置信度、reuse count 和用户反馈。
 - 召回流程是“先有印象，再查细节”：先命中压缩经验向量，再读取 active experience 和 evidence task。
 
 当前经验表：
@@ -78,6 +79,7 @@ flowchart LR
 - `experiences`: 当前 active best practice。
 - `experience_revisions`: 旧版本归档。
 - `experience_vectors`: 压缩后的 active 经验索引。
+- `experience_feedback`: 用户或主 agent 对经验的反馈，例如 `useful`、`wrong`、`outdated`、`duplicate`。
 
 当前压缩接口在 `src/experience/VectorCompressor.ts`：
 
@@ -99,6 +101,10 @@ curl -X POST http://127.0.0.1:3000/experiences/build-daily \
   -d '{"day":"2026-05-03"}'
 
 curl 'http://127.0.0.1:3000/experiences?q=sqlite%20ipc%20recovery'
+
+curl -X POST http://127.0.0.1:3000/experiences/feedback \
+  -H 'content-type: application/json' \
+  -d '{"experienceId":"...","rating":"useful","comment":"命中正确"}'
 ```
 
 ## 运行
@@ -140,7 +146,9 @@ curl http://127.0.0.1:3000/events
 - `src/tools/ToolGateway.ts`: 工具权限校验入口。
 - `src/experience/ExperienceStore.ts`: active experience、版本归档和压缩索引。
 - `src/experience/ExperienceBuilder.ts`: 每日经验提炼，最多保留 3 条高价值更新。
+- `src/experience/ExperienceMatcher.ts`: 稳定 topicKey、相似经验匹配和合并判断。
 - `src/experience/VectorCompressor.ts`: 向量压缩接口和当前 int8 实现。
+- `src/storage/SchemaMigrator.ts`: SQLite schema migration 版本记录。
 - `src/memory/MemorySystem.ts`: 三层记忆统一入口。
 - `src/memory/MemoryCurator.ts`: 决定长期记忆写入策略。
 - `src/adapters/tui.ts`: 命令行交互入口。
@@ -173,6 +181,7 @@ npm run check
 - worker 崩溃后 inspector 自动检查并落最终状态。
 - Task 状态机、非法跳转、retry 和 dead-letter。
 - 经验创建、同类经验更新、旧版本归档、active-only 召回。
+- 经验相似匹配、feedback/reuse 和 schema migration 记录。
 
 ## 后续扩展
 
