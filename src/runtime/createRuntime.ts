@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
@@ -53,6 +53,7 @@ export async function createRuntime(options: {
   const skillDir = options.skillDir || process.env.EMILY_SKILL_DIR || path.join(process.cwd(), "skills");
   const skillDirs = options.skillDirs || defaultSkillDirs(skillDir);
   await mkdir(dataDir, { recursive: true });
+  await loadDataDirEnv(dataDir);
 
   const requestedMainProviderId = options.mainProviderId || options.defaultProviderId;
   if (options.model && !requestedMainProviderId) {
@@ -702,4 +703,40 @@ export async function createRuntime(options: {
     const roles = await roleManager.listRoles();
     return roles.filter((role) => role.provider === providerId).map((role) => role.name);
   }
+}
+
+async function loadDataDirEnv(dataDir: string): Promise<void> {
+  const envPath = path.join(dataDir, ".env");
+  let raw = "";
+  try {
+    raw = await readFile(envPath, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return;
+    throw error;
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    const parsed = parseEnvLine(line);
+    if (!parsed) continue;
+    if (process.env[parsed.key] === undefined) process.env[parsed.key] = parsed.value;
+  }
+}
+
+function parseEnvLine(line: string): { key: string; value: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+  if (!match) return null;
+  return { key: match[1], value: parseEnvValue(match[2]) };
+}
+
+function parseEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+  return trimmed;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

@@ -26,8 +26,6 @@ try {
   writePromptLines(input, [
     "new",
     "echo",
-    "main-echo",
-    "main-model",
     "main-model",
     "planner",
     "y",
@@ -41,7 +39,9 @@ try {
   const planner = await runtime.roleManager.getRole("planner");
   assert.equal(planner.provider, undefined);
   assert.equal(planner.model, undefined);
-  assert.match(Buffer.concat(chunks).toString("utf8"), /Model setup saved/);
+  const rendered = Buffer.concat(chunks).toString("utf8");
+  assert.match(rendered, /Model setup saved/);
+  assert.doesNotMatch(rendered, /Provider id/);
 } finally {
   await runtime.shutdown();
 }

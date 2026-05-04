@@ -13,7 +13,79 @@ const ANSI = {
   gray: "\x1b[90m",
 };
 
+const EMILY_WORDMARK = [
+  "███████╗███╗   ███╗██╗██╗     ██╗   ██╗",
+  "██╔════╝████╗ ████║██║██║     ╚██╗ ██╔╝",
+  "█████╗  ██╔████╔██║██║██║      ╚████╔╝ ",
+  "██╔══╝  ██║╚██╔╝██║██║██║       ╚██╔╝  ",
+  "███████╗██║ ╚═╝ ██║██║███████╗   ██║   ",
+  "╚══════╝╚═╝     ╚═╝╚═╝╚══════╝   ╚═╝   ",
+  "              AGENTOS                  ",
+];
+
+const EMILY_3D_LOGO = [
+  "  ______ __  __  ____ __    __ __  ",
+  " / ____//  |/  |/  _// /   / // /  ",
+  "/ __/  / /|_/ / / / / /   / // /   ",
+  "/ /___ / /  / /_/ / / /___/ // /___ ",
+  "/_____//_/  /_//___//_____//_____/",
+  "  ╲_____╲╲_____╲╲____╲╲____╲╲____╲ ",
+  "   ╲_____╲╲_____╲╲____╲╲____╲╲____╲",
+  "        E M I L Y   A G E N T O S  ",
+];
+
 const VALID_PERMISSION_MODES = new Set(["read_only", "workspace_write", "danger_full_access"]);
+
+const TUI_HELP_SECTIONS: Array<[string, string[][]]> = [
+  ["Chat", [
+    ["type anything", "send a message to the current session"],
+    [":help", "show full TUI help"],
+    ["/new [title]", "create a new visible session"],
+    ["/clear", "hide current session and create a new one"],
+    [":mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
+    [":status", "show current TUI/runtime status"],
+  ]],
+  ["Runtime", [
+    [":health", "runtime health"],
+    [":doctor [deep|repair]", "aggregated runtime doctor"],
+    [":diagnostics [repair]", "runtime diagnostics"],
+    [":maintenance", "run maintenance"],
+    [":commands", "list command registry entries"],
+  ]],
+  ["Sessions", [
+    [":sessions [all|hidden|trash]", "list sessions"],
+    [":session <id>", "switch session"],
+    [":messages [limit]", "show current session messages"],
+    [":resume latest [hidden]", "resume latest session"],
+    [":export-session <id> [md]", "export session"],
+    [":compact-preview <id> [n]", "preview session compaction"],
+    [":session-usage <id>", "provider usage for a session"],
+    [":restore-session <id>", "restore hidden or trashed session"],
+    [":trash-session <id>", "move session to trash"],
+  ]],
+  ["Work", [
+    [":timeline [runId]", "show run timeline"],
+    [":trace <taskId>", "show task trace"],
+    [":providers", "list providers"],
+    [":roles", "list roles"],
+    [":tools", "list tools"],
+    [":skills", "list skills"],
+    [":experiences [query]", "list or search experiences"],
+  ]],
+  ["Skills And Cron", [
+    [":candidates [status]", "list skill candidates"],
+    [":build-skills", "build skill candidates"],
+    [":approve-skill <id> [reason]", "approve proposed skill"],
+    [":reject-skill <id> [reason]", "reject proposed skill"],
+    [":cron", "list cron jobs"],
+    [":cron-add <name> <cron> <msg>", "schedule a chat cron job"],
+    [":cron-pause|resume|run|delete <id>", "control cron jobs"],
+  ]],
+  ["Shell", [
+    [":clear-screen", "redraw the TUI"],
+    ["exit", "quit"],
+  ]],
+];
 
 export async function startTui({ runtime }) {
   const rl = readline.createInterface({ input, output });
@@ -24,7 +96,6 @@ export async function startTui({ runtime }) {
   };
 
   await printBanner(runtime, state);
-  printHelp();
 
   try {
     while (true) {
@@ -70,17 +141,15 @@ export function isTuiAbortError(error: unknown): boolean {
 
 async function printBanner(runtime, state): Promise<void> {
   const health = await safeHealth(runtime);
-  const summary = [
-    `session ${state.sessionId}`,
-    `mode ${state.permissionMode}`,
-    health ? `tasks ${health.pendingTasks}/${health.runningTasks}` : "tasks ?/?",
-    health ? `graphs ${health.openTaskGraphs}` : "graphs ?",
-  ].join("  ");
   if (output.isTTY) output.write("\x1Bc");
   else output.write("\n");
-  output.write(`${style("Emily AgentOS", "bold")} ${style("terminal workspace", "dim")}\n`);
-  output.write(`${style(summary, "gray")}\n`);
-  output.write(`${style("Type a request, or use :help for commands. /new starts fresh; /clear hides this session.", "dim")}\n\n`);
+  output.write(formatTuiHome({
+    state,
+    health,
+    provider: currentProvider(runtime),
+    tools: safeList(runtime, "listTools"),
+    skills: safeList(runtime, "listSkills"),
+  }));
 }
 
 function printHelp(): void {
@@ -103,6 +172,10 @@ function isCommand(message: string): boolean {
 async function handleCommand(runtime, state, message: string): Promise<void> {
   const prefix = message[0];
   const [command, ...args] = splitArgs(message.replace(/^[:/]/, ""));
+  if (!command) {
+    printText(formatTuiCommandHints(prefix));
+    return;
+  }
   switch (command) {
     case "help":
     case "h":
@@ -257,7 +330,9 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     default:
       output.write(`\nUnknown command: ${command}\n\n`);
-      printHelp();
+      const hints = formatTuiCommandHints(prefix, command);
+      if (hints) printText(hints);
+      else printHelp();
   }
 }
 
@@ -606,57 +681,8 @@ function sessionListOptions(value?: string): {
 }
 
 export function formatTuiHelp(): string {
-  const sections: Array<[string, string[][]]> = [
-    ["Chat", [
-      ["type anything", "send a message to the current session"],
-      ["/new [title]", "create a new visible session"],
-      ["/clear", "hide current session and create a new one"],
-      [":mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
-      [":status", "show current TUI/runtime status"],
-    ]],
-    ["Runtime", [
-      [":health", "runtime health"],
-      [":doctor [deep|repair]", "aggregated runtime doctor"],
-      [":diagnostics [repair]", "runtime diagnostics"],
-      [":maintenance", "run maintenance"],
-      [":commands", "list command registry entries"],
-    ]],
-    ["Sessions", [
-      [":sessions [all|hidden|trash]", "list sessions"],
-      [":session <id>", "switch session"],
-      [":messages [limit]", "show current session messages"],
-      [":resume latest [hidden]", "resume latest session"],
-      [":export-session <id> [md]", "export session"],
-      [":compact-preview <id> [n]", "preview session compaction"],
-      [":session-usage <id>", "provider usage for a session"],
-      [":restore-session <id>", "restore hidden or trashed session"],
-      [":trash-session <id>", "move session to trash"],
-    ]],
-    ["Work", [
-      [":timeline [runId]", "show run timeline"],
-      [":trace <taskId>", "show task trace"],
-      [":providers", "list providers"],
-      [":roles", "list roles"],
-      [":tools", "list tools"],
-      [":skills", "list skills"],
-      [":experiences [query]", "list or search experiences"],
-    ]],
-    ["Skills And Cron", [
-      [":candidates [status]", "list skill candidates"],
-      [":build-skills", "build skill candidates"],
-      [":approve-skill <id> [reason]", "approve proposed skill"],
-      [":reject-skill <id> [reason]", "reject proposed skill"],
-      [":cron", "list cron jobs"],
-      [":cron-add <name> <cron> <msg>", "schedule a chat cron job"],
-      [":cron-pause|resume|run|delete <id>", "control cron jobs"],
-    ]],
-    ["Shell", [
-      [":clear-screen", "redraw the TUI"],
-      ["exit", "quit"],
-    ]],
-  ];
   const lines = ["Commands"];
-  for (const [section, rows] of sections) {
+  for (const [section, rows] of TUI_HELP_SECTIONS) {
     lines.push("", `  ${section}`);
     const width = Math.max(...rows.map(([command]) => command.length));
     for (const [command, description] of rows) {
@@ -665,6 +691,155 @@ export function formatTuiHelp(): string {
   }
   lines.push("");
   return `${lines.join("\n")}\n`;
+}
+
+export function formatTuiCommandHints(prefix = "/", query = ""): string {
+  const normalizedPrefix = prefix === ":" ? ":" : "/";
+  const normalizedQuery = query.replace(/^[:/]/, "").trim().toLowerCase();
+  const rows = tuiCommandRows(normalizedPrefix)
+    .filter(([command]) => {
+      if (!normalizedQuery) return true;
+      return commandToken(command).includes(normalizedQuery);
+    });
+  if (!rows.length) return "";
+
+  const visibleRows = rows.slice(0, normalizedQuery ? 12 : 18);
+  const width = Math.max(...visibleRows.map(([command]) => command.length));
+  const lines = [
+    normalizedQuery ? `Command hints for ${normalizedPrefix}${normalizedQuery}` : "Command hints",
+    "Type :help for the full list.",
+    "",
+  ];
+  for (const [command, description] of visibleRows) {
+    lines.push(`  ${command.padEnd(width)}  ${description}`);
+  }
+  if (rows.length > visibleRows.length) {
+    lines.push(`  ... ${rows.length - visibleRows.length} more`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export function formatTuiHome({
+  state = { sessionId: "tui", lastRunId: "", permissionMode: "workspace_write" },
+  health = null,
+  provider = null,
+  tools = [],
+  skills = [],
+}: {
+  state?: { sessionId: string; lastRunId: string; permissionMode: string };
+  health?: Record<string, number> | null;
+  provider?: { id?: string; model?: string; type?: string } | null;
+  tools?: Array<{ name?: string; category?: string }>;
+  skills?: Array<{ name?: string; title?: string; capabilities?: string[]; source?: string }>;
+} = {}): string {
+  const width = Math.max(88, terminalWidth());
+  const boxWidth = Math.min(width - 2, 126);
+  const leftWidth = 38;
+  const rightWidth = Math.max(42, boxWidth - leftWidth - 7);
+  const lines: string[] = [];
+  lines.push("");
+  for (const line of EMILY_WORDMARK) lines.push(style(line, "yellow"));
+  lines.push("");
+  lines.push(`${"─".repeat(Math.max(2, Math.floor((boxWidth - 36) / 2)))} ${style("Emily AgentOS terminal workspace", "yellow")} ${"─".repeat(12)}`);
+  lines.push(`┌${"─".repeat(boxWidth - 2)}┐`);
+
+  const left = [
+    ...EMILY_3D_LOGO.map((line) => style(line, "yellow")),
+    provider ? `${provider.model || "(model)"}  ·  ${provider.id || "(provider)"}` : "model unavailable",
+    `Session: ${state.sessionId}`,
+    health ? `Tasks: ${health.pendingTasks}/${health.runningTasks}  Graphs: ${health.openTaskGraphs}` : "Tasks: ?/?  Graphs: ?",
+  ];
+  const right = [
+    style("Available Tools", "yellow"),
+    ...formatToolGroups(tools).slice(0, 7),
+    "",
+    style("Available Skills", "yellow"),
+    ...formatSkillGroups(skills).slice(0, 13),
+    "",
+    `${tools.length} tools · ${skills.length} skills · /help for commands`,
+  ];
+  const rowCount = Math.max(left.length, right.length, 18);
+  for (let index = 0; index < rowCount; index += 1) {
+    const leftCell = pad(truncate(left[index] || "", leftWidth), leftWidth);
+    const rightCell = pad(truncate(right[index] || "", rightWidth), rightWidth);
+    lines.push(`│ ${leftCell} │ ${rightCell} │`);
+  }
+  lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
+  lines.push("");
+  lines.push(style("Welcome to Emily Agent! Type your message or /help for commands.", "gray"));
+  lines.push("");
+  return `${lines.join("\n")}\n`;
+}
+
+function formatToolGroups(tools: Array<{ name?: string; category?: string }>): string[] {
+  const groups = new Map<string, string[]>();
+  for (const tool of tools) {
+    const category = tool.category || "tools";
+    const names = groups.get(category) || [];
+    if (tool.name) names.push(tool.name);
+    groups.set(category, names);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([category, names]) => `${category}: ${names.slice(0, 3).join(", ")}${names.length > 3 ? ", ..." : ""}`);
+}
+
+function formatSkillGroups(skills: Array<{ name?: string; title?: string; capabilities?: string[]; source?: string }>): string[] {
+  const groups = new Map<string, string[]>();
+  for (const skill of skills) {
+    const category = skill.capabilities?.[0] || skill.source || "skills";
+    const names = groups.get(category) || [];
+    names.push(skill.name || skill.title || "skill");
+    groups.set(category, names);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([category, names]) => `${category}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""}`);
+}
+
+function currentProvider(runtime): { id?: string; model?: string; type?: string } | null {
+  try {
+    const providerId = runtime.providerRegistry?.defaultProviderId;
+    if (providerId && runtime.providerRegistry?.getConfigIncludingDisabled) {
+      return runtime.providerRegistry.getConfigIncludingDisabled(providerId);
+    }
+    const providers = runtime.listProviders?.() || [];
+    return providers[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+function safeList(runtime, method: "listTools" | "listSkills"): unknown[] {
+  try {
+    const value = runtime[method]?.();
+    return Array.isArray(value) ? value : [];
+  } catch {
+    return [];
+  }
+}
+
+function tuiCommandRows(prefix: string): string[][] {
+  const rows: string[][] = [];
+  const seen = new Set<string>();
+  for (const [, sectionRows] of TUI_HELP_SECTIONS) {
+    for (const [command, description] of sectionRows) {
+      const normalized = normalizeTuiCommand(command, prefix);
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      rows.push([normalized, description]);
+    }
+  }
+  return rows;
+}
+
+function normalizeTuiCommand(command: string, prefix: string): string | null {
+  if (!command.startsWith(":") && !command.startsWith("/")) return null;
+  return `${prefix}${command.slice(1)}`;
+}
+
+function commandToken(command: string): string {
+  return command.replace(/^[:/]/, "").split(/[ <[]/)[0].toLowerCase();
 }
 
 function numberArg(value: string | undefined, fallback: number): number {

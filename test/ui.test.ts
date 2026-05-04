@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { formatTuiHelp, isTuiAbortError } from "../src/adapters/tui.ts";
+import { formatTuiCommandHints, formatTuiHelp, formatTuiHome, isTuiAbortError } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -24,6 +24,27 @@ assert.match(tuiHelp, /:mode \[mode\]/);
 assert.match(tuiHelp, /:status/);
 assert.match(tuiHelp, /:timeline \[runId\]/);
 assert.ok(!tuiHelp.includes("undefined"));
+const slashHints = formatTuiCommandHints("/");
+assert.match(slashHints, /Command hints/);
+assert.match(slashHints, /\/help/);
+assert.match(slashHints, /\/new \[title\]/);
+assert.match(slashHints, /\/status/);
+assert.ok(!slashHints.includes("undefined"));
+const filteredHints = formatTuiCommandHints("/", "sta");
+assert.match(filteredHints, /Command hints for \/sta/);
+assert.match(filteredHints, /\/status/);
+assert.doesNotMatch(filteredHints, /\/new \[title\]/);
+const tuiHome = formatTuiHome({
+  provider: { id: "deepseek", model: "deepseek-chat", type: "openai" },
+  tools: [{ name: "read_file", category: "filesystem" }, { name: "shell", category: "process" }],
+  skills: [{ name: "coding", capabilities: ["software-development"], source: "builtin" }],
+});
+assert.match(tuiHome, /Emily AgentOS/);
+assert.match(tuiHome, /Available Tools/);
+assert.match(tuiHome, /Available Skills/);
+assert.match(tuiHome, /deepseek-chat/);
+assert.match(tuiHome, /Welcome to Emily Agent! Type your message or \/help for commands\./);
+assert.ok(!tuiHome.includes("undefined"));
 assert.equal(isTuiAbortError(Object.assign(new Error("Aborted with Ctrl+C"), {
   name: "AbortError",
   code: "ABORT_ERR",

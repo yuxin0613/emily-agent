@@ -107,6 +107,16 @@ assert.equal(migratedRegistry.getConfig("legacy-main").model, "legacy-model");
 assert.equal(JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")).defaultProviderId, "legacy-main");
 await assert.rejects(() => access(legacyProviderConfigPath(legacyConfigDir)), /ENOENT/);
 
+const envConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-env-provider-config-"));
+const previousEnvFileKey = process.env.EMILY_TEST_ENV_FILE_KEY;
+delete process.env.EMILY_TEST_ENV_FILE_KEY;
+await writeFile(path.join(envConfigDir, ".env"), 'EMILY_TEST_ENV_FILE_KEY="loaded-from-env-file"\n', "utf8");
+const envRuntime = await createRuntime({ dataDir: envConfigDir, roleDir });
+assert.equal(process.env.EMILY_TEST_ENV_FILE_KEY, "loaded-from-env-file");
+await envRuntime.shutdown();
+if (previousEnvFileKey === undefined) delete process.env.EMILY_TEST_ENV_FILE_KEY;
+else process.env.EMILY_TEST_ENV_FILE_KEY = previousEnvFileKey;
+
 const concurrentConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-concurrent-"));
 const concurrentA = await ProviderRegistry.create({ dataDir: concurrentConfigDir });
 const concurrentB = await ProviderRegistry.create({ dataDir: concurrentConfigDir });
