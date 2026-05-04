@@ -488,6 +488,25 @@ To deploy a real 1.0 environment, replace the default `echo` provider with a pro
 
 See [user-guide.md](./user-guide.md) for day-to-day usage, provider setup, sessions, long tasks, tools, skills, memory, and operations.
 
+## Third-Party Projects
+
+Emily AgentOS keeps third-party references explicit so downstream agent applications can audit provenance and licensing clearly.
+
+Design references:
+
+- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and builtin skills under its existing ToolGateway, approval, role, and audit model.
+- [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics and local agent runtime packaging conventions. Emily AgentOS keeps its own runtime architecture and install script.
+
+Optional integrations:
+
+- [Ollama](https://ollama.com/): optional local provider/search backend.
+- [GitHub CLI](https://cli.github.com/): optional executor for structured GitHub PR and issue operations.
+- [DuckDuckGo](https://duckduckgo.com/): optional bounded web search source.
+- [Chroma](https://www.trychroma.com/), [Qdrant](https://qdrant.tech/), [Milvus](https://milvus.io/), and [pgvector](https://github.com/pgvector/pgvector): optional external vector memory adapters.
+- `llm_wiki`: optional separately deployed knowledge service integration through the builtin `llm-wiki` skill and audited `llm_wiki` tool.
+
+Unless otherwise stated, referenced projects are not vendored into this repository; their own licenses apply to their projects and services.
+
 ## License
 
-GPL-3.0-only. See [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

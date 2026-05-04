@@ -4,7 +4,7 @@
   "description": "A Node.js multi-agent runtime with layered memory.",
   "type": "module",
   "private": true,
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "scripts": {
     "start": "node src/index.ts",
     "tui": "node src/index.ts --tui",
