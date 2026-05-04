@@ -29,6 +29,15 @@ try {
   assert.equal(timeline.run?.status, "done");
   assert.equal(timeline.tasks.length, 0);
   assert.ok(!timeline.events.some((event) => event.type.startsWith("task.")));
+
+  const modelResponse = await runtime.handleUserMessage("现在使用的是哪个模型", {
+    sessionId: "chat-routing",
+    source: "test",
+  });
+  assert.match(modelResponse.content, /当前主模型是 echo-local/);
+  assert.match(modelResponse.content, /Provider: echo/);
+  assert.deepEqual(modelResponse.delegatedTo, []);
+  assert.equal(modelResponse.needsUserInput, undefined);
 } finally {
   await runtime.shutdown();
 }

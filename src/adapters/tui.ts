@@ -340,7 +340,9 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
 
 async function sendChat(runtime, state, message: string): Promise<void> {
   output.write(formatTuiSubmittedInput(message));
-  const detachProgress = attachProgressReporter(runtime, state);
+  const thinking = createThinkingIndicator();
+  const detachModelThinking = attachModelThinkingReporter(runtime, state, thinking);
+  const detachProgress = attachProgressReporter(runtime, state, () => thinking.stop());
   const startedAt = Date.now();
   let response;
   try {
@@ -350,6 +352,8 @@ async function sendChat(runtime, state, message: string): Promise<void> {
       permissionMode: state.permissionMode,
     });
   } finally {
+    thinking.stop();
+    detachModelThinking();
     detachProgress();
   }
   if (response.runId) state.lastRunId = response.runId;
@@ -564,7 +568,68 @@ async function printTrace(runtime, taskId?: string): Promise<void> {
   printJson(trace);
 }
 
-function attachProgressReporter(runtime, state): () => void {
+function attachModelThinkingReporter(runtime, state, thinking: ReturnType<typeof createThinkingIndicator>): () => void {
+  if (!runtime.addLifecycleHook) return () => undefined;
+  const detachBefore = runtime.addLifecycleHook("beforeModelComplete", (event) => {
+    const source = String(event.payload?.source || "");
+    if (source && source !== `session:${state.sessionId}`) return;
+    thinking.start();
+  });
+  const detachAfter = runtime.addLifecycleHook("afterModelComplete", (event) => {
+    const source = String(event.payload?.source || "");
+    if (source && source !== `session:${state.sessionId}`) return;
+    thinking.stop();
+  });
+  return () => {
+    detachBefore();
+    detachAfter();
+  };
+}
+
+function createThinkingIndicator(): { start: () => void; stop: () => void } {
+  let timer: NodeJS.Timeout | null = null;
+  let frame = 0;
+  let active = false;
+  let lineVisible = false;
+  const render = (): void => {
+    if (!output.isTTY) return;
+    if (!lineVisible) {
+      output.write("\n");
+      lineVisible = true;
+    }
+    output.write(`\r\x1b[2K${formatThinkingFrame(frame)}`);
+    frame += 1;
+  };
+  return {
+    start() {
+      if (active) return;
+      active = true;
+      frame = 0;
+      render();
+      timer = setInterval(render, 140);
+    },
+    stop() {
+      if (!active) return;
+      active = false;
+      if (timer) clearInterval(timer);
+      timer = null;
+      if (output.isTTY && lineVisible) output.write("\r\x1b[2K");
+      lineVisible = false;
+    },
+  };
+}
+
+export function formatThinkingFrame(frame: number): string {
+  const text = "thinking...";
+  const length = text.length;
+  const position = frame % (length * 2);
+  const boldUntil = position <= length ? position : length - (position - length);
+  return [...text].map((char, index) => (
+    index < boldUntil ? style(char, "bold") : style(char, "gray")
+  )).join("");
+}
+
+function attachProgressReporter(runtime, state, beforePrint: () => void = () => undefined): () => void {
   const manager = runtime.roleAgentManager;
   if (!manager?.on || !manager?.off) return () => undefined;
   const seen = new Set<string>();
@@ -578,7 +643,10 @@ function attachProgressReporter(runtime, state): () => void {
     seen.add(eventKey);
     if (task?.metadata?.sessionId && task.metadata.sessionId !== state.sessionId) return;
     const line = formatProgressEvent(type, task, event);
-    if (line) output.write(`${style("  |", "gray")} ${style(line, "gray")}\n`);
+    if (line) {
+      beforePrint();
+      output.write(`${style("  |", "gray")} ${style(line, "gray")}\n`);
+    }
   };
   manager.on("event", handler);
   return () => manager.off("event", handler);
@@ -783,8 +851,6 @@ export function formatTuiSubmittedInput(message: string, width = terminalWidth()
     const marker = index === 0 ? style("●", "cyan") : " ";
     lines.push(`${marker} ${line}`);
   });
-  lines.push("");
-  lines.push(style("Initializing agent...", "gray"));
   lines.push(style(rule, "gray"));
   lines.push("");
   return `${lines.join("\n")}\n`;

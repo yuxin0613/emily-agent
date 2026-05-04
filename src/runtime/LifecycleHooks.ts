@@ -5,6 +5,8 @@ export type LifecycleHookName =
   | "afterRun"
   | "beforeTaskRun"
   | "afterTaskRun"
+  | "beforeModelComplete"
+  | "afterModelComplete"
   | "beforeMemoryCommit"
   | "afterMemoryCommit"
   | "beforeContextBuild"

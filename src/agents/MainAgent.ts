@@ -143,6 +143,39 @@ export class MainAgent {
 
       const intent = classifyUserMessageIntent(normalizedInput);
       if (intent === "chat") {
+        if (isModelIdentityQuestion(normalizedInput)) {
+          const content = formatCurrentModelAnswer(this.model);
+          await this.remember({
+            scope: sessionId,
+            kind: "message:assistant",
+            content,
+            metadata: {
+              source: "main-agent",
+              runId: run.id,
+              intent,
+              delegatedTo: [],
+              answeredFrom: "runtime_model_config",
+            },
+          });
+          this.taskStore.completeRun(run.id, "done");
+          await this.hooks?.emit("afterRun", {
+            run: this.taskStore.getRun(run.id) || run,
+            payload: {
+              status: "done",
+              intent,
+              delegatedTo: [],
+              answeredFrom: "runtime_model_config",
+            },
+          });
+          return {
+            agent: this.name,
+            runId: run.id,
+            content,
+            delegatedTo: [],
+            subResults: [],
+          };
+        }
+
         const contextBundle = this.contextEngine
           ? await this.contextEngine.build({
             query: normalizedInput,
@@ -672,13 +705,14 @@ export class MainAgent {
       "Write a concise, helpful response in Chinese.",
     ].join("\n");
 
-    const result = normalizeModelCompleteResult(await this.model.complete({
+    const result = await this.completeWithMainModel({
       agent: this.name,
       role: "Communicate with the user and coordinate sub-agents.",
       prompt,
       runId,
       source: sessionId ? `session:${sessionId}` : "main-agent",
-    }), this.model);
+      phase: "synthesize",
+    });
     return result.content;
   }
 
@@ -706,14 +740,69 @@ export class MainAgent {
       "Do not create a task plan, delegate to sub-agents, or ask for task scope unless the user explicitly asks you to do work.",
     ].join("\n");
 
-    const result = normalizeModelCompleteResult(await this.model.complete({
+    const result = await this.completeWithMainModel({
       agent: this.name,
       role: "Direct conversation without task delegation.",
       prompt,
       runId,
       source: sessionId ? `session:${sessionId}` : "main-agent",
-    }), this.model);
+      phase: "direct_chat",
+    });
     return result.content;
+  }
+
+  private async completeWithMainModel({
+    agent,
+    role,
+    prompt,
+    runId,
+    source,
+    phase,
+  }: {
+    agent: string;
+    role: string;
+    prompt: string;
+    runId?: string;
+    source?: string;
+    phase: string;
+  }) {
+    const payload = {
+      agent,
+      role,
+      runId: runId || "",
+      source: source || "",
+      phase,
+      providerId: this.model.id,
+      model: this.model.model,
+    };
+    await this.hooks?.emit("beforeModelComplete", { payload });
+    try {
+      const result = normalizeModelCompleteResult(await this.model.complete({
+        agent,
+        role,
+        prompt,
+        runId,
+        source,
+      }), this.model);
+      await this.hooks?.emit("afterModelComplete", {
+        payload: {
+          ...payload,
+          finishReason: result.finishReason || "",
+          latencyMs: result.latencyMs || 0,
+          providerId: result.providerId || this.model.id,
+          model: result.model || this.model.model,
+        },
+      });
+      return result;
+    } catch (error) {
+      await this.hooks?.emit("afterModelComplete", {
+        payload: {
+          ...payload,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      throw error;
+    }
   }
 }
 
@@ -745,6 +834,17 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
   }
   if ([...compact].length <= 18) return "chat";
   return "task";
+}
+
+function isModelIdentityQuestion(input: string): boolean {
+  return /(?:现在|当前|正在|用的|使用的)?.{0,8}(?:哪个|那个|什么|啥)?.{0,6}(?:模型|model|provider)|(?:模型|model|provider).{0,8}(?:哪个|那个|什么|啥)/i.test(input);
+}
+
+function formatCurrentModelAnswer(model: ModelProvider): string {
+  return [
+    `当前主模型是 ${model.model}。`,
+    `Provider: ${model.id}`,
+  ].join("\n");
 }
 
 function plannerPrompt(input: string, deliveryLevel: string): string {
