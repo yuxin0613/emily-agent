@@ -12,6 +12,8 @@ curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts
 
 If the public GitHub URL is different, set `EMILY_REPO_URL` before running the installer.
 
+SQLite persistence uses `better-sqlite3`. Most Node 22 platforms install a prebuilt binary; unsupported platforms may need local native build tools.
+
 After installation:
 
 ```bash
@@ -468,7 +470,7 @@ This is expected. Add `EMILY_HTTP_EGRESS_ALLOWLIST` for local development.
 
 Node prints SQLite experimental warnings:
 
-This is expected because the runtime uses `node:sqlite`.
+Upgrade to the current baseline. The runtime now uses `better-sqlite3` instead of Node's experimental `node:sqlite`, so direct `node src/index.ts ...` runs should stay quiet.
 
 External vector tests are skipped:
 

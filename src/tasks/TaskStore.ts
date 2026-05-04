@@ -1,9 +1,9 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Session, SessionMessage, SessionMessageRole, SessionStatus, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
+import { openSqliteDatabase, type SqliteDatabase } from "../storage/Sqlite.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "./errors.ts";
 import { RuntimeEventFactory } from "../events/RuntimeEventFactory.ts";
 
@@ -55,7 +55,7 @@ interface AddSessionMessageInput {
 export class TaskStore {
   dataDir: string;
   taskDir: string;
-  db: DatabaseSync;
+  db: SqliteDatabase;
 
   static async create({ dataDir }: { dataDir: string }): Promise<TaskStore> {
     const taskDir = path.join(dataDir, "tasks");
@@ -73,12 +73,7 @@ export class TaskStore {
   constructor({ dataDir, taskDir, dbPath }: { dataDir: string; taskDir: string; dbPath: string }) {
     this.dataDir = dataDir;
     this.taskDir = taskDir;
-    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000;
-      PRAGMA foreign_keys = ON;
-    `);
+    this.db = openSqliteDatabase(dbPath);
   }
 
   migrate(): void {
@@ -2119,7 +2114,7 @@ function truncateText(value: string, maxLength: number): string {
   return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
-function count(db: DatabaseSync, sql: string): number {
+function count(db: SqliteDatabase, sql: string): number {
   const row = db.prepare(sql).get() as { count: number };
   return row.count;
 }

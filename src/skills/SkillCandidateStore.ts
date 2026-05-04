@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
+import { openSqliteDatabase, type SqliteDatabase } from "../storage/Sqlite.ts";
 import type { SkillCandidate, SkillCandidateProposal, SkillCandidateStatus } from "../types.ts";
 import { parseSkillMarkdown, SkillRegistry } from "./SkillRegistry.ts";
 
@@ -36,7 +36,7 @@ interface SkillCandidateRow {
 }
 
 export class SkillCandidateStore {
-  db: DatabaseSync;
+  db: SqliteDatabase;
   skillDir: string;
 
   static create({ dataDir, skillDir = path.join(process.cwd(), "skills") }: { dataDir: string; skillDir?: string }): SkillCandidateStore {
@@ -49,13 +49,8 @@ export class SkillCandidateStore {
   }
 
   constructor({ dbPath, skillDir }: { dbPath: string; skillDir: string }) {
-    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
+    this.db = openSqliteDatabase(dbPath);
     this.skillDir = skillDir;
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000;
-      PRAGMA foreign_keys = ON;
-    `);
   }
 
   migrate(): void {

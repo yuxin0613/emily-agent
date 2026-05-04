@@ -1,4 +1,4 @@
-import type { DatabaseSync } from "node:sqlite";
+import { runSqliteWithRetry, type SqliteDatabase } from "./Sqlite.ts";
 
 export interface Migration {
   version: number;
@@ -7,10 +7,10 @@ export interface Migration {
 }
 
 export class SchemaMigrator {
-  db: DatabaseSync;
+  db: SqliteDatabase;
   namespace: string;
 
-  constructor({ db, namespace }: { db: DatabaseSync; namespace: string }) {
+  constructor({ db, namespace }: { db: SqliteDatabase; namespace: string }) {
     this.db = db;
     this.namespace = namespace;
     this.db.exec(`
@@ -26,7 +26,7 @@ export class SchemaMigrator {
 
   apply(migrations: Migration[]): void {
     const ordered = [...migrations].sort((a, b) => a.version - b.version);
-    this.db.exec("BEGIN IMMEDIATE");
+    runSqliteWithRetry(() => this.db.exec("BEGIN IMMEDIATE"));
     try {
       for (const migration of ordered) {
         if (this.hasMigration(migration.version)) continue;

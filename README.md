@@ -4,7 +4,7 @@ Emily AgentOS is a local-first Node.js multi-agent runtime for building agent ap
 
 The current codebase is prepared for a 1.0 baseline: source typecheck, full test suite, dependency audit, runtime doctor, and security audit all pass in the default local setup.
 
-> Runtime note: the project runs TypeScript directly on Node.js 22.18+ using native type stripping. `node:sqlite` is still experimental in Node, so SQLite warnings are expected during tests and local runs.
+> Runtime note: the project runs TypeScript directly on Node.js 22.18+ using native type stripping. SQLite persistence uses the stable `better-sqlite3` driver instead of Node's experimental `node:sqlite`.
 
 ## Why This Exists
 
@@ -38,6 +38,7 @@ Requirements:
 
 - Node.js `>=22.18`
 - npm
+- native SQLite driver support via `better-sqlite3`; prebuilt binaries are used when available, while unsupported platforms may need local build tools
 - optional: `gh` for GitHub tool actions
 - optional: external model API key, Ollama, or OpenAI-compatible gateway
 

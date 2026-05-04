@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import type {
   Experience,
@@ -13,6 +12,7 @@ import type {
 import { ExperienceMatcher } from "./ExperienceMatcher.ts";
 import { ScalarQuantCompressor, type CompressedVector, type VectorCompressor } from "./VectorCompressor.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
+import { openSqliteDatabase, type SqliteDatabase } from "../storage/Sqlite.ts";
 
 interface ExperienceRow {
   id: string;
@@ -73,7 +73,7 @@ interface ExperienceFeedbackRow {
 }
 
 export class ExperienceStore {
-  db: DatabaseSync;
+  db: SqliteDatabase;
   compressor: VectorCompressor;
   matcher: ExperienceMatcher;
 
@@ -93,14 +93,9 @@ export class ExperienceStore {
   }
 
   constructor({ dbPath, compressor }: { dbPath: string; compressor: VectorCompressor }) {
-    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
+    this.db = openSqliteDatabase(dbPath);
     this.compressor = compressor;
     this.matcher = new ExperienceMatcher({ compressor });
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000;
-      PRAGMA foreign_keys = ON;
-    `);
   }
 
   migrate(): void {

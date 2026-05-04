@@ -1,10 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
 import type { ModelCompleteInput, ModelCompleteResult, ModelUsage, ProviderConfig } from "./ModelProvider.ts";
 import { ProviderCallError } from "./ModelProvider.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
+import { openSqliteDatabase, type SqliteDatabase } from "../storage/Sqlite.ts";
 
 export interface ProviderUsageRecord {
   id: string;
@@ -71,7 +71,7 @@ interface ProviderUsageRow {
 
 export class ProviderUsageStore {
   dataDir: string;
-  db: DatabaseSync;
+  db: SqliteDatabase;
 
   static async create({ dataDir }: { dataDir: string }): Promise<ProviderUsageStore> {
     await mkdir(dataDir, { recursive: true });
@@ -85,12 +85,7 @@ export class ProviderUsageStore {
 
   constructor({ dataDir, dbPath }: { dataDir: string; dbPath: string }) {
     this.dataDir = dataDir;
-    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000;
-      PRAGMA foreign_keys = ON;
-    `);
+    this.db = openSqliteDatabase(dbPath);
   }
 
   migrate(): void {
