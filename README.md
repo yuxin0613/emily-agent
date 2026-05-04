@@ -28,7 +28,7 @@ Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime
 - **Lease token safety**: worker heartbeat, finish, fail, and cancel paths require the current lease token, so stale workers cannot overwrite a retried task.
 - **Provider registry**: main agent and each role can choose separate providers/models; subagents fall back to the main provider when role-specific provider selection cannot be used.
 - **Memory and experience**: short-term memory, file memory, vector memory, daily experience extraction, update-over-duplicate semantics, and compressed recall.
-- **Tools and skills**: declarative tools with hard permission filtering; builtin skills for planning, coding, research, web search, GitHub, review, recovery, and memory curation.
+- **Tools and skills**: declarative tools with hard permission filtering; builtin skills for planning, coding, research, web search, GitHub, review, recovery, and memory curation; external skill folders can be mounted without code changes.
 - **Control plane**: TUI, WebUI, REST endpoints, SSE events, and typed WebSocket gateway share the same runtime commands.
 - **Security defaults**: token-protected Web/API, origin checks for unsafe methods, bounded HTTP bodies, tool approvals, SSRF denylist, provider secret validation, and runtime security audit.
 
@@ -125,6 +125,7 @@ Useful environment variables:
 | `EMILY_WEB_WRITE_TOKEN` | Optional write-scoped Web/API/Gateway token for trusted automation clients that must not run future danger commands. |
 | `EMILY_ROLE_DIR` | Override `agents/` role definition directory. |
 | `EMILY_SKILL_DIR` | Override `skills/` skill directory. |
+| `EMILY_SKILL_DIRS` | Add one or more external skill roots, separated by the platform path separator (`:` on macOS/Linux, `;` on Windows). |
 | `EMILY_HTTP_EGRESS_ALLOWLIST` | Comma-separated HTTP egress allowlist for private/local destinations. |
 | `EMILY_HTTP_ALLOW_PRIVATE` | Set to `true` only for local development that must access private hosts. |
 | `EMILY_WEB_SEARCH_PROVIDER` | `duckduckgo`, `endpoint`, or `ollama`. |
@@ -248,8 +249,9 @@ Experience is higher-value memory:
 
 Skills are reusable workflows:
 
-- builtin skills: `planning`, `coding`, `research`, `web-search`, `github`, `llm-wiki`, `review`, `recovery`, `memory-curation`;
-- file skills: `skills/<skill>/skill.md`;
+- builtin skills: `planning`, `coding`, `research`, `web-search`, `github`, `review`, `recovery`, `memory-curation`;
+- file skills: `skills/<skill>/skill.md` or `skills/<skill>/SKILL.md`;
+- external skill folders can be mounted with `EMILY_SKILL_DIRS`, using the platform path separator, or by dropping/symlinking a skill folder under the configured skill directory;
 - skill candidates are proposed from repeated successful work and require approval before becoming active files.
 
 ## Tools And Permission Modes
@@ -484,7 +486,7 @@ test/
 agents/
   <role>/agent.md
 skills/
-  <skill>/skill.md
+  <skill>/skill.md or <skill>/SKILL.md
 ```
 
 ## 1.0 Readiness Checklist
@@ -508,7 +510,7 @@ Emily AgentOS keeps third-party references explicit so downstream agent applicat
 
 Design references:
 
-- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and builtin skills under its existing ToolGateway, approval, role, and audit model.
+- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model.
 - [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics and local agent runtime packaging conventions. Emily AgentOS keeps its own runtime architecture and install script.
 
 Optional integrations:
@@ -517,7 +519,7 @@ Optional integrations:
 - [GitHub CLI](https://cli.github.com/): optional executor for structured GitHub PR and issue operations.
 - [DuckDuckGo](https://duckduckgo.com/): optional bounded web search source.
 - [Chroma](https://www.trychroma.com/), [Qdrant](https://qdrant.tech/), [Milvus](https://milvus.io/), and [pgvector](https://github.com/pgvector/pgvector): optional external vector memory adapters.
-- `llm_wiki`: optional separately deployed knowledge service integration through the builtin `llm-wiki` skill and audited `llm_wiki` tool.
+- `llm_wiki`: optional separately deployed knowledge service integration through an external `llm-wiki` skill package and the audited `llm_wiki` tool.
 
 Unless otherwise stated, referenced projects are not vendored into this repository; their own licenses apply to their projects and services.
 

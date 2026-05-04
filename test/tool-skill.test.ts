@@ -32,6 +32,7 @@ assert.deepEqual(toolHints.unknown, ["missing_tool"]);
 assert.ok(gateway.renderToolContext(toolHints).some((line) => line.includes("read_file")));
 
 const skillDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-skills-"));
+const pluginSkillDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-plugin-skills-"));
 await mkdir(path.join(skillDir, "local-quality"), { recursive: true });
 await writeFile(path.join(skillDir, "local-quality", "skill.md"), [
   "---",
@@ -48,11 +49,31 @@ await writeFile(path.join(skillDir, "local-quality", "skill.md"), [
   "LOCAL_QUALITY_SKILL_MARKER",
   "",
 ].join("\n"), "utf8");
+await mkdir(path.join(pluginSkillDir, "llm-wiki"), { recursive: true });
+await writeFile(path.join(pluginSkillDir, "llm-wiki", "SKILL.md"), [
+  "---",
+  "name: \"llm-wiki\"",
+  "title: \"LLM Wiki\"",
+  "description: \"External LLM Wiki adapter skill marker.\"",
+  "capabilities:",
+  "  - durable knowledge",
+  "tool_hints:",
+  "  - llm_wiki",
+  "aliases:",
+  "  - wiki",
+  "  - llm_wiki",
+  "---",
+  "EXTERNAL_LLM_WIKI_SKILL_MARKER",
+  "",
+].join("\n"), "utf8");
 
-const skillRegistry = await SkillRegistry.create({ skillDir });
+const defaultOnlySkillRegistry = await SkillRegistry.create({ skillDir, includeBuiltIns: true });
+assert.equal(defaultOnlySkillRegistry.get("llm-wiki"), null);
+
+const skillRegistry = await SkillRegistry.create({ skillDirs: [skillDir, pluginSkillDir] });
 assert.equal(skillRegistry.get("github")?.source, "builtin");
 assert.equal(skillRegistry.get("web-search")?.source, "builtin");
-assert.equal(skillRegistry.get("llm-wiki")?.source, "builtin");
+assert.equal(skillRegistry.get("llm-wiki")?.source, "file");
 const builtInSkillHints = skillRegistry.resolveHints(["github", "websearch"]);
 assert.ok(builtInSkillHints.matched.some((skill) => skill.name === "github"));
 assert.ok(builtInSkillHints.matched.some((skill) => skill.name === "web-search"));
@@ -81,6 +102,7 @@ const runtime = await createRuntime({
   dataDir,
   roleDir,
   skillDir,
+  skillDirs: [skillDir, pluginSkillDir],
   providers: [{
     id: "main-echo",
     type: "echo",

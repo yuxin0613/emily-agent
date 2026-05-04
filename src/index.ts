@@ -68,6 +68,7 @@ function printHelp(): void {
     "  EMILY_DATA_DIR        runtime state directory",
     "  EMILY_ROLE_DIR        role agent.md directory",
     "  EMILY_SKILL_DIR       skill directory",
+    "  EMILY_SKILL_DIRS      additional skill roots, path-delimiter separated",
     "  EMILY_WEB_TOKEN       WebUI/Gateway auth token",
     "  PORT                  WebUI port, default 3000",
   ].join("\n"));
