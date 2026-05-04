@@ -66,6 +66,23 @@ try {
   });
   assert.equal(providerDisable.ok, true);
 
+  const providerAddReadToken = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "provider-add-read-1",
+    method: "providers.add",
+    params: { id: "gateway-read-extra", type: "echo", model: "gateway-read-extra-model" },
+  }, { maxPermission: "read" });
+  assert.equal(providerAddReadToken.ok, false);
+  assert.match(String(providerAddReadToken.error?.message || ""), /requires write permission/);
+
+  const toolsListReadToken = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "tools-read-1",
+    method: "tools.list",
+    params: {},
+  }, { maxPermission: "read" });
+  assert.equal(toolsListReadToken.ok, true);
+
   const toolRun = await dispatchGatewayRequest(runtime as never, {
     type: "request",
     id: "tool-1",

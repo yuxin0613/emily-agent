@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AgentStatus, MemoryCandidate, Metadata, Run, RuntimeAnomaly, Session, SessionMessage, SessionMessageRole, SessionStatus, Task, TaskDependency, TaskEvent, TaskGraph, TaskStatus, Timeline } from "../types.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
-import { openSqliteDatabase, type SqliteDatabase } from "../storage/Sqlite.ts";
+import { openSqliteDatabase, runSqliteWithRetry, type SqliteDatabase } from "../storage/Sqlite.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "./errors.ts";
 import { RuntimeEventFactory } from "../events/RuntimeEventFactory.ts";
 
@@ -273,9 +273,21 @@ export class TaskStore {
   }
 
   ensureColumn(table: string, column: string, definition: string): void {
+    runSqliteWithRetry(() => {
+      const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (rows.some((row) => row.name === column)) return;
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      } catch (error) {
+        if (isDuplicateColumnError(error) && this.columnExists(table, column)) return;
+        throw error;
+      }
+    });
+  }
+
+  private columnExists(table: string, column: string): boolean {
     const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (rows.some((row) => row.name === column)) return;
-    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    return rows.some((row) => row.name === column);
   }
 
   createTask({
@@ -2128,4 +2140,8 @@ function safeDbOperation<T>(operation: () => T): T | { ok: false; error: string 
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  return error instanceof Error && /duplicate column name/i.test(error.message);
 }

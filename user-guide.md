@@ -7,10 +7,10 @@ This guide explains how to use Emily AgentOS as a local multi-agent runtime and 
 One-command install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
-If the public GitHub URL is different, set `EMILY_REPO_URL` before running the installer.
+The repository is private until the 1.0 hardening pass is complete, so this command requires GitHub access to `yuxin0613/emily-agent`. If the public GitHub URL is different, set `EMILY_REPO_URL` before running the installer.
 
 SQLite persistence uses `better-sqlite3`. Most Node 22 platforms install a prebuilt binary; unsupported platforms may need local native build tools.
 
@@ -484,13 +484,14 @@ Set `EMILY_PROVIDER_INTEGRATION=true` and provider environment variables.
 
 Before production use:
 
-1. Set `EMILY_WEB_TOKEN` to a strong secret.
-2. Configure a real model provider.
-3. Keep raw API keys out of config files.
-4. Review role tool permissions.
-5. Keep `EMILY_HTTP_ALLOW_PRIVATE` disabled.
-6. Run `npm run check`.
-7. Run `npm audit --audit-level=moderate`.
-8. Run `node src/index.ts --doctor --deep`.
-9. Run `node src/index.ts --security-audit`.
-10. Verify WebUI, TUI, and Gateway flows against your intended deployment.
+1. Set `EMILY_WEB_TOKEN` to a strong admin secret.
+2. Use `EMILY_WEB_READ_TOKEN` or `EMILY_WEB_WRITE_TOKEN` for non-admin WebSocket/REST clients.
+3. Configure a real model provider.
+4. Keep raw API keys out of config files.
+5. Review role tool permissions.
+6. Keep `EMILY_HTTP_ALLOW_PRIVATE` disabled.
+7. Run `npm run check`.
+8. Run `npm audit --audit-level=moderate`.
+9. Run `node src/index.ts --doctor --deep`.
+10. Run `node src/index.ts --security-audit`.
+11. Verify WebUI, TUI, and Gateway flows against your intended deployment.

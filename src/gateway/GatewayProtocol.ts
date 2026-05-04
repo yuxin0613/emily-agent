@@ -148,10 +148,16 @@ export function parseGatewayRequest(value: unknown): GatewayRequest {
   };
 }
 
-export async function dispatchGatewayRequest(runtime: GatewayRuntime, request: GatewayRequest): Promise<GatewayResponse> {
+export async function dispatchGatewayRequest(
+  runtime: GatewayRuntime,
+  request: GatewayRequest,
+  options: { maxPermission?: CommandPermission } = {},
+): Promise<GatewayResponse> {
   try {
     const params = request.params || {};
-    const result = await dispatch(runtime, request.method, params);
+    const maxPermission = options.maxPermission || "danger";
+    assertGatewayMethodPermission(request.method, params, maxPermission);
+    const result = await dispatch(scopeRuntime(runtime, maxPermission), request.method, params);
     return { type: "response", id: request.id, ok: true, result };
   } catch (error) {
     return {
@@ -196,6 +202,70 @@ export function gatewayProtocolSpec() {
 
 function isGatewayMethod(value: unknown): value is GatewayMethod {
   return typeof value === "string" && (GATEWAY_METHODS as string[]).includes(value);
+}
+
+function scopeRuntime(runtime: GatewayRuntime, maxPermission: CommandPermission): GatewayRuntime {
+  return {
+    ...runtime,
+    runCommand: (name, options = {}) => runtime.runCommand(name, {
+      ...options,
+      maxPermission: minCommandPermission(options.maxPermission, maxPermission),
+    }),
+  };
+}
+
+function assertGatewayMethodPermission(
+  method: GatewayMethod,
+  params: Record<string, unknown>,
+  maxPermission: CommandPermission,
+): void {
+  const required = gatewayMethodPermission(method, params);
+  if (permissionRank(required) <= permissionRank(maxPermission)) return;
+  throw new Error(`Gateway method ${method} requires ${required} permission; caller is limited to ${maxPermission}.`);
+}
+
+function gatewayMethodPermission(method: GatewayMethod, params: Record<string, unknown>): CommandPermission {
+  if (method === "doctor.run" && params.repair === true) return "write";
+  if (method === "diagnostics.run" && params.repair === true) return "write";
+  if (method === "commands.run") return "read";
+  if (READ_GATEWAY_METHODS.has(method)) return "read";
+  return "write";
+}
+
+const READ_GATEWAY_METHODS = new Set<GatewayMethod>([
+  "sessions.list",
+  "providers.list",
+  "providers.health",
+  "providers.usage",
+  "roles.list",
+  "tools.list",
+  "skills.list",
+  "skills.candidates.list",
+  "experiences.recall",
+  "timeline.get",
+  "diagnostics.run",
+  "doctor.run",
+  "security.audit",
+  "sessions.resume_latest",
+  "sessions.export",
+  "sessions.compact_preview",
+  "sessions.usage",
+  "commands.list",
+  "commands.run",
+  "cron.list",
+  "context.build",
+  "router.route",
+]);
+
+function minCommandPermission(left: CommandPermission | undefined, right: CommandPermission): CommandPermission {
+  if (!left) return right;
+  return permissionRank(left) <= permissionRank(right) ? left : right;
+}
+
+function permissionRank(permission: CommandPermission): number {
+  if (permission === "danger") return 2;
+  if (permission === "write") return 1;
+  return 0;
 }
 
 async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: Record<string, unknown>): Promise<unknown> {

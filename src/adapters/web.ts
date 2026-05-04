@@ -1,7 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
-import { CommandPermissionError } from "../commands/CommandRegistry.ts";
+import { CommandPermissionError, type CommandPermission } from "../commands/CommandRegistry.ts";
 import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { webAppHtml } from "./webUi.ts";
@@ -19,6 +19,8 @@ export async function startWebServer({
   port,
   host = "127.0.0.1",
   authToken = process.env.EMILY_WEB_TOKEN || randomUUID(),
+  readAuthToken = process.env.EMILY_WEB_READ_TOKEN || "",
+  writeAuthToken = process.env.EMILY_WEB_WRITE_TOKEN || "",
 }: {
   runtime: {
     handleUserMessage: (message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown }) => Promise<unknown>;
@@ -105,6 +107,8 @@ export async function startWebServer({
   port: number;
   host?: string;
   authToken?: string;
+  readAuthToken?: string;
+  writeAuthToken?: string;
 }): Promise<WebServerHandle> {
   const server = http.createServer(async (request, response) => {
     try {
@@ -118,13 +122,26 @@ export async function startWebServer({
         return sendJson(response, 200, { ok: true, runtime: runtime.health(), gateway: gatewayProtocolSpec() });
       }
 
-      if (!isAuthorized(request, url, authToken)) {
+      const auth = authenticate(request, url, { authToken, readAuthToken, writeAuthToken });
+      if (!auth) {
         return sendJson(response, 401, { error: "Unauthorized" });
       }
 
       if (isUnsafeMethod(request.method) && !isAllowedOrigin(request, url)) {
         return sendJson(response, 403, { error: "Forbidden origin" });
       }
+
+      if (isUnsafeMethod(request.method) && !canUsePermission(auth.maxPermission, "write")) {
+        return sendJson(response, 403, { error: `This token is limited to ${auth.maxPermission} permission.` });
+      }
+
+      const runCommand = (
+        name: string,
+        options: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text"; maxPermission?: CommandPermission } = {},
+      ) => runtime.runCommand(name, {
+        ...options,
+        maxPermission: minCommandPermission(options.maxPermission, auth.maxPermission),
+      });
 
       if (request.method === "GET" && url.pathname === "/events-snapshot") {
         return sendJson(response, 200, runtime.taskStore.getLatestEvents({
@@ -134,7 +151,10 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/doctor") {
-        return sendJson(response, 200, await runtime.runCommand("doctor", {
+        if (url.searchParams.get("repair") === "true" && !canUsePermission(auth.maxPermission, "write")) {
+          return sendJson(response, 403, { error: `Doctor repair requires write permission; token is limited to ${auth.maxPermission}.` });
+        }
+        return sendJson(response, 200, await runCommand("doctor", {
           input: {
             deep: url.searchParams.get("deep") === "true",
             repair: url.searchParams.get("repair") === "true",
@@ -147,17 +167,17 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/providers") {
-        return sendJson(response, 200, await runtime.runCommand("providers"));
+        return sendJson(response, 200, await runCommand("providers"));
       }
 
       if (request.method === "GET" && url.pathname === "/providers/health") {
-        return sendJson(response, 200, await runtime.runCommand("provider.health", {
+        return sendJson(response, 200, await runCommand("provider.health", {
           input: { deep: url.searchParams.get("deep") === "true" },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/providers/usage") {
-        return sendJson(response, 200, await runtime.runCommand("provider.usage", {
+        return sendJson(response, 200, await runCommand("provider.usage", {
           input: {
             since: url.searchParams.get("since") || undefined,
             until: url.searchParams.get("until") || undefined,
@@ -173,40 +193,40 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/providers") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("provider.add", { input: body }));
+        return sendJson(response, 200, await runCommand("provider.add", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/providers/enable") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("provider.enable", {
+        return sendJson(response, 200, await runCommand("provider.enable", {
           input: { providerId: String(body.id || body.providerId || "") },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/providers/disable") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("provider.disable", {
+        return sendJson(response, 200, await runCommand("provider.disable", {
           input: { providerId: String(body.id || body.providerId || "") },
         }));
       }
 
       if (request.method === "DELETE" && url.pathname === "/providers") {
-        return sendJson(response, 200, await runtime.runCommand("provider.remove", {
+        return sendJson(response, 200, await runCommand("provider.remove", {
           input: { providerId: String(url.searchParams.get("id") || url.searchParams.get("providerId") || "") },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/tools") {
-        return sendJson(response, 200, await runtime.runCommand("tools"));
+        return sendJson(response, 200, await runCommand("tools"));
       }
 
       if (request.method === "POST" && url.pathname === "/tools/execute") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("tool.execute", { input: body }));
+        return sendJson(response, 200, await runCommand("tool.execute", { input: body }));
       }
 
       if (request.method === "GET" && url.pathname === "/skills") {
-        return sendJson(response, 200, await runtime.runCommand("skills"));
+        return sendJson(response, 200, await runCommand("skills"));
       }
 
       if (request.method === "GET" && url.pathname === "/commands") {
@@ -214,45 +234,45 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/cron") {
-        return sendJson(response, 200, await runtime.runCommand("cron.list", {
+        return sendJson(response, 200, await runCommand("cron.list", {
           input: { includePaused: url.searchParams.get("activeOnly") !== "true" },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/cron") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("cron.create", { input: body }));
+        return sendJson(response, 200, await runCommand("cron.create", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/cron/update") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("cron.update", { input: body }));
+        return sendJson(response, 200, await runCommand("cron.update", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/cron/pause") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("cron.pause", { input: { id: String(body.id || "") } }));
+        return sendJson(response, 200, await runCommand("cron.pause", { input: { id: String(body.id || "") } }));
       }
 
       if (request.method === "POST" && url.pathname === "/cron/resume") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("cron.resume", { input: { id: String(body.id || "") } }));
+        return sendJson(response, 200, await runCommand("cron.resume", { input: { id: String(body.id || "") } }));
       }
 
       if (request.method === "POST" && url.pathname === "/cron/run") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("cron.run", { input: { id: String(body.id || "") } }));
+        return sendJson(response, 200, await runCommand("cron.run", { input: { id: String(body.id || "") } }));
       }
 
       if (request.method === "DELETE" && url.pathname === "/cron") {
-        return sendJson(response, 200, await runtime.runCommand("cron.delete", {
+        return sendJson(response, 200, await runCommand("cron.delete", {
           input: { id: String(url.searchParams.get("id") || "") },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/commands/run") {
         const body = await readJson(request);
-        const result = await runtime.runCommand(String(body.name || body.command || ""), {
+        const result = await runCommand(String(body.name || body.command || ""), {
           args: Array.isArray(body.args) ? body.args.map(String) : [],
           input: typeof body.input === "object" && body.input && !Array.isArray(body.input) ? body.input as Record<string, unknown> : body,
           format: body.format === "text" ? "text" : "json",
@@ -264,7 +284,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/skill-candidates") {
-        return sendJson(response, 200, await runtime.runCommand("skills.candidates.list", {
+        return sendJson(response, 200, await runCommand("skills.candidates.list", {
           input: {
             status: url.searchParams.get("status") || undefined,
             limit: parseLimit(url.searchParams.get("limit"), 50, 500),
@@ -274,12 +294,12 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/skill-candidates/build") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("skills.candidates.build", { input: body }));
+        return sendJson(response, 200, await runCommand("skills.candidates.build", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/skill-candidates/approve") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("skills.candidates.approve", {
+        return sendJson(response, 200, await runCommand("skills.candidates.approve", {
           input: {
             candidateId: String(body.candidateId || body.id || ""),
             reason: typeof body.reason === "string" ? body.reason : undefined,
@@ -289,7 +309,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/skill-candidates/reject") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("skills.candidates.reject", {
+        return sendJson(response, 200, await runCommand("skills.candidates.reject", {
           input: {
             candidateId: String(body.candidateId || body.id || ""),
             reason: String(body.reason || "rejected"),
@@ -298,12 +318,12 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/roles") {
-        return sendJson(response, 200, await runtime.runCommand("roles"));
+        return sendJson(response, 200, await runCommand("roles"));
       }
 
       if (request.method === "POST" && url.pathname === "/roles") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("role.add", {
+        return sendJson(response, 200, await runCommand("role.add", {
           input: {
             ...body,
             role: typeof body.role === "string" ? body.role : String(body.name || ""),
@@ -314,13 +334,13 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/roles/defaults") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("role.initialize_defaults", {
+        return sendJson(response, 200, await runCommand("role.initialize_defaults", {
           input: { overwrite: body.overwrite === true },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions") {
-        return sendJson(response, 200, await runtime.runCommand("session.list", {
+        return sendJson(response, 200, await runCommand("session.list", {
           input: {
             status: url.searchParams.get("status") || undefined,
             includeHidden: url.searchParams.get("includeHidden") === "true",
@@ -332,7 +352,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/messages") {
-        return sendJson(response, 200, await runtime.runCommand("session.messages", {
+        return sendJson(response, 200, await runCommand("session.messages", {
           input: {
             sessionId: String(url.searchParams.get("sessionId") || ""),
             limit: parseLimit(url.searchParams.get("limit"), 100, 500),
@@ -341,14 +361,14 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/resume-latest") {
-        return sendJson(response, 200, await runtime.runCommand("session.resume_latest", {
+        return sendJson(response, 200, await runCommand("session.resume_latest", {
           input: { includeHidden: url.searchParams.get("includeHidden") === "true" },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/export") {
         const format = url.searchParams.get("format") === "markdown" ? "markdown" : "json";
-        const result = await runtime.runCommand("session.export", {
+        const result = await runCommand("session.export", {
           input: { sessionId: String(url.searchParams.get("sessionId") || ""), format },
           format: format === "markdown" ? "text" : "json",
         });
@@ -358,7 +378,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/compact-preview") {
-        return sendJson(response, 200, await runtime.runCommand("session.compact_preview", {
+        return sendJson(response, 200, await runCommand("session.compact_preview", {
           input: {
             sessionId: String(url.searchParams.get("sessionId") || ""),
             maxMessages: parseLimit(url.searchParams.get("maxMessages"), 20, 200),
@@ -367,14 +387,14 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/sessions/usage") {
-        return sendJson(response, 200, await runtime.runCommand("session.usage", {
+        return sendJson(response, 200, await runCommand("session.usage", {
           input: { sessionId: String(url.searchParams.get("sessionId") || "") },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/new") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("session.create", {
+        return sendJson(response, 200, await runCommand("session.create", {
           input: {
             title: typeof body.title === "string" ? body.title : "New session",
             source: typeof body.source === "string" ? body.source : "web",
@@ -385,7 +405,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/sessions/clear") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("session.clear", {
+        return sendJson(response, 200, await runCommand("session.clear", {
           input: {
             sessionId: String(body.sessionId || ""),
             source: "web",
@@ -397,14 +417,14 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/sessions/restore") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("session.restore", {
+        return sendJson(response, 200, await runCommand("session.restore", {
           input: { sessionId: String(body.sessionId || body.id || "") },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/sessions/trash") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("session.trash", {
+        return sendJson(response, 200, await runCommand("session.trash", {
           input: {
             sessionId: String(body.sessionId || body.id || ""),
             deleteAfterDays: typeof body.deleteAfterDays === "number" ? body.deleteAfterDays : 30,
@@ -415,7 +435,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/roles/provider") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("role.update_provider", {
+        return sendJson(response, 200, await runCommand("role.update_provider", {
           input: {
             name: String(body.name || ""),
             provider: typeof body.provider === "string" ? body.provider : undefined,
@@ -426,7 +446,7 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/experiences") {
-        return sendJson(response, 200, await runtime.runCommand("experiences.recall", {
+        return sendJson(response, 200, await runCommand("experiences.recall", {
           input: {
             q: url.searchParams.get("q") || undefined,
             limit: parseLimit(url.searchParams.get("limit"), 5, 100),
@@ -437,32 +457,32 @@ export async function startWebServer({
       if (request.method === "GET" && url.pathname === "/timeline") {
         const runId = String(url.searchParams.get("runId") || "");
         if (url.searchParams.get("format") === "text") {
-          return sendText(response, 200, String(await runtime.runCommand("timeline.get", {
+          return sendText(response, 200, String(await runCommand("timeline.get", {
             input: { runId },
             format: "text",
           })), "text/plain; charset=utf-8");
         }
-        return sendJson(response, 200, await runtime.runCommand("timeline.get", {
+        return sendJson(response, 200, await runCommand("timeline.get", {
           input: { runId },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/task-trace") {
-        return sendJson(response, 200, await runtime.runCommand("task.trace", {
+        return sendJson(response, 200, await runCommand("task.trace", {
           input: { taskId: String(url.searchParams.get("taskId") || "") },
         }));
       }
 
       if (request.method === "GET" && url.pathname === "/diagnostics") {
-        return sendJson(response, 200, await runtime.runCommand("diagnostics.run"));
+        return sendJson(response, 200, await runCommand("diagnostics.run"));
       }
 
       if (request.method === "GET" && url.pathname === "/security/audit") {
-        return sendJson(response, 200, await runtime.runCommand("security.audit"));
+        return sendJson(response, 200, await runCommand("security.audit"));
       }
 
       if (request.method === "GET" && url.pathname === "/context") {
-        return sendJson(response, 200, await runtime.runCommand("context.build", {
+        return sendJson(response, 200, await runCommand("context.build", {
           input: {
             query: String(url.searchParams.get("q") || url.searchParams.get("query") || ""),
             sessionId: String(url.searchParams.get("sessionId") || "web"),
@@ -474,29 +494,29 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/route") {
-        return sendJson(response, 200, await runtime.runCommand("router.route", {
+        return sendJson(response, 200, await runCommand("router.route", {
           input: { input: String(url.searchParams.get("q") || url.searchParams.get("input") || "") },
         }));
       }
 
       if (request.method === "POST" && url.pathname === "/diagnostics/repair") {
-        return sendJson(response, 200, await runtime.runCommand("diagnostics.repair"));
+        return sendJson(response, 200, await runCommand("diagnostics.repair"));
       }
 
       if (request.method === "POST" && url.pathname === "/experiences/build-daily") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("experiences.build_daily", { input: body }));
+        return sendJson(response, 200, await runCommand("experiences.build_daily", { input: body }));
       }
 
       if (request.method === "POST" && url.pathname === "/maintenance") {
         const body = await readJson(request);
-        const result = await runtime.runCommand("maintenance.run", { input: body });
+        const result = await runCommand("maintenance.run", { input: body });
         return sendJson(response, 200, result);
       }
 
       if (request.method === "POST" && url.pathname === "/experiences/feedback") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("experiences.feedback", {
+        return sendJson(response, 200, await runCommand("experiences.feedback", {
           input: {
             experienceId: String(body.experienceId || ""),
             rating: String(body.rating || ""),
@@ -507,7 +527,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/cancel-task") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("task.cancel", {
+        return sendJson(response, 200, await runCommand("task.cancel", {
           input: {
             taskId: String(body.taskId || ""),
             reason: String(body.reason || "cancelled by user"),
@@ -517,7 +537,7 @@ export async function startWebServer({
 
       if (request.method === "POST" && url.pathname === "/cancel-run") {
         const body = await readJson(request);
-        return sendJson(response, 200, await runtime.runCommand("run.cancel", {
+        return sendJson(response, 200, await runCommand("run.cancel", {
           input: {
             runId: String(body.runId || ""),
             reason: String(body.reason || "cancelled by user"),
@@ -554,7 +574,8 @@ export async function startWebServer({
       rejectUpgrade(netSocket, 404, "Not Found");
       return;
     }
-    if (!isAuthorized(request, url, authToken)) {
+    const auth = authenticate(request, url, { authToken, readAuthToken, writeAuthToken });
+    if (!auth) {
       rejectUpgrade(netSocket, 401, "Unauthorized");
       return;
     }
@@ -562,7 +583,7 @@ export async function startWebServer({
       rejectUpgrade(netSocket, 403, "Forbidden origin");
       return;
     }
-    acceptGatewaySocket({ runtime, request, socket: netSocket, head });
+    acceptGatewaySocket({ runtime, request, socket: netSocket, head, maxPermission: auth.maxPermission });
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -594,9 +615,21 @@ function isUnsafeMethod(method: string | undefined): boolean {
   return method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
 }
 
-function isAuthorized(request: IncomingMessage, url: URL, authToken: string): boolean {
+interface AuthContext {
+  maxPermission: CommandPermission;
+}
+
+function authenticate(
+  request: IncomingMessage,
+  url: URL,
+  tokens: { authToken: string; readAuthToken?: string; writeAuthToken?: string },
+): AuthContext | null {
   const presented = authTokenFromRequest(request, url);
-  return Boolean(presented && safeTokenEquals(presented, authToken));
+  if (!presented) return null;
+  if (safeTokenEquals(presented, tokens.authToken)) return { maxPermission: "danger" };
+  if (tokens.writeAuthToken && safeTokenEquals(presented, tokens.writeAuthToken)) return { maxPermission: "write" };
+  if (tokens.readAuthToken && safeTokenEquals(presented, tokens.readAuthToken)) return { maxPermission: "read" };
+  return null;
 }
 
 function authTokenFromRequest(request: IncomingMessage, url: URL): string {
@@ -612,6 +645,21 @@ function safeTokenEquals(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function canUsePermission(actual: CommandPermission, required: CommandPermission): boolean {
+  return permissionRank(actual) >= permissionRank(required);
+}
+
+function minCommandPermission(left: CommandPermission | undefined, right: CommandPermission): CommandPermission {
+  if (!left) return right;
+  return permissionRank(left) <= permissionRank(right) ? left : right;
+}
+
+function permissionRank(permission: CommandPermission): number {
+  if (permission === "danger") return 2;
+  if (permission === "write") return 1;
+  return 0;
 }
 
 function isAllowedOrigin(request: IncomingMessage, url: URL): boolean {
@@ -669,6 +717,7 @@ function acceptGatewaySocket({
   request,
   socket,
   head,
+  maxPermission,
 }: {
   runtime: {
     taskStore: { addEvent?: (input: { type: string; payload?: Record<string, unknown> }) => number };
@@ -677,6 +726,7 @@ function acceptGatewaySocket({
   request: IncomingMessage;
   socket: Socket;
   head: Buffer;
+  maxPermission: CommandPermission;
 }): void {
   const key = request.headers["sec-websocket-key"];
   if (typeof key !== "string") {
@@ -717,7 +767,7 @@ function acceptGatewaySocket({
         type: "gateway.request",
         payload: { id: parsed.id, method: parsed.method },
       });
-      const response = await dispatchGatewayRequest(runtime, parsed);
+      const response = await dispatchGatewayRequest(runtime, parsed, { maxPermission });
       runtime.taskStore.addEvent?.({
         type: "gateway.response",
         payload: { id: response.id, ok: response.ok, method: parsed.method },

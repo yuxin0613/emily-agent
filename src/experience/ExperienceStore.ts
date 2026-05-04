@@ -12,7 +12,7 @@ import type {
 import { ExperienceMatcher } from "./ExperienceMatcher.ts";
 import { ScalarQuantCompressor, type CompressedVector, type VectorCompressor } from "./VectorCompressor.ts";
 import { SchemaMigrator } from "../storage/SchemaMigrator.ts";
-import { openSqliteDatabase, type SqliteDatabase } from "../storage/Sqlite.ts";
+import { openSqliteDatabase, runSqliteWithRetry, type SqliteDatabase } from "../storage/Sqlite.ts";
 
 interface ExperienceRow {
   id: string;
@@ -627,9 +627,21 @@ export class ExperienceStore {
   }
 
   private ensureColumn(table: string, column: string, definition: string): void {
+    runSqliteWithRetry(() => {
+      const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (columns.some((item) => item.name === column)) return;
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      } catch (error) {
+        if (isDuplicateColumnError(error) && this.columnExists(table, column)) return;
+        throw error;
+      }
+    });
+  }
+
+  private columnExists(table: string, column: string): boolean {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (columns.some((item) => item.name === column)) return;
-    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    return columns.some((item) => item.name === column);
   }
 
   close(): void {
@@ -792,4 +804,8 @@ function recallReason({
   if (lexical >= 0.35) return "lexical";
   if (vectorScore >= 0.45) return "semantic";
   return "low-confidence";
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  return error instanceof Error && /duplicate column name/i.test(error.message);
 }

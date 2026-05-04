@@ -50,9 +50,10 @@ try {
     },
   });
   assert.equal(gatewayCreate.ok, true);
-  const commandJob = gatewayCreate.result as { id: string; action: { type: string; command: string } };
+  const commandJob = gatewayCreate.result as { id: string; action: { type: string; command: string; maxPermission: string } };
   assert.equal(commandJob.action.type, "command");
   assert.equal(commandJob.action.command, "health");
+  assert.equal(commandJob.action.maxPermission, "write");
 
   const gatewayRun = await dispatchGatewayRequest(runtime, {
     type: "request",

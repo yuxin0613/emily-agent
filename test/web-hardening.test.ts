@@ -78,6 +78,8 @@ const server = await startWebServer({
   runtime: runtime as never,
   port: 0,
   authToken: "test-token",
+  readAuthToken: "read-token",
+  writeAuthToken: "write-token",
 });
 
 try {
@@ -91,6 +93,33 @@ try {
 
   const health = await fetch(`${server.url}/health`);
   assert.equal(health.status, 200);
+
+  const readScopedProviders = await fetch(`${server.url}/providers`, {
+    headers: { "x-emily-token": "read-token" },
+  });
+  assert.equal(readScopedProviders.status, 200);
+
+  const readScopedWrite = await fetch(`${server.url}/chat`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "read-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ message: "hi" }),
+  });
+  assert.equal(readScopedWrite.status, 403);
+
+  const writeScopedWrite = await fetch(`${server.url}/chat`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "write-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ message: "hi" }),
+  });
+  assert.equal(writeScopedWrite.status, 200);
 
   const unauthorized = await fetch(`${server.url}/chat`, {
     method: "POST",

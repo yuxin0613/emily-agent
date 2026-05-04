@@ -45,14 +45,14 @@ Requirements:
 One-command install:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
-If you host AgentOS in another Git repository, override the clone URL:
+The repository is currently private while 1.0 hardening is in progress, so the install command requires GitHub access to `yuxin0613/emily-agent`. If you host AgentOS in another Git repository, override the clone URL:
 
 ```bash
 EMILY_REPO_URL=https://github.com/your-org/emily-agent.git \
-  curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
 The installer clones or updates the repo under `~/.emily/emily-agent`, installs Node dependencies, and creates `~/.local/bin/emily`.
@@ -119,7 +119,9 @@ Useful environment variables:
 | --- | --- |
 | `PORT` | Web server port. Default: `3000`. |
 | `EMILY_DATA_DIR` | Runtime state directory. Installer launcher defaults this to `~/.emily/data`. |
-| `EMILY_WEB_TOKEN` | Fixed Web/API/Gateway token. If omitted, a random token is printed at startup. |
+| `EMILY_WEB_TOKEN` | Full admin Web/API/Gateway token. If omitted, a random token is printed at startup. |
+| `EMILY_WEB_READ_TOKEN` | Optional read-scoped Web/API/Gateway token for dashboards and query-only clients. |
+| `EMILY_WEB_WRITE_TOKEN` | Optional write-scoped Web/API/Gateway token for trusted automation clients that must not run future danger commands. |
 | `EMILY_ROLE_DIR` | Override `agents/` role definition directory. |
 | `EMILY_SKILL_DIR` | Override `skills/` skill directory. |
 | `EMILY_HTTP_EGRESS_ALLOWLIST` | Comma-separated HTTP egress allowlist for private/local destinations. |
@@ -331,6 +333,12 @@ Request shape:
 
 Gateway methods include chat, sessions, provider management, roles, tools, skills, cron jobs, experiences, timeline, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
 
+Token scopes:
+
+- `EMILY_WEB_TOKEN` is full admin access.
+- `EMILY_WEB_WRITE_TOKEN` can call explicit read and write routes/methods; generic `commands.run` remains read-capped.
+- `EMILY_WEB_READ_TOKEN` can call read routes/methods only.
+
 ## Cron Jobs
 
 AgentOS includes an internal cron scheduler. It runs while the TUI, WebUI, or `--cron` process is alive; it does not install system crontab entries. Cron jobs are stored in `.emily/cron.json` or `EMILY_DATA_DIR/cron.json`.
@@ -394,6 +402,7 @@ Hidden or trashed sessions are not implicitly reactivated. Restores are explicit
 Default protections:
 
 - Web/API/Gateway routes require token auth except `/` and `/health`.
+- Optional read/write scoped tokens limit REST and Gateway methods by CommandRegistry permission.
 - Unsafe HTTP methods check origin.
 - WebUI and provider dashboard do not embed the server token.
 - HTTP request bodies and list limits are bounded.
@@ -408,10 +417,11 @@ Before exposing the server beyond loopback:
 
 1. Set a strong `EMILY_WEB_TOKEN`.
 2. Put the service behind TLS and network ACLs.
-3. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
-4. Configure a real provider and run `node src/index.ts --security-audit`.
-5. Run `npm run check`.
-6. Review roles that allow network, browser, GitHub, or destructive tools.
+3. Use `EMILY_WEB_READ_TOKEN` or `EMILY_WEB_WRITE_TOKEN` for non-admin applications instead of sharing the admin token.
+4. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
+5. Configure a real provider and run `node src/index.ts --security-audit`.
+6. Run `npm run check`.
+7. Review roles that allow network, browser, GitHub, or destructive tools.
 
 ## Development
 

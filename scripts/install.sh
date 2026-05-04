@@ -2,15 +2,15 @@
 # Emily AgentOS installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/yuxinhuang/emily-agent/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 #
 # Options:
-#   bash install.sh --branch main --dir ~/.emily/emily-agent --bin-dir ~/.local/bin
+#   bash install.sh --branch master --dir ~/.emily/emily-agent --bin-dir ~/.local/bin
 
 set -euo pipefail
 
-REPO_URL="${EMILY_REPO_URL:-https://github.com/yuxinhuang/emily-agent.git}"
-BRANCH="${EMILY_BRANCH:-main}"
+REPO_URL="${EMILY_REPO_URL:-https://github.com/yuxin0613/emily-agent.git}"
+BRANCH="${EMILY_BRANCH:-master}"
 EMILY_HOME="${EMILY_HOME:-$HOME/.emily}"
 INSTALL_DIR="${EMILY_INSTALL_DIR:-$EMILY_HOME/emily-agent}"
 BIN_DIR="${EMILY_BIN_DIR:-$HOME/.local/bin}"

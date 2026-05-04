@@ -395,6 +395,7 @@ export async function createRuntime(options: {
       return commandRegistry.run(job.action.command, job.action.args, {
         input: job.action.input,
         format: job.action.format,
+        maxPermission: job.action.maxPermission,
       });
     },
   });

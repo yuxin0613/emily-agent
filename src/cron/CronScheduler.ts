@@ -1,7 +1,8 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import type { TaskStore } from "../tasks/TaskStore.ts";
+import type { CommandPermission } from "../commands/CommandRegistry.ts";
 
 export type CronJobStatus = "active" | "paused";
 
@@ -19,6 +20,7 @@ export type CronJobAction =
     args: string[];
     input: Record<string, unknown>;
     format: "json" | "text";
+    maxPermission: CommandPermission;
   };
 
 export interface CronJob {
@@ -50,6 +52,7 @@ export interface CronJobInput {
   sessionId?: string;
   source?: string;
   permissionMode?: unknown;
+  maxPermission?: CommandPermission;
   status?: CronJobStatus;
 }
 
@@ -73,6 +76,8 @@ export class CronScheduler {
   private readonly taskStore: TaskStore;
   private readonly execute: (job: CronJob) => Promise<unknown>;
   private jobs = new Map<string, CronJob>();
+  private dirtyJobIds = new Set<string>();
+  private deletedJobIds = new Set<string>();
   private running = new Set<string>();
   private timer: NodeJS.Timeout | null = null;
   private started = false;
@@ -156,6 +161,7 @@ export class CronScheduler {
       updatedAt: now,
     };
     this.jobs.set(job.id, job);
+    this.markDirty(job.id);
     await this.save();
     this.addEvent("cron.created", job);
     this.scheduleTimer();
@@ -179,6 +185,7 @@ export class CronScheduler {
     if (input.status === "active" || input.status === "paused") job.status = input.status;
     job.nextRunAt = job.status === "active" ? nextCronRun(job.schedule, new Date()).toISOString() : null;
     job.updatedAt = new Date().toISOString();
+    this.markDirty(job.id);
     await this.save();
     this.addEvent("cron.updated", job);
     this.scheduleTimer();
@@ -190,6 +197,7 @@ export class CronScheduler {
     job.status = "paused";
     job.nextRunAt = null;
     job.updatedAt = new Date().toISOString();
+    this.markDirty(job.id);
     await this.save();
     this.addEvent("cron.paused", job);
     this.scheduleTimer();
@@ -201,6 +209,7 @@ export class CronScheduler {
     job.status = "active";
     job.nextRunAt = nextCronRun(job.schedule, new Date()).toISOString();
     job.updatedAt = new Date().toISOString();
+    this.markDirty(job.id);
     await this.save();
     this.addEvent("cron.resumed", job);
     this.scheduleTimer();
@@ -210,6 +219,8 @@ export class CronScheduler {
   async deleteJob(id: string): Promise<CronJob> {
     const job = this.getMutable(id);
     this.jobs.delete(id);
+    this.deletedJobIds.add(id);
+    this.dirtyJobIds.delete(id);
     await this.save();
     this.addEvent("cron.deleted", job);
     this.scheduleTimer();
@@ -247,6 +258,7 @@ export class CronScheduler {
     const startedAt = new Date().toISOString();
     job.lastRunAt = startedAt;
     job.updatedAt = startedAt;
+    this.markDirty(job.id);
     this.addEvent("cron.started", job, { manual });
     try {
       const result = await this.execute(cloneJob(job));
@@ -256,6 +268,7 @@ export class CronScheduler {
       job.lastError = null;
       job.updatedAt = finishedAt;
       job.nextRunAt = job.status === "active" ? nextCronRun(job.schedule, new Date()).toISOString() : null;
+      this.markDirty(job.id);
       await this.save();
       this.addEvent("cron.completed", job, { manual });
       return { job: cloneJob(job), ok: true, manual, startedAt, finishedAt, result };
@@ -267,6 +280,7 @@ export class CronScheduler {
       job.lastError = message;
       job.updatedAt = finishedAt;
       job.nextRunAt = job.status === "active" ? nextCronRun(job.schedule, new Date()).toISOString() : null;
+      this.markDirty(job.id);
       await this.save();
       this.addEvent("cron.failed", job, { manual, error: message });
       return { job: cloneJob(job), ok: false, manual, startedAt, finishedAt, error: message };
@@ -277,24 +291,46 @@ export class CronScheduler {
   }
 
   private async load(): Promise<void> {
+    this.jobs = await this.readJobsFromDisk();
+  }
+
+  private async readJobsFromDisk(): Promise<Map<string, CronJob>> {
+    const jobsById = new Map<string, CronJob>();
     try {
       const parsed = JSON.parse(await readFile(this.filePath, "utf8")) as Partial<CronFile>;
       const jobs = Array.isArray(parsed.jobs) ? parsed.jobs : [];
       for (const job of jobs) {
         const normalized = normalizeStoredJob(job);
-        if (normalized) this.jobs.set(normalized.id, normalized);
+        if (normalized) jobsById.set(normalized.id, normalized);
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    return jobsById;
   }
 
   private async save(): Promise<void> {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    const tmp = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    const file: CronFile = { version: 1, jobs: this.list() };
-    await writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`, "utf8");
-    await rename(tmp, this.filePath);
+    await withFileLock(`${this.filePath}.lock`, async () => {
+      const merged = await this.readJobsFromDisk();
+      for (const id of this.deletedJobIds) merged.delete(id);
+      for (const id of this.dirtyJobIds) {
+        const job = this.jobs.get(id);
+        if (job) merged.set(id, cloneJob(job));
+      }
+      this.jobs = merged;
+      const tmp = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+      const file: CronFile = { version: 1, jobs: sortedJobs([...merged.values()]) };
+      await writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`, "utf8");
+      await rename(tmp, this.filePath);
+      this.dirtyJobIds.clear();
+      this.deletedJobIds.clear();
+    });
+  }
+
+  private markDirty(id: string): void {
+    this.dirtyJobIds.add(id);
+    this.deletedJobIds.delete(id);
   }
 
   private getMutable(id: string): CronJob {
@@ -434,7 +470,11 @@ function assertValidSchedule(schedule: string): void {
 }
 
 function normalizeAction(input: CronJobInput): CronJobAction {
-  if (input.action) return input.action;
+  if (input.action) {
+    const action = normalizeStoredAction(input.action);
+    if (!action) throw new Error("Cron action is invalid");
+    return action;
+  }
   if (input.command) {
     return {
       type: "command",
@@ -442,6 +482,7 @@ function normalizeAction(input: CronJobInput): CronJobAction {
       args: Array.isArray(input.args) ? input.args.map(String) : [],
       input: input.input && typeof input.input === "object" && !Array.isArray(input.input) ? input.input : {},
       format: input.format === "text" ? "text" : "json",
+      maxPermission: parseCommandPermission(input.maxPermission) || "write",
     };
   }
   return {
@@ -458,13 +499,20 @@ function normalizeStoredJob(value: unknown): CronJob | null {
   const job = value as Partial<CronJob>;
   if (typeof job.id !== "string" || typeof job.name !== "string" || typeof job.schedule !== "string") return null;
   if (!job.action || typeof job.action !== "object") return null;
+  let action: CronJobAction | null = null;
+  try {
+    action = normalizeStoredAction(job.action);
+  } catch {
+    return null;
+  }
+  if (!action) return null;
   const status = job.status === "paused" ? "paused" : "active";
   const normalized: CronJob = {
     id: job.id,
     name: job.name,
     schedule: normalizeSchedule(job.schedule),
     status,
-    action: job.action as CronJobAction,
+    action,
     nextRunAt: status === "active" ? (typeof job.nextRunAt === "string" ? job.nextRunAt : nextCronRun(job.schedule, new Date()).toISOString()) : null,
     lastRunAt: typeof job.lastRunAt === "string" ? job.lastRunAt : null,
     lastSuccessAt: typeof job.lastSuccessAt === "string" ? job.lastSuccessAt : null,
@@ -483,6 +531,41 @@ function normalizeStoredJob(value: unknown): CronJob | null {
   }
 }
 
+function normalizeStoredAction(value: unknown): CronJobAction | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const action = value as Partial<CronJobAction>;
+  if (action.type === "chat") {
+    return {
+      type: "chat",
+      message: requiredString(action.message, "message"),
+      sessionId: typeof action.sessionId === "string" && action.sessionId ? action.sessionId : "cron",
+      source: typeof action.source === "string" && action.source ? action.source : "cron",
+      permissionMode: action.permissionMode,
+    };
+  }
+  if (action.type === "command") {
+    return {
+      type: "command",
+      command: requiredString(action.command, "command"),
+      args: Array.isArray(action.args) ? action.args.map(String) : [],
+      input: action.input && typeof action.input === "object" && !Array.isArray(action.input) ? action.input as Record<string, unknown> : {},
+      format: action.format === "text" ? "text" : "json",
+      maxPermission: parseCommandPermission(action.maxPermission) || "write",
+    };
+  }
+  return null;
+}
+
+function parseCommandPermission(value: unknown): CommandPermission | null {
+  return value === "read" || value === "write" || value === "danger" ? value : null;
+}
+
+function sortedJobs(jobs: CronJob[]): CronJob[] {
+  return [...jobs]
+    .sort((a, b) => (a.nextRunAt || "").localeCompare(b.nextRunAt || "") || a.name.localeCompare(b.name))
+    .map(cloneJob);
+}
+
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`Cron ${label} is required`);
   return value.trim();
@@ -490,4 +573,35 @@ function requiredString(value: unknown, label: string): string {
 
 function cloneJob(job: CronJob): CronJob {
   return JSON.parse(JSON.stringify(job)) as CronJob;
+}
+
+async function withFileLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 5000;
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  for (;;) {
+    try {
+      handle = await open(lockPath, "wx");
+      await handle.writeFile(`${process.pid}\n${Date.now()}\n`, "utf8");
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const current = await stat(lockPath).catch(() => null);
+      if (current && Date.now() - current.mtimeMs > 30_000) {
+        await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`Timed out waiting for cron lock: ${lockPath}`);
+      await delay(25);
+    }
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await unlink(lockPath).catch(() => undefined);
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
