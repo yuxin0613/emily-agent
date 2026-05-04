@@ -14,14 +14,11 @@ try {
   assert.ok(Array.isArray(commands.result));
   assert.ok(commands.result.some((command) => command.name === "tool.execute" && command.permission === "write"));
 
-  const tool = await harness.gateway("commands.run", {
-    name: "tool.execute",
-    input: {
-      tool: "read_file",
-      role: "developer",
-      args: { path: "README.md", maxBytes: 240 },
-      sessionId: "mock-parity",
-    },
+  const tool = await harness.gateway("tools.execute", {
+    tool: "read_file",
+    role: "developer",
+    args: { path: "README.md", maxBytes: 240 },
+    sessionId: "mock-parity",
   });
   assert.equal(tool.ok, true);
   assert.equal((tool.result as { ok?: boolean }).ok, true);

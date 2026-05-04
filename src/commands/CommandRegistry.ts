@@ -3,6 +3,13 @@ import type { ToolApproval } from "../tools/ToolExecutor.ts";
 
 export type CommandPermission = "read" | "write" | "danger";
 
+export class CommandPermissionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CommandPermissionError";
+  }
+}
+
 export interface CommandInputSchema {
   args: string[];
   examples: string[];
@@ -40,12 +47,13 @@ export class CommandRegistry {
   async run(
     name: string,
     args: string[] = [],
-    options: { format?: "json" | "text"; input?: Record<string, unknown> } = {},
+    options: { format?: "json" | "text"; input?: Record<string, unknown>; maxPermission?: CommandPermission } = {},
   ): Promise<unknown> {
     const command = this.resolve(name);
     if (!command) throw new Error(`Unknown command: ${name}`);
     const format = options.format || "json";
     const input = options.input || {};
+    assertCommandPermission(command, options.maxPermission || "danger");
     validateInput(command, input, args);
     const result = await command.run({ args, input, format });
     return format === "text" && command.renderText ? command.renderText(result) : result;
@@ -1017,6 +1025,17 @@ function validateInput(command: RuntimeCommand, input: Record<string, unknown>, 
     }
     if (typeof input[key] !== expected) throw new Error(`Command ${command.name} input.${key} must be ${expected}`);
   }
+}
+
+function assertCommandPermission(command: RuntimeCommand, maxPermission: CommandPermission): void {
+  if (permissionRank(command.permission) <= permissionRank(maxPermission)) return;
+  throw new CommandPermissionError(`Command ${command.name} requires ${command.permission} permission; caller is limited to ${maxPermission}.`);
+}
+
+function permissionRank(permission: CommandPermission): number {
+  if (permission === "danger") return 2;
+  if (permission === "write") return 1;
+  return 0;
 }
 
 function requiredPositionalArgs(args: string[]): string[] {

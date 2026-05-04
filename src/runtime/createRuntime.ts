@@ -2,7 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
-import { createCommandRegistry } from "../commands/CommandRegistry.ts";
+import { createCommandRegistry, type CommandPermission } from "../commands/CommandRegistry.ts";
 import { ContextEngine } from "../context/ContextEngine.ts";
 import { CronScheduler, type CronJobInput } from "../cron/CronScheduler.ts";
 import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
@@ -644,8 +644,12 @@ export async function createRuntime(options: {
     listCommands() {
       return commandRegistry.list();
     },
-    runCommand(name: string, options: { args?: string[]; format?: "json" | "text"; input?: Record<string, unknown> } = {}) {
-      return commandRegistry.run(name, options.args || [], { format: options.format || "json", input: options.input || {} });
+    runCommand(name: string, options: { args?: string[]; format?: "json" | "text"; input?: Record<string, unknown>; maxPermission?: CommandPermission } = {}) {
+      return commandRegistry.run(name, options.args || [], {
+        format: options.format || "json",
+        input: options.input || {},
+        maxPermission: options.maxPermission,
+      });
     },
     listCronJobs(options: Parameters<CronScheduler["list"]>[0] = {}) {
       return cronScheduler.list(options);

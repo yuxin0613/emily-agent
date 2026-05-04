@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { startWebServer } from "../src/adapters/web.ts";
+import { CommandPermissionError } from "../src/commands/CommandRegistry.ts";
 
 let latestEventsLimit = 0;
 let diagnosticsRepair: boolean | null = null;
+let genericCommandMaxPermission = "";
 
 const runtime = {
   handleUserMessage: async () => ({ content: "ok", delegatedTo: [] }),
@@ -53,7 +55,14 @@ const runtime = {
   buildDailyExperiences: () => ({}),
   health: () => ({ ok: true }),
   maintenance: async () => ({}),
-  runCommand: async (name: string, options: { input?: Record<string, unknown> } = {}) => {
+  runCommand: async (name: string, options: { input?: Record<string, unknown>; maxPermission?: string } = {}) => {
+    if (name === "health") {
+      genericCommandMaxPermission = options.maxPermission || "";
+      return { ok: true };
+    }
+    if (name === "diagnostics.repair" && options.maxPermission === "read") {
+      throw new CommandPermissionError("Command diagnostics.repair requires write permission; caller is limited to read.");
+    }
     if (name === "diagnostics.run") return runtime.diagnostics({ repair: false });
     if (name === "diagnostics.repair") return runtime.diagnostics({ repair: true });
     if (name === "maintenance.run") return runtime.maintenance(options.input);
@@ -153,6 +162,29 @@ try {
     },
   });
   assert.equal(diagnosticsRepair, true);
+
+  const genericRead = await fetch(`${server.url}/commands/run`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "test-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ name: "health" }),
+  });
+  assert.equal(genericRead.status, 200);
+  assert.equal(genericCommandMaxPermission, "read");
+
+  const genericWrite = await fetch(`${server.url}/commands/run`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "test-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ name: "diagnostics.repair" }),
+  });
+  assert.equal(genericWrite.status, 403);
 } finally {
   await server.close();
 }

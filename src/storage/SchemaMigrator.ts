@@ -25,12 +25,24 @@ export class SchemaMigrator {
   }
 
   apply(migrations: Migration[]): void {
-    for (const migration of migrations.sort((a, b) => a.version - b.version)) {
-      if (this.hasMigration(migration.version)) continue;
-      migration.up();
-      this.db
-        .prepare("INSERT INTO schema_migrations (namespace, version, name, applied_at) VALUES (?, ?, ?, ?)")
-        .run(this.namespace, migration.version, migration.name, new Date().toISOString());
+    const ordered = [...migrations].sort((a, b) => a.version - b.version);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const migration of ordered) {
+        if (this.hasMigration(migration.version)) continue;
+        migration.up();
+        this.db
+          .prepare("INSERT INTO schema_migrations (namespace, version, name, applied_at) VALUES (?, ?, ?, ?)")
+          .run(this.namespace, migration.version, migration.name, new Date().toISOString());
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original migration error when rollback cannot run.
+      }
+      throw error;
     }
   }
 

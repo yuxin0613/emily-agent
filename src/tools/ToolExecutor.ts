@@ -1,8 +1,12 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { Metadata, PermissionMode, RoleDefinition, Task, ToolPermission } from "../types.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
@@ -247,14 +251,13 @@ export class ToolExecutor {
     truncated: boolean;
   }> {
     const url = parseHttpUrl(requiredString(args.url, "url"));
-    await assertAllowedHttpEgress(url);
     const method = parseHttpMethod(args.method);
     const maxBytes = positiveNumber(args.maxBytes, 256000);
     const timeoutMs = positiveNumber(args.timeoutMs, 15000);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(url.toString(), {
+      const response = await fetchWithPinnedEgress(url, {
         method,
         headers: parseHeaders(args.headers),
         body: method === "GET" || method === "HEAD" ? undefined : String(args.body ?? ""),
@@ -383,7 +386,6 @@ export class ToolExecutor {
   private async llmWiki(args: Record<string, unknown>): Promise<unknown> {
     const action = parseLlmWikiAction(args.action);
     const baseUrl = parseHttpUrl(String(args.baseUrl || process.env.EMILY_LLM_WIKI_BASE_URL || process.env.LLM_WIKI_BASE_URL || "http://127.0.0.1:6081"));
-    await assertAllowedHttpEgress(baseUrl);
     if (action === "health") {
       return this.llmWikiRequest(baseUrl, "/health", { method: "GET", args });
     }
@@ -441,8 +443,7 @@ export class ToolExecutor {
     body?: unknown;
   }): Promise<unknown> {
     const url = endpoint ? new URL(endpoint, baseUrl) : baseUrl;
-    await assertAllowedHttpEgress(url);
-    const response = await fetch(url.toString(), {
+    const response = await fetchWithPinnedEgress(url, {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -460,17 +461,19 @@ export class ToolExecutor {
   private async llmWikiUpload(baseUrl: URL, args: Record<string, unknown>): Promise<unknown> {
     const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path ?? args.filePath ?? args.file, "path"));
     const url = new URL("/v1/upload", baseUrl);
-    await assertAllowedHttpEgress(url);
     const content = await readFile(filePath);
-    const form = new FormData();
-    form.append("files", new Blob([content]), typeof args.name === "string" && args.name.trim() ? args.name.trim() : path.basename(filePath));
-    const response = await fetch(url.toString(), {
+    const filename = typeof args.name === "string" && args.name.trim() ? args.name.trim() : path.basename(filePath);
+    const boundary = `----emily-agentos-${randomUUID()}`;
+    const body = multipartFileBody({ boundary, fieldName: "files", filename, content });
+    const response = await fetchWithPinnedEgress(url, {
       method: "POST",
       headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        "Content-Length": String(body.byteLength),
         "User-Agent": "Emily-AgentOS/1.0 llm_wiki",
         ...llmWikiAuthHeaders(args),
       },
-      body: form,
+      body,
       signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 60000)),
     });
     const text = await readResponseText(response, positiveNumber(args.maxBytes, 512000));
@@ -502,8 +505,7 @@ export class ToolExecutor {
       url.searchParams.set("count", String(count));
       url.searchParams.set("limit", String(count));
     }
-    await assertAllowedHttpEgress(url);
-    const response = await fetch(url.toString(), {
+    const response = await fetchWithPinnedEgress(url, {
       method,
       headers: { "Content-Type": "application/json", "User-Agent": "Emily-AgentOS/0.1 web_search" },
       body: method === "POST" ? JSON.stringify({ query, q: query, count, limit: count }) : undefined,
@@ -527,13 +529,12 @@ export class ToolExecutor {
   }> {
     const baseUrl = new URL(String(args.baseUrl || process.env.EMILY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"));
     const endpoint = new URL("/api/experimental/web_search", baseUrl);
-    await assertAllowedHttpEgress(endpoint);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "User-Agent": "Emily-AgentOS/0.1 web_search",
     };
     if (process.env.EMILY_OLLAMA_API_KEY) headers.Authorization = `Bearer ${process.env.EMILY_OLLAMA_API_KEY}`;
-    const response = await fetch(endpoint.toString(), {
+    const response = await fetchWithPinnedEgress(endpoint, {
       method: "POST",
       headers,
       body: JSON.stringify({ query, max_results: count }),
@@ -559,8 +560,7 @@ export class ToolExecutor {
   }> {
     const url = new URL("https://duckduckgo.com/html/");
     url.searchParams.set("q", query);
-    await assertAllowedHttpEgress(url);
-    const response = await fetch(url.toString(), {
+    const response = await fetchWithPinnedEgress(url, {
       method: "GET",
       headers: { "User-Agent": "Emily-AgentOS/0.1 web_search" },
       signal: AbortSignal.timeout(15000),
@@ -689,6 +689,9 @@ function parseHttpUrl(input: string): URL {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`http_fetch only supports http and https URLs. Received: ${url.protocol}`);
   }
+  if (url.username || url.password) {
+    throw new Error("HTTP URLs with embedded credentials are not allowed.");
+  }
   return url;
 }
 
@@ -706,10 +709,169 @@ function parseHeaders(input: unknown): Record<string, string> | undefined {
   for (const [key, value] of Object.entries(input)) {
     if (!/^[A-Za-z0-9-]+$/.test(key)) throw new Error(`Invalid header name: ${key}`);
     const lower = key.toLowerCase();
-    if (lower === "authorization" || lower === "cookie" || lower === "proxy-authorization") {
+    if (lower === "authorization" || lower === "cookie" || lower === "proxy-authorization" || lower === "host" || lower === "content-length" || lower === "transfer-encoding") {
       throw new Error(`Sensitive header ${key} is not allowed in tool args.`);
     }
     result[key] = String(value);
+  }
+  return result;
+}
+
+interface PinnedFetchInit {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string | Buffer | Uint8Array;
+  signal?: AbortSignal;
+}
+
+interface HttpEgressTarget {
+  url: URL;
+  connectHostname: string;
+  hostHeader: string;
+  servername?: string;
+}
+
+async function fetchWithPinnedEgress(url: URL, init: PinnedFetchInit = {}, redirectCount = 0): Promise<Response> {
+  const target = await resolveHttpEgressTarget(url);
+  return nativeHttpRequest(target, init, redirectCount);
+}
+
+async function resolveHttpEgressTarget(url: URL): Promise<HttpEgressTarget> {
+  assertHttpUrlSafe(url);
+  const hostname = url.hostname.toLowerCase();
+  const literalIp = ipAddressFromHost(hostname);
+  const hostHeader = url.host;
+  const servername = literalIp ? undefined : url.hostname;
+
+  if (isHttpEgressAllowedByPolicy(url)) {
+    const connectHostname = literalIp || await firstResolvedAddress(hostname);
+    return { url, connectHostname, hostHeader, servername };
+  }
+
+  if (isBlockedHostname(hostname)) {
+    throw new Error(`HTTP egress to private or local host is blocked: ${url.hostname}`);
+  }
+  if (literalIp) {
+    if (isPrivateAddress(literalIp)) {
+      throw new Error(`HTTP egress to private or local address is blocked: ${url.hostname}`);
+    }
+    return { url, connectHostname: literalIp, hostHeader, servername };
+  }
+
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const publicAddress = addresses.find((entry) => !isPrivateAddress(entry.address));
+  if (!publicAddress) {
+    throw new Error(`HTTP egress to private or local resolved address is blocked: ${url.hostname}`);
+  }
+  return { url, connectHostname: publicAddress.address, hostHeader, servername };
+}
+
+function nativeHttpRequest(target: HttpEgressTarget, init: PinnedFetchInit, redirectCount: number): Promise<Response> {
+  const method = String(init.method || "GET").toUpperCase();
+  const headers = pinnedRequestHeaders(init.headers, target.hostHeader);
+  const transport = target.url.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) => {
+    const request = transport.request({
+      protocol: target.url.protocol,
+      hostname: target.connectHostname,
+      port: target.url.port || undefined,
+      path: `${target.url.pathname}${target.url.search}`,
+      method,
+      headers,
+      signal: init.signal,
+      ...(target.url.protocol === "https:" && target.servername ? { servername: target.servername } : {}),
+    }, (response) => {
+      const status = response.statusCode || 500;
+      const headers = responseHeaders(response.headers);
+      const location = headers.get("location");
+      if (isRedirectStatus(status) && location && redirectCount < 5) {
+        response.resume();
+        const nextUrl = new URL(location, target.url);
+        resolveHttpEgressTarget(nextUrl)
+          .then((nextTarget) => nativeHttpRequest(nextTarget, redirectInit(init, status, method), redirectCount + 1))
+          .then(resolve, reject);
+        return;
+      }
+      const body = status === 204 || status === 304 ? null : Readable.toWeb(response) as unknown as BodyInit;
+      resolve(new Response(body, {
+        status,
+        statusText: response.statusMessage,
+        headers,
+      }));
+    });
+    request.on("error", reject);
+    if (init.body !== undefined && method !== "GET" && method !== "HEAD") {
+      request.write(init.body);
+    }
+    request.end();
+  });
+}
+
+function assertHttpUrlSafe(url: URL): void {
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`HTTP tools only support http and https URLs. Received: ${url.protocol}`);
+  }
+  if (url.username || url.password) {
+    throw new Error("HTTP URLs with embedded credentials are not allowed.");
+  }
+}
+
+async function firstResolvedAddress(hostname: string): Promise<string> {
+  const literalIp = ipAddressFromHost(hostname);
+  if (literalIp) return literalIp;
+  const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const first = addresses[0]?.address;
+  if (!first) throw new Error(`Could not resolve HTTP egress host: ${hostname}`);
+  return first;
+}
+
+function pinnedRequestHeaders(headers: Record<string, string> | undefined, hostHeader: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers || {})) {
+    const lower = key.toLowerCase();
+    if (lower === "host") continue;
+    result[key] = value;
+  }
+  result.Host = hostHeader;
+  return result;
+}
+
+function responseHeaders(rawHeaders: http.IncomingHttpHeaders): Headers {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(rawHeaders)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(key, item);
+    } else {
+      headers.set(key, value);
+    }
+  }
+  return headers;
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function redirectInit(init: PinnedFetchInit, status: number, method: string): PinnedFetchInit {
+  if ((status === 301 || status === 302 || status === 303) && method !== "GET" && method !== "HEAD") {
+    return {
+      ...init,
+      method: "GET",
+      body: undefined,
+      headers: withoutBodyHeaders(init.headers),
+    };
+  }
+  return init;
+}
+
+function withoutBodyHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+  if (!headers) return undefined;
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (lower === "content-type" || lower === "content-length" || lower === "transfer-encoding") continue;
+    result[key] = value;
   }
   return result;
 }
@@ -726,22 +888,30 @@ function stringArray(value: unknown, label: string): string[] {
   return values.map(String).map((item) => item.trim()).filter(Boolean);
 }
 
-async function assertAllowedHttpEgress(url: URL): Promise<void> {
-  if (isHttpEgressAllowedByPolicy(url)) return;
-  const hostname = url.hostname.toLowerCase();
-  if (isBlockedHostname(hostname)) {
-    throw new Error(`HTTP egress to private or local host is blocked: ${url.hostname}`);
-  }
-  const literalIp = ipAddressFromHost(hostname);
-  if (literalIp && isPrivateAddress(literalIp)) {
-    throw new Error(`HTTP egress to private or local address is blocked: ${url.hostname}`);
-  }
-  const addresses = await lookup(hostname, { all: true, verbatim: true }).catch(() => []);
-  for (const entry of addresses) {
-    if (isPrivateAddress(entry.address)) {
-      throw new Error(`HTTP egress to private or local resolved address is blocked: ${url.hostname}`);
-    }
-  }
+function multipartFileBody({
+  boundary,
+  fieldName,
+  filename,
+  content,
+}: {
+  boundary: string;
+  fieldName: string;
+  filename: string;
+  content: Buffer;
+}): Buffer {
+  const escapedName = multipartToken(fieldName);
+  const escapedFilename = multipartToken(filename);
+  return Buffer.concat([
+    Buffer.from(`--${boundary}\r\n`, "utf8"),
+    Buffer.from(`Content-Disposition: form-data; name="${escapedName}"; filename="${escapedFilename}"\r\n`, "utf8"),
+    Buffer.from("Content-Type: application/octet-stream\r\n\r\n", "utf8"),
+    content,
+    Buffer.from(`\r\n--${boundary}--\r\n`, "utf8"),
+  ]);
+}
+
+function multipartToken(value: string): string {
+  return value.replace(/[\r\n"]/g, "_").slice(0, 200);
 }
 
 function isHttpEgressAllowedByPolicy(url: URL): boolean {
@@ -779,19 +949,55 @@ function isBlockedHostname(hostname: string): boolean {
 }
 
 function isPrivateAddress(address: string): boolean {
-  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase();
-  const embeddedIpv4 = normalized.match(/(?:^|:)ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+  const normalized = address.replace(/^\[|\]$/g, "").toLowerCase().replace(/%.+$/, "");
+  const embeddedIpv4 = normalized.match(/(?:^|:)(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/)?.[1];
   if (embeddedIpv4) return isPrivateIpv4(embeddedIpv4);
   if (isIP(normalized) === 4) return isPrivateIpv4(normalized);
   if (isIP(normalized) === 6) {
+    const mappedIpv4 = ipv4FromMappedIpv6(normalized);
+    if (mappedIpv4) return isPrivateIpv4(mappedIpv4);
     return normalized === "::1"
       || normalized === "::"
       || normalized.startsWith("fc")
       || normalized.startsWith("fd")
       || /^fe[89ab]/.test(normalized)
+      || normalized.startsWith("ff")
       || normalized.startsWith("2001:db8:");
   }
   return false;
+}
+
+function ipv4FromMappedIpv6(address: string): string | null {
+  const hextets = expandIpv6(address);
+  if (!hextets) return null;
+  const prefixIsZero = hextets.slice(0, 5).every((part) => part === 0);
+  if (!prefixIsZero || (hextets[5] !== 0 && hextets[5] !== 0xffff)) return null;
+  const high = hextets[6];
+  const low = hextets[7];
+  return [
+    (high >> 8) & 0xff,
+    high & 0xff,
+    (low >> 8) & 0xff,
+    low & 0xff,
+  ].join(".");
+}
+
+function expandIpv6(address: string): number[] | null {
+  if (address.includes(".")) return null;
+  const pieces = address.split("::");
+  if (pieces.length > 2) return null;
+  const left = pieces[0] ? pieces[0].split(":") : [];
+  const right = pieces[1] ? pieces[1].split(":") : [];
+  const missing = pieces.length === 2 ? 8 - left.length - right.length : 0;
+  if (missing < 0) return null;
+  const raw = pieces.length === 2 ? [...left, ...Array(missing).fill("0"), ...right] : left;
+  if (raw.length !== 8) return null;
+  const hextets: number[] = [];
+  for (const part of raw) {
+    if (!/^[0-9a-f]{1,4}$/i.test(part)) return null;
+    hextets.push(Number.parseInt(part, 16));
+  }
+  return hextets;
 }
 
 function isPrivateIpv4(address: string): boolean {
@@ -1271,14 +1477,14 @@ function isGithubWriteCommand(command: string[]): boolean {
   const normalized = command.map((part) => part.toLowerCase());
   if (normalized[0] === "api") {
     const method = githubApiMethod(normalized);
-    if (method && method !== "get") return true;
-    return normalized.some((part) => part === "-f"
+    const hasBodyInput = normalized.some((part) => part === "-f"
       || part === "--field"
       || part.startsWith("--field=")
       || part === "--raw-field"
       || part.startsWith("--raw-field=")
       || part === "--input"
       || part.startsWith("--input="));
+    return method !== "get" || hasBodyInput;
   }
   const joined = normalized.join(" ");
   return /\b(comment|create|edit|close|reopen|merge|ready|review|rerun|cancel|delete|dispatch)\b/.test(joined);

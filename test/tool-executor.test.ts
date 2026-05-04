@@ -130,6 +130,26 @@ const rawGithubApiWrite = await executor.execute({
 assert.equal(rawGithubApiWrite.ok, false);
 assert.match(String(rawGithubApiWrite.error || ""), /github_write/);
 
+const rawGithubApiDefaultWrite = await executor.execute({
+  tool: "github",
+  args: { command: ["api", "/repos/example/repo/issues"] },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(rawGithubApiDefaultWrite.ok, false);
+assert.match(String(rawGithubApiDefaultWrite.error || ""), /github_write/);
+
+const rawGithubApiExplicitRead = await executor.execute({
+  tool: "github",
+  args: { command: ["api", "--method", "GET", "/repos/example/repo/issues"] },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(rawGithubApiExplicitRead.ok, false);
+assert.match(String(rawGithubApiExplicitRead.error || ""), /github_read/);
+
 const localNetworkBlocked = await executor.execute({
   tool: "http_fetch",
   args: { url: "http://127.0.0.1:9/" },
@@ -140,6 +160,17 @@ const localNetworkBlocked = await executor.execute({
 });
 assert.equal(localNetworkBlocked.ok, false);
 assert.match(String(localNetworkBlocked.error || ""), /private|local/);
+
+const mappedLoopbackBlocked = await executor.execute({
+  tool: "http_fetch",
+  args: { url: "http://[::ffff:7f00:1]:9/" },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  approval: { approved: true, template: "network_read", reason: "denylist test" },
+  sessionId: "tool-executor",
+});
+assert.equal(mappedLoopbackBlocked.ok, false);
+assert.match(String(mappedLoopbackBlocked.error || ""), /private|local/);
 
 const workspaceDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-workspace-"));
 const outsideDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-outside-"));

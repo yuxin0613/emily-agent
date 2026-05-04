@@ -1,4 +1,5 @@
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
+import type { CommandPermission } from "../commands/CommandRegistry.ts";
 import type { Metadata, ToolPermission } from "../types.ts";
 
 export interface GatewayRequest {
@@ -388,6 +389,7 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         args: Array.isArray(params.args) ? params.args.map(String) : [],
         input: params.input && typeof params.input === "object" && !Array.isArray(params.input) ? params.input as Record<string, unknown> : params,
         format: params.format === "text" ? "text" : "json",
+        maxPermission: "read",
       });
     case "cron.list":
       return runtime.runCommand("cron.list", {
@@ -471,7 +473,7 @@ export interface GatewayRuntime {
   previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
   sessionUsage: (sessionId: string) => unknown;
   listCommands: () => unknown[];
-  runCommand: (name: string, options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text" }) => Promise<unknown>;
+  runCommand: (name: string, options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text"; maxPermission?: CommandPermission }) => Promise<unknown>;
   buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
   routeMessage: (input: string) => unknown;
 }

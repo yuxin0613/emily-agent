@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 import { ExperienceStore } from "../src/experience/ExperienceStore.ts";
 import { SkillCandidateStore } from "../src/skills/SkillCandidateStore.ts";
 import { TaskStore } from "../src/tasks/TaskStore.ts";
+
+const execFileAsync = promisify(execFile);
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-migration-"));
 const taskStore = await TaskStore.create({ dataDir });
@@ -33,5 +37,24 @@ db.close();
 skillCandidateStore.close();
 experienceStore.close();
 taskStore.close();
+
+const concurrentDataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-migration-concurrent-"));
+const env = { ...process.env, EMILY_DATA_DIR: concurrentDataDir };
+const concurrent = await Promise.allSettled([
+  execFileAsync(process.execPath, ["src/index.ts", "--doctor", "--deep"], {
+    cwd: process.cwd(),
+    env,
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+  }),
+  execFileAsync(process.execPath, ["src/index.ts", "--security-audit"], {
+    cwd: process.cwd(),
+    env,
+    timeout: 15000,
+    maxBuffer: 1024 * 1024,
+  }),
+]);
+assert.equal(concurrent[0].status, "fulfilled", concurrent[0].status === "rejected" ? String(concurrent[0].reason) : "");
+assert.equal(concurrent[1].status, "fulfilled", concurrent[1].status === "rejected" ? String(concurrent[1].reason) : "");
 
 console.log("migration test passed");

@@ -1,6 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Socket } from "node:net";
+import { CommandPermissionError } from "../commands/CommandRegistry.ts";
 import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { webAppHtml } from "./webUi.ts";
@@ -81,7 +82,7 @@ export async function startWebServer({
     previewSessionCompaction: (sessionId: string, options?: { maxMessages?: number }) => unknown;
     sessionUsage: (sessionId: string) => unknown;
     listCommands: () => unknown[];
-    runCommand: (name: string, options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text" }) => Promise<unknown>;
+    runCommand: (name: string, options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text"; maxPermission?: "read" | "write" | "danger" }) => Promise<unknown>;
     renderTimeline: (runId: string) => string;
     buildDailyExperiences: (options?: { day?: Date }) => unknown;
     health: () => unknown;
@@ -255,6 +256,7 @@ export async function startWebServer({
           args: Array.isArray(body.args) ? body.args.map(String) : [],
           input: typeof body.input === "object" && body.input && !Array.isArray(body.input) ? body.input as Record<string, unknown> : body,
           format: body.format === "text" ? "text" : "json",
+          maxPermission: "read",
         });
         return body.format === "text"
           ? sendText(response, 200, String(result), "text/plain; charset=utf-8")
@@ -538,7 +540,7 @@ export async function startWebServer({
         routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
-      const statusCode = error instanceof HttpError ? error.statusCode : 500;
+      const statusCode = error instanceof HttpError ? error.statusCode : error instanceof CommandPermissionError ? 403 : 500;
       sendJson(response, statusCode, {
         error: error instanceof Error ? error.message : String(error),
       });

@@ -90,6 +90,34 @@ try {
     runtime.runCommand("experiences.feedback", { args: ["exp_only"] }),
     /requires input\.rating/,
   );
+
+  await assert.rejects(
+    runtime.runCommand("session.create", {
+      input: { title: "Should not be created", source: "test" },
+      maxPermission: "read",
+    }),
+    /requires write permission/,
+  );
+
+  const commandRunRead = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "command-run-read-1",
+    method: "commands.run",
+    params: { name: "health" },
+  });
+  assert.equal(commandRunRead.ok, true);
+
+  const commandRunWrite = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "command-run-write-1",
+    method: "commands.run",
+    params: {
+      name: "session.create",
+      input: { title: "Gateway command bypass", source: "test" },
+    },
+  });
+  assert.equal(commandRunWrite.ok, false);
+  assert.match(String(commandRunWrite.error?.message || ""), /requires write permission/);
 } finally {
   await runtime.shutdown();
 }
