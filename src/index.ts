@@ -39,7 +39,11 @@ if (args.has("--security-audit")) {
   const port = Number(process.env.PORT || 3000);
   await startWebServer({ runtime, port });
 } else {
-  await startTui({ runtime });
+  try {
+    await startTui({ runtime });
+  } finally {
+    await runtime.shutdown();
+  }
 }
 
 function waitForShutdown(): Promise<void> {

@@ -28,7 +28,8 @@ export async function startTui({ runtime }) {
 
   try {
     while (true) {
-      const raw = await rl.question(promptFor(state));
+      const raw = await readPromptLine(rl, state);
+      if (raw === null) break;
       const message = raw.trim();
       if (!message) continue;
       if (["exit", "quit", ":q", "/q"].includes(message.toLowerCase())) break;
@@ -46,6 +47,25 @@ export async function startTui({ runtime }) {
   } finally {
     rl.close();
   }
+}
+
+async function readPromptLine(
+  rl: readline.Interface,
+  state: { sessionId: string; lastRunId: string; permissionMode: string },
+): Promise<string | null> {
+  try {
+    return await rl.question(promptFor(state));
+  } catch (error) {
+    if (!isTuiAbortError(error)) throw error;
+    output.write("\n");
+    return null;
+  }
+}
+
+export function isTuiAbortError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { name?: unknown; code?: unknown };
+  return candidate.name === "AbortError" || candidate.code === "ABORT_ERR";
 }
 
 async function printBanner(runtime, state): Promise<void> {

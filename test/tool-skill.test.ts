@@ -96,6 +96,13 @@ await writeRoleDefinition("qa-tools", {
 }, { roleDir });
 const loadedRole = await readRoleDefinition("qa-tools", { roleDir });
 assert.deepEqual(loadedRole.skills, ["local-quality"]);
+await writeRoleDefinition("wiki-tools", {
+  role: "Validate external plugin skill behavior.",
+  allowedTools: ["read_file"],
+  capabilities: ["knowledge"],
+  skills: ["llm-wiki"],
+  instructions: "Review the assigned task and return external skill resolution notes.",
+}, { roleDir });
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-runtime-"));
 const runtime = await createRuntime({
@@ -152,6 +159,27 @@ assert.ok(trace.events.some((event) => event.type === "tool.hints.resolved"));
 assert.ok(trace.events.some((event) => event.type === "skill.hints.resolved"));
 assert.ok(trace.events.some((event) => event.type === "runtime.anomaly" && event.payload.code === "tool_hints_rejected"));
 assert.ok(trace.events.some((event) => event.type === "runtime.anomaly" && event.payload.code === "skill_hints_unknown"));
+
+const externalSkillTask = runtime.taskStore.createTask({
+  role: "wiki-tools",
+  title: "external skill runtime",
+  input: "Verify that programmatic external skillDirs reach worker processes.",
+  metadata: {
+    sessionId: "tool-skill",
+    maxMemoryCandidates: 0,
+    skillHints: ["wiki"],
+  },
+});
+
+const externalSkillFinished = await runtime.roleAgentManager.runTask(externalSkillTask, {
+  timeoutMs: 10000,
+});
+const externalSkillResult = parseTaskResult(externalSkillFinished.result);
+const externalSkillMetadata = externalSkillResult?.artifacts[0]?.metadata;
+assert.equal(externalSkillFinished.status, "done");
+assert.ok(Array.isArray(externalSkillMetadata?.skills?.matched));
+assert.ok(externalSkillMetadata.skills.matched.includes("llm-wiki"));
+assert.deepEqual(externalSkillMetadata.skills.unknown, []);
 
 await runtime.shutdown();
 

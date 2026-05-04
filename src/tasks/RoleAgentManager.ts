@@ -1,9 +1,11 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import type { Task, TaskEvent } from "../types.ts";
 import type { TaskStore } from "./TaskStore.ts";
 import { RecoveryPolicy } from "../recovery/RecoveryPolicy.ts";
 import type { LifecycleHooks } from "../runtime/LifecycleHooks.ts";
+import { defaultSkillDirs } from "../skills/SkillRegistry.ts";
 
 const DEFAULT_ROLES = ["planner", "developer", "researcher", "reviewer", "inspector", "memory-curator"];
 
@@ -28,6 +30,7 @@ export class RoleAgentManager extends EventEmitter {
   workerPath: string;
   roleDir: string;
   skillDir: string;
+  skillDirs: string[];
   staleTaskMs: number;
   leaseMs: number;
   recoveryPolicy: RecoveryPolicy;
@@ -44,6 +47,7 @@ export class RoleAgentManager extends EventEmitter {
     workerPath,
     roleDir = process.env.EMILY_ROLE_DIR || `${process.cwd()}/agents`,
     skillDir = process.env.EMILY_SKILL_DIR || `${process.cwd()}/skills`,
+    skillDirs,
     staleTaskMs = 30000,
     leaseMs = 30000,
     hooks = null,
@@ -53,6 +57,7 @@ export class RoleAgentManager extends EventEmitter {
     workerPath: string;
     roleDir?: string;
     skillDir?: string;
+    skillDirs?: string[];
     staleTaskMs?: number;
     leaseMs?: number;
     hooks?: LifecycleHooks | null;
@@ -63,6 +68,7 @@ export class RoleAgentManager extends EventEmitter {
     this.workerPath = workerPath;
     this.roleDir = roleDir;
     this.skillDir = skillDir;
+    this.skillDirs = skillDirs || defaultSkillDirs(skillDir);
     this.staleTaskMs = staleTaskMs;
     this.leaseMs = leaseMs;
     this.recoveryPolicy = new RecoveryPolicy();
@@ -310,12 +316,14 @@ export class RoleAgentManager extends EventEmitter {
 
     const child = fork(this.workerPath, [], {
       cwd: process.cwd(),
+      execArgv: workerExecArgv(),
       stdio: ["ignore", "inherit", "inherit", "ipc"],
       env: {
         ...process.env,
         EMILY_DATA_DIR: this.dataDir,
         EMILY_ROLE_DIR: this.roleDir,
         EMILY_SKILL_DIR: this.skillDir,
+        EMILY_SKILL_DIRS: this.skillDirs.join(path.delimiter),
       },
     });
 
@@ -490,6 +498,20 @@ export class RoleAgentManager extends EventEmitter {
 
     await Promise.allSettled(exits);
   }
+}
+
+export function workerExecArgv(execArgv: string[] = process.execArgv): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < execArgv.length; index += 1) {
+    const arg = execArgv[index];
+    if (arg === "--input-type" || arg === "--eval" || arg === "-e" || arg === "--print" || arg === "-p" || arg === "--check" || arg === "-c") {
+      if (arg === "--input-type" || arg === "--eval" || arg === "-e" || arg === "--print" || arg === "-p") index += 1;
+      continue;
+    }
+    if (arg.startsWith("--input-type=") || arg.startsWith("--eval=") || arg.startsWith("--print=")) continue;
+    result.push(arg);
+  }
+  return result;
 }
 
 function waitForExit(child: ChildProcess): Promise<unknown> {

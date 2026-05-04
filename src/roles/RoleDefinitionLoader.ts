@@ -3,8 +3,10 @@ import path from "node:path";
 import type { RoleDefinition, ToolPermission } from "../types.ts";
 
 const DEFAULT_TOOLS: ToolPermission[] = ["read_file"];
+const ROLE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
 
 export async function readRoleDefinition(role: string, { roleDir = defaultRoleDir() }: { roleDir?: string } = {}): Promise<RoleDefinition> {
+  assertValidRoleName(role);
   const fallback: RoleDefinition = {
     name: role,
     role: `Generic ${role} agent`,
@@ -72,7 +74,9 @@ export async function writeRoleDefinition(
   definition: Partial<RoleDefinition> & { instructions: string },
   { roleDir = defaultRoleDir() }: { roleDir?: string } = {},
 ): Promise<string> {
-  const targetDir = path.join(roleDir, name);
+  assertValidRoleName(name);
+  const filePath = roleDefinitionPath(name, roleDir);
+  const targetDir = path.dirname(filePath);
   await mkdir(targetDir, { recursive: true });
   const fullDefinition: RoleDefinition = {
     name,
@@ -90,17 +94,29 @@ export async function writeRoleDefinition(
     outputContract: definition.outputContract,
     instructions: definition.instructions,
   };
-  const filePath = roleDefinitionPath(name, roleDir);
   await writeFile(filePath, renderAgentMarkdown(fullDefinition), "utf8");
   return filePath;
 }
 
 export function roleDefinitionPath(role: string, roleDir = defaultRoleDir()): string {
-  return path.join(roleDir, role, "agent.md");
+  assertValidRoleName(role);
+  const root = path.resolve(roleDir);
+  const target = path.resolve(root, role, "agent.md");
+  const relative = path.relative(root, target);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Role path escapes role directory: ${role}`);
+  }
+  return target;
 }
 
 export function defaultRoleDir(): string {
   return process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
+}
+
+export function assertValidRoleName(name: string): void {
+  if (!ROLE_NAME_PATTERN.test(name || "") || name === "." || name === "..") {
+    throw new Error("Role name must be non-empty and contain only letters, numbers, dot, underscore, or dash.");
+  }
 }
 
 function splitFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {

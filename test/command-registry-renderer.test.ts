@@ -124,6 +124,15 @@ try {
   });
   assert.equal(commandRunRead.ok, true);
 
+  const commandRunDoctorRepair = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "command-run-doctor-repair-1",
+    method: "commands.run",
+    params: { name: "doctor", input: { repair: true } },
+  });
+  assert.equal(commandRunDoctorRepair.ok, false);
+  assert.match(String(commandRunDoctorRepair.error?.message || ""), /requires write permission/);
+
   const commandRunWrite = await dispatchGatewayRequest(runtime as never, {
     type: "request",
     id: "command-run-write-1",

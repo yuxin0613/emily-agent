@@ -18,7 +18,7 @@ import { RoleManager } from "../roles/RoleManager.ts";
 import { runSecurityAudit } from "../security/SecurityAudit.ts";
 import { SkillBuilder } from "../skills/SkillBuilder.ts";
 import { SkillCandidateStore } from "../skills/SkillCandidateStore.ts";
-import { SkillRegistry } from "../skills/SkillRegistry.ts";
+import { defaultSkillDirs, SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
@@ -51,6 +51,7 @@ export async function createRuntime(options: {
   const dataDir = options.dataDir || process.env.EMILY_DATA_DIR || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
   const skillDir = options.skillDir || process.env.EMILY_SKILL_DIR || path.join(process.cwd(), "skills");
+  const skillDirs = options.skillDirs || defaultSkillDirs(skillDir);
   await mkdir(dataDir, { recursive: true });
 
   const requestedMainProviderId = options.mainProviderId || options.defaultProviderId;
@@ -91,7 +92,7 @@ export async function createRuntime(options: {
     taskStore,
     registry: toolRegistry,
   });
-  const skillRegistry = await SkillRegistry.create({ skillDir: options.skillDir, skillDirs: options.skillDirs });
+  const skillRegistry = await SkillRegistry.create({ skillDirs });
   const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });
   const roleManager = new RoleManager({ roleDir, providerRegistry });
   const hooks = new LifecycleHooks();
@@ -117,6 +118,7 @@ export async function createRuntime(options: {
     workerPath: options.workerPath || path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "workers", "subagentWorker.ts"),
     roleDir,
     skillDir,
+    skillDirs,
     hooks,
   });
   await roleAgentManager.start();

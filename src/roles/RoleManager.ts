@@ -1,6 +1,6 @@
 import type { RoleDefinition } from "../types.ts";
 import type { ProviderRegistry } from "../llm/ProviderRegistry.ts";
-import { listRoleNames, readRoleDefinition, writeRoleDefinition } from "./RoleDefinitionLoader.ts";
+import { assertValidRoleName, listRoleNames, readRoleDefinition, writeRoleDefinition } from "./RoleDefinitionLoader.ts";
 
 export class RoleManager {
   roleDir: string;
@@ -17,6 +17,7 @@ export class RoleManager {
   }
 
   async getRole(name: string): Promise<RoleDefinition> {
+    assertValidRoleName(name);
     return readRoleDefinition(name, { roleDir: this.roleDir });
   }
 
@@ -63,6 +64,7 @@ export class RoleManager {
     model?: string | null;
     temperature?: number | null;
   }): Promise<RoleDefinition> {
+    assertValidRoleName(name);
     const current = await this.getRole(name);
     const next = {
       ...current,
@@ -109,9 +111,7 @@ export class RoleManager {
     outputContract?: string;
     instructions: string;
   }): void {
-    if (!/^[A-Za-z0-9._-]+$/.test(input.name || "")) {
-      throw new Error("Role name must be non-empty and contain only letters, numbers, dot, underscore, or dash.");
-    }
+    assertValidRoleName(input.name);
     if (!input.instructions?.trim()) {
       throw new Error("Role instructions must be non-empty.");
     }

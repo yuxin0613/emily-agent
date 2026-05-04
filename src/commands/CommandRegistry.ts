@@ -23,6 +23,7 @@ export interface RuntimeCommand {
   description: string;
   permission: CommandPermission;
   inputSchema: CommandInputSchema;
+  permissionForInput?: (input: { args: string[]; input: Record<string, unknown>; format: "json" | "text" }) => CommandPermission;
   run: (input: { args: string[]; input: Record<string, unknown>; format: "json" | "text" }) => Promise<unknown> | unknown;
   renderText?: (result: unknown) => string;
 }
@@ -38,9 +39,9 @@ export class CommandRegistry {
     }
   }
 
-  list(): Array<Omit<RuntimeCommand, "run" | "renderText">> {
+  list(): Array<Omit<RuntimeCommand, "run" | "renderText" | "permissionForInput">> {
     return [...this.commands.values()]
-      .map(({ run: _run, renderText: _renderText, ...command }) => command)
+      .map(({ run: _run, renderText: _renderText, permissionForInput: _permissionForInput, ...command }) => command)
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -53,9 +54,10 @@ export class CommandRegistry {
     if (!command) throw new Error(`Unknown command: ${name}`);
     const format = options.format || "json";
     const input = options.input || {};
-    assertCommandPermission(command, options.maxPermission || "danger");
+    const invocation = { args, input, format };
+    assertCommandPermission(command, options.maxPermission || "danger", invocation);
     validateInput(command, input, args);
-    const result = await command.run({ args, input, format });
+    const result = await command.run(invocation);
     return format === "text" && command.renderText ? command.renderText(result) : result;
   }
 
@@ -76,9 +78,10 @@ export function createCommandRegistry(runtime: CommandRuntime): CommandRegistry 
       examples: ["doctor --deep", "doctor --repair"],
       properties: { deep: "boolean", repair: "boolean" },
     },
+    permissionForInput: ({ args, input }) => wantsRepair(input, args) ? "write" : "read",
     run: ({ args, input }) => runtime.doctor({
       deep: input.deep === true || args.includes("--deep") || args.includes("deep"),
-      repair: input.repair === true || args.includes("--repair") || args.includes("repair"),
+      repair: wantsRepair(input, args),
     }),
     renderText: (result) => renderDoctor(result),
   });
@@ -1027,9 +1030,14 @@ function validateInput(command: RuntimeCommand, input: Record<string, unknown>, 
   }
 }
 
-function assertCommandPermission(command: RuntimeCommand, maxPermission: CommandPermission): void {
-  if (permissionRank(command.permission) <= permissionRank(maxPermission)) return;
-  throw new CommandPermissionError(`Command ${command.name} requires ${command.permission} permission; caller is limited to ${maxPermission}.`);
+function assertCommandPermission(
+  command: RuntimeCommand,
+  maxPermission: CommandPermission,
+  invocation: { args: string[]; input: Record<string, unknown>; format: "json" | "text" },
+): void {
+  const requiredPermission = command.permissionForInput?.(invocation) || command.permission;
+  if (permissionRank(requiredPermission) <= permissionRank(maxPermission)) return;
+  throw new CommandPermissionError(`Command ${command.name} requires ${requiredPermission} permission; caller is limited to ${maxPermission}.`);
 }
 
 function permissionRank(permission: CommandPermission): number {
@@ -1042,6 +1050,10 @@ function requiredPositionalArgs(args: string[]): string[] {
   return args
     .map((arg) => arg.match(/^<([^>]+)>$/)?.[1])
     .filter((arg): arg is string => Boolean(arg));
+}
+
+function wantsRepair(input: Record<string, unknown>, args: string[]): boolean {
+  return input.repair === true || args.includes("--repair") || args.includes("repair");
 }
 
 function renderDoctor(result: unknown): string {
