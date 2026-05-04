@@ -3,7 +3,16 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
+import { workerExecArgv } from "../src/tasks/RoleAgentManager.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
+
+assert.deepEqual(workerExecArgv([
+  "--input-type=module",
+  "--trace-warnings",
+  "--eval",
+  "console.log('parent only')",
+  "--conditions=development",
+]), ["--trace-warnings", "--conditions=development"]);
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-core-"));
 const runtime = await createRuntime({ dataDir });

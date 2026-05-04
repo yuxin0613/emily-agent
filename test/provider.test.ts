@@ -237,6 +237,10 @@ const partialUpdated = await runtime.updateRoleProvider("qa", {
 assert.equal(partialUpdated.provider, "qa-echo");
 assert.equal(partialUpdated.model, "qa-partial-model");
 assert.equal(partialUpdated.temperature, 0);
+await assert.rejects(() => runtime.updateRoleProvider("../escaped", {
+  model: "escaped-model",
+}), /Role name/);
+await assert.rejects(access(path.join(path.dirname(roleDir), "escaped", "agent.md")), /ENOENT/);
 await assert.rejects(() => runtime.removeProvider("qa-echo"), /referenced by roles: qa/);
 
 const task = runtime.taskStore.createTask({
