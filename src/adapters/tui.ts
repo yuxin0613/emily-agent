@@ -13,6 +13,13 @@ const ANSI = {
   gray: "\x1b[90m",
 };
 
+const TUI_GLYPHS = {
+  user: "❯",
+  assistant: "┊",
+  system: "·",
+  tool: "⚡",
+};
+
 const EMILY_WORDMARK = [
   "███████╗███╗   ███╗██╗██╗     ██╗   ██╗",
   "██╔════╝████╗ ████║██║██║     ╚██╗ ██╔╝",
@@ -159,7 +166,7 @@ function printHelp(): void {
 }
 
 function promptFor(_state: { sessionId: string; lastRunId: string; permissionMode: string }): string {
-  return `${style("●", "cyan")} `;
+  return `${style(TUI_GLYPHS.user, "cyan")} `;
 }
 
 function clearSubmittedPromptLine(): void {
@@ -357,7 +364,7 @@ async function sendChat(runtime, state, message: string): Promise<void> {
     detachProgress();
   }
   if (response.runId) state.lastRunId = response.runId;
-  printChatBlock("Emily", response.content, "green");
+  printAssistantMessage(response.content);
   const meta = [];
   if (response.runId) meta.push(`run ${response.runId}`);
   if (response.delegatedTo?.length) meta.push(`agents ${response.delegatedTo.join(", ")}`);
@@ -593,11 +600,8 @@ function createThinkingIndicator(): { start: () => void; stop: () => void } {
   let lineVisible = false;
   const render = (): void => {
     if (!output.isTTY) return;
-    if (!lineVisible) {
-      output.write("\n");
-      lineVisible = true;
-    }
-    output.write(`\r\x1b[2K${formatThinkingFrame(frame)}`);
+    if (!lineVisible) lineVisible = true;
+    output.write(`\r\x1b[2K${style(TUI_GLYPHS.assistant, "gray")} ${formatThinkingFrame(frame)}`);
     frame += 1;
   };
   return {
@@ -645,7 +649,7 @@ function attachProgressReporter(runtime, state, beforePrint: () => void = () => 
     const line = formatProgressEvent(type, task, event);
     if (line) {
       beforePrint();
-      output.write(`${style("  |", "gray")} ${style(line, "gray")}\n`);
+      output.write(`${style(TUI_GLYPHS.assistant, "gray")} ${style(line, "gray")}\n`);
     }
   };
   manager.on("event", handler);
@@ -681,13 +685,8 @@ function formatProgressEvent(type: string, task, event): string {
   return type;
 }
 
-function printChatBlock(label: string, content: string, color: keyof typeof ANSI): void {
-  output.write("\n");
-  output.write(`${style(label, color)}\n`);
-  for (const line of wrapBlock(String(content || "").trim() || "(empty)", terminalWidth() - 4)) {
-    output.write(`  ${line}\n`);
-  }
-  output.write("\n");
+function printAssistantMessage(content: string): void {
+  output.write(formatTranscriptMessage("assistant", content));
 }
 
 function printPanel(title: string, content: string, color: keyof typeof ANSI = "cyan"): void {
@@ -701,7 +700,7 @@ function printPanel(title: string, content: string, color: keyof typeof ANSI = "
 
 function printMeta(items: string[]): void {
   if (!items.length) return;
-  output.write(`${style(items.map((item) => `[${item}]`).join(" "), "gray")}\n`);
+  output.write(`${style(`${TUI_GLYPHS.system} ${items.join(" · ")}`, "gray")}\n`);
 }
 
 function printJson(value): void {
@@ -841,18 +840,25 @@ export function formatTuiHome({
 }
 
 export function formatTuiSubmittedInput(message: string, width = terminalWidth()): string {
-  const contentWidth = Math.max(24, width - 4);
-  const rule = "─".repeat(Math.min(88, Math.max(40, width - 2)));
-  const lines = [
-    "",
-    style(rule, "gray"),
-  ];
-  wrapBlock(String(message || "").trim() || "(empty)", contentWidth).forEach((line, index) => {
-    const marker = index === 0 ? style("●", "cyan") : " ";
+  return formatTranscriptMessage("user", message, width);
+}
+
+export function formatTranscriptMessage(
+  role: "assistant" | "system" | "tool" | "user",
+  content: string,
+  width = terminalWidth(),
+): string {
+  const glyph = TUI_GLYPHS[role];
+  const color: keyof typeof ANSI = role === "user" ? "cyan" : role === "assistant" ? "gray" : "gray";
+  const bodyWidth = Math.max(24, width - visibleLength(glyph) - 2);
+  const wrapped = wrapBlock(String(content || "").trim() || "(empty)", bodyWidth);
+  const continuation = " ".repeat(visibleLength(glyph));
+  const lines = role === "user" ? [""] : [];
+  wrapped.forEach((line, index) => {
+    const marker = index === 0 ? style(glyph, color) : continuation;
     lines.push(`${marker} ${line}`);
   });
-  lines.push(style(rule, "gray"));
-  lines.push("");
+  if (role === "user") lines.push("");
   return `${lines.join("\n")}\n`;
 }
 

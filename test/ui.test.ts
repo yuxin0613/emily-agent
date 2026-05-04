@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { formatThinkingFrame, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
+import { formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -46,9 +46,12 @@ assert.match(tuiHome, /deepseek-chat/);
 assert.match(tuiHome, /Welcome to Emily Agent! Type your message or \/help for commands\./);
 assert.ok(!tuiHome.includes("undefined"));
 const submitted = formatTuiSubmittedInput("what can you do for me?", 80);
-assert.match(submitted, /● what can you do for me\?/);
+assert.match(submitted, /❯ what can you do for me\?/);
+assert.doesNotMatch(submitted, /─/);
 assert.doesNotMatch(submitted, /Initializing agent\.\.\./);
 assert.ok(!submitted.includes("undefined"));
+const assistant = formatTranscriptMessage("assistant", "hello from emily", 80);
+assert.match(assistant, /┊ hello from emily/);
 assert.match(formatThinkingFrame(3), /thinking\.\.\./);
 assert.equal(isTuiAbortError(Object.assign(new Error("Aborted with Ctrl+C"), {
   name: "AbortError",
