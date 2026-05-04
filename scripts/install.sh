@@ -192,6 +192,8 @@ write_launcher() {
 set -e
 
 export EMILY_INSTALL_DIR=$(shell_quote "$INSTALL_DIR")
+export EMILY_BIN_DIR=$(shell_quote "$BIN_DIR")
+export EMILY_COMMAND_NAME=$(shell_quote "$COMMAND_NAME")
 if [ -z "\${EMILY_DATA_DIR:-}" ]; then
   export EMILY_DATA_DIR=$(shell_quote "$data_dir")
 fi

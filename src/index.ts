@@ -3,9 +3,14 @@ import { startTui } from "./adapters/tui.ts";
 import { startWebServer } from "./adapters/web.ts";
 import { startModelConfig } from "./adapters/modelConfig.ts";
 import { shouldStartCronForCliArgs } from "./runtime/CronStartup.ts";
+import { runUpdate } from "./updater.ts";
 
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
+
+if (rawArgs[0] === "update") {
+  process.exit(runUpdate(rawArgs.slice(1)));
+}
 
 if (args.has("--help") || args.has("-h")) {
   printHelp();
@@ -61,6 +66,7 @@ function printHelp(): void {
     "Usage:",
     "  emily                 start the terminal UI",
     "  emily model           configure main and role providers/models",
+    "  emily update          update Emily AgentOS in place",
     "  emily --tui           start the terminal UI",
     "  emily --web           start the WebUI and Gateway",
     "  emily --cron          run the internal cron scheduler",

@@ -14,4 +14,8 @@ assert.match(help, /Command name \(default: emily\)/);
 assert.match(help, /https:\/\/github\.com\/yuxin0613\/emily-agent\.git/);
 assert.match(help, /default: master/);
 
+const scriptSource = execFileSync("sed", ["-n", "1,240p", script], { encoding: "utf8" });
+assert.match(scriptSource, /export EMILY_BIN_DIR=/);
+assert.match(scriptSource, /export EMILY_COMMAND_NAME=/);
+
 console.log("install script test passed");
