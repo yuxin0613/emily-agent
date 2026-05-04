@@ -128,8 +128,7 @@ export class MainAgent {
       run,
       payload: { input: normalizedInput, sessionId, source, permissionMode },
     });
-    const selectedAgents = this.selectSubAgents(normalizedInput);
-    let delegatedTo = selectedAgents;
+    let delegatedTo: string[] = [];
     let planSummary: MainAgentResult["plan"];
     let subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }> = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
@@ -141,6 +140,67 @@ export class MainAgent {
         content: normalizedInput,
         metadata: { source, runId: run.id, permissionMode },
       });
+
+      const intent = classifyUserMessageIntent(normalizedInput);
+      if (intent === "chat") {
+        const contextBundle = this.contextEngine
+          ? await this.contextEngine.build({
+            query: normalizedInput,
+            sessionId,
+            runId: run.id,
+            role: this.name,
+            mode: shouldUseDeepContext(normalizedInput) ? "deep" : "active",
+          })
+          : null;
+        const relevantMemory = contextBundle?.memory || await this.memory.recall(normalizedInput, {
+          scope: sessionId,
+          limit: 5,
+        });
+        const relevantExperiences = (contextBundle?.experiences || this.experienceStore.recall(normalizedInput, {
+          scope: "project",
+          limit: 3,
+        })).filter((experience) => experienceApplies(experience, normalizedInput));
+        const content = await this.answerDirectChat({
+          input: normalizedInput,
+          runId: run.id,
+          sessionId,
+          relevantMemory,
+          relevantExperiences,
+        });
+        for (const experience of relevantExperiences) {
+          this.experienceStore.recordUse(experience.id);
+        }
+        await this.remember({
+          scope: sessionId,
+          kind: "message:assistant",
+          content,
+          metadata: {
+            source: "main-agent",
+            runId: run.id,
+            intent,
+            delegatedTo: [],
+          },
+        });
+        await this.approveRunMemoryCandidates(run.id);
+        this.taskStore.completeRun(run.id, "done");
+        await this.hooks?.emit("afterRun", {
+          run: this.taskStore.getRun(run.id) || run,
+          payload: {
+            status: "done",
+            intent,
+            delegatedTo: [],
+          },
+        });
+        return {
+          agent: this.name,
+          runId: run.id,
+          content,
+          delegatedTo: [],
+          memory: relevantMemory,
+          experiences: relevantExperiences,
+          subResults: [],
+        };
+      }
 
       if (requiresDeliveryLevelClarification(normalizedInput)) {
         const content = deliveryLevelQuestion(normalizedInput);
@@ -186,6 +246,8 @@ export class MainAgent {
         limit: 3,
       })).filter((experience) => experienceApplies(experience, normalizedInput));
 
+      const selectedAgents = this.selectSubAgents(normalizedInput);
+      delegatedTo = selectedAgents;
       const delegated = await this.delegateTasks({
         input: normalizedInput,
         sessionId,
@@ -619,6 +681,70 @@ export class MainAgent {
     }), this.model);
     return result.content;
   }
+
+  async answerDirectChat({
+    input,
+    runId,
+    sessionId,
+    relevantMemory,
+    relevantExperiences,
+  }: {
+    input: string;
+    runId?: string;
+    sessionId?: string;
+    relevantMemory: MemoryRecallResult;
+    relevantExperiences: ExperienceRecallResult[];
+  }): Promise<string> {
+    const prompt = [
+      "Conversation mode: direct_chat",
+      `User input: ${input}`,
+      `Relevant memory count: ${relevantMemory.semantic.length + relevantMemory.shortTerm.length}`,
+      "Relevant active experiences:",
+      ...formatExperiences(relevantExperiences),
+      "",
+      "Reply naturally and concisely in Chinese.",
+      "Do not create a task plan, delegate to sub-agents, or ask for task scope unless the user explicitly asks you to do work.",
+    ].join("\n");
+
+    const result = normalizeModelCompleteResult(await this.model.complete({
+      agent: this.name,
+      role: "Direct conversation without task delegation.",
+      prompt,
+      runId,
+      source: sessionId ? `session:${sessionId}` : "main-agent",
+    }), this.model);
+    return result.content;
+  }
+}
+
+export function classifyUserMessageIntent(input: string): "chat" | "task" {
+  const normalized = input.trim();
+  const compact = normalized.replace(/\s+/g, "");
+  const lower = normalized.toLowerCase();
+  if (!normalized) return "chat";
+
+  if (/^(?:hi|hello|hey|ping|test|thanks|thank you|你好|您好|在吗|谢谢|测试|测试消息|随便聊聊|聊聊)[。.!！?？]*$/i.test(compact)) {
+    return "chat";
+  }
+  if (/(?:你是谁|你叫什么|你能做什么|介绍一下你自己|你好吗|how are you|who are you|what can you do)/i.test(normalized)) {
+    return "chat";
+  }
+
+  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|做一个|搭建|接入|迁移|发布|提交|推送|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|write|generate|analyze|summarize|search)/i.test(normalized)) {
+    return "task";
+  }
+  if (/(?:帮我|请你|麻烦|能不能|可以帮|需要你|我想要|我要|给我).{0,16}(?:做|写|改|查|看|跑|测|建|实现|修|设计|生成|分析|总结|创建|配置|部署)/.test(normalized)) {
+    return "task";
+  }
+  if (/(?:[\w.-]+\/[\w./-]+|`[^`]+`|```|error:|exception|stack trace|报错|失败|崩溃)/i.test(normalized)) {
+    return "task";
+  }
+
+  if (/[?？]$/.test(normalized) && !/(?:代码|文件|项目|仓库|repo|bug|接口|api|实现|修复|部署|配置|测试|报错)/i.test(normalized)) {
+    return "chat";
+  }
+  if ([...compact].length <= 18) return "chat";
+  return "task";
 }
 
 function plannerPrompt(input: string, deliveryLevel: string): string {
