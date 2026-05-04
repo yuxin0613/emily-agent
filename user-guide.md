@@ -72,7 +72,7 @@ Use the gateway when another application wants to drive AgentOS directly.
 
 ## 3. Configure Providers
 
-Providers are stored in `.emily/providers.json`.
+Providers are stored in `.emily/config.json`. Existing `.emily/providers.json` files are migrated automatically on startup.
 
 Use `echo` for local architecture tests only. Use `openai` or `ollama` for real model work.
 
@@ -467,7 +467,7 @@ Cancel a run:
 
 `provider.default_echo` appears:
 
-Configure a real provider in `.emily/providers.json`.
+Configure a real provider in `.emily/config.json`.
 
 WebUI says unauthorized:
 

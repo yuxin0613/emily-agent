@@ -103,7 +103,7 @@ export async function runSecurityAudit({
           severity: "critical",
           title: `Provider ${provider.id} contains secret-like config key ${key}`,
           detail: "Provider configs should reference environment variables instead of storing credentials.",
-          remediation: "Move the secret into an environment variable and keep only apiKeyEnv in providers.json.",
+          remediation: "Move the secret into an environment variable and keep only apiKeyEnv in config.json.",
         });
       }
     }

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EchoModelProvider } from "../src/llm/EchoModelProvider.ts";
 import { ProviderCallError, type ModelCompleteInput, type ModelCompleteResult, type ModelProvider } from "../src/llm/ModelProvider.ts";
 import { normalizeProviderJsonOutput } from "../src/llm/ProviderJson.ts";
 import { normalizeModelCompleteResult, resetProviderCircuit, ResilientModelProvider } from "../src/llm/ProviderRuntime.ts";
+import { legacyProviderConfigPath, ProviderRegistry, providerConfigPath } from "../src/llm/ProviderRegistry.ts";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
@@ -87,6 +88,24 @@ const runtime = await createRuntime({
 });
 
 assert.deepEqual(runtime.listProviders().map((provider) => provider.id).sort(), ["main-echo", "qa-echo"]);
+const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string };
+assert.equal(providerFile.defaultProviderId, "main-echo");
+await assert.rejects(() => access(legacyProviderConfigPath(dataDir)), /ENOENT/);
+
+const legacyConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-legacy-provider-config-"));
+await writeFile(legacyProviderConfigPath(legacyConfigDir), JSON.stringify({
+  defaultProviderId: "legacy-main",
+  providers: [{
+    id: "legacy-main",
+    type: "echo",
+    model: "legacy-model",
+  }],
+}, null, 2), "utf8");
+const migratedRegistry = await ProviderRegistry.create({ dataDir: legacyConfigDir });
+assert.equal(migratedRegistry.defaultProviderId, "legacy-main");
+assert.equal(migratedRegistry.getConfig("legacy-main").model, "legacy-model");
+assert.equal(JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")).defaultProviderId, "legacy-main");
+await assert.rejects(() => access(legacyProviderConfigPath(legacyConfigDir)), /ENOENT/);
 
 assert.rejects(() => runtime.addProvider({
   id: "bad secret",

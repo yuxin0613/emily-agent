@@ -108,7 +108,7 @@ Runtime state lives under `.emily/` by default:
 ```text
 .emily/
   emily.sqlite
-  providers.json
+  config.json
   memory/
     events.jsonl
     vector-index.json
@@ -136,7 +136,7 @@ Useful environment variables:
 
 ## Providers
 
-Provider config is stored in `.emily/providers.json`. The runtime stores `apiKeyEnv`, never raw API keys.
+Provider config is stored in `.emily/config.json`. The runtime stores `apiKeyEnv`, never raw API keys. Existing `.emily/providers.json` files are migrated to `config.json` on startup.
 
 Example OpenAI-compatible provider:
 

@@ -35,10 +35,9 @@ export class ProviderRegistry {
     persist?: boolean;
     usageStore?: ProviderUsageStore;
   }): Promise<ProviderRegistry> {
-    const filePath = providerConfigPath(dataDir);
     const loaded = providers
       ? { defaultProviderId, fallbackMode, providers }
-      : await readProviderFile(filePath) || defaultProviderFile(defaultProviderId);
+      : await readProviderConfig(dataDir, defaultProviderId);
     const registry = new ProviderRegistry({
       providers: loaded.providers,
       defaultProviderId: loaded.defaultProviderId || defaultProviderId,
@@ -46,7 +45,10 @@ export class ProviderRegistry {
       usageStore,
     });
     registry.ensureDefault();
-    if (persist) await registry.write(dataDir);
+    if (persist) {
+      await registry.write(dataDir);
+      await removeLegacyProviderConfig(dataDir);
+    }
     return registry;
   }
 
@@ -174,7 +176,7 @@ export class ProviderRegistry {
   async write(dataDir: string): Promise<void> {
     await mkdir(dataDir, { recursive: true });
     const targetPath = providerConfigPath(dataDir);
-    const tmpPath = path.join(dataDir, `.providers.${process.pid}.${Date.now()}.tmp`);
+    const tmpPath = path.join(dataDir, `.config.${process.pid}.${Date.now()}.tmp`);
     await writeFile(tmpPath, JSON.stringify({
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
@@ -314,6 +316,10 @@ export class ProviderRegistry {
 }
 
 export function providerConfigPath(dataDir: string): string {
+  return path.join(dataDir, "config.json");
+}
+
+export function legacyProviderConfigPath(dataDir: string): string {
   return path.join(dataDir, "providers.json");
 }
 
@@ -344,6 +350,19 @@ async function readProviderFile(filePath: string): Promise<ProviderFile | null> 
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
     throw error;
   }
+}
+
+async function readProviderConfig(dataDir: string, defaultProviderId: string): Promise<ProviderFile> {
+  return await readProviderFile(providerConfigPath(dataDir))
+    || await readProviderFile(legacyProviderConfigPath(dataDir))
+    || defaultProviderFile(defaultProviderId);
+}
+
+async function removeLegacyProviderConfig(dataDir: string): Promise<void> {
+  await unlink(legacyProviderConfigPath(dataDir)).catch((error) => {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+    throw error;
+  });
 }
 
 function defaultProviderFile(defaultProviderId: string): ProviderFile {
