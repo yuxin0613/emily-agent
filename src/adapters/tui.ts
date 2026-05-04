@@ -125,7 +125,9 @@ async function readPromptLine(
   state: { sessionId: string; lastRunId: string; permissionMode: string },
 ): Promise<string | null> {
   try {
-    return await rl.question(promptFor(state));
+    const answer = await rl.question(promptFor(state));
+    clearSubmittedPromptLine();
+    return answer;
   } catch (error) {
     if (!isTuiAbortError(error)) throw error;
     output.write("\n");
@@ -156,13 +158,13 @@ function printHelp(): void {
   output.write(formatTuiHelp());
 }
 
-function promptFor(state: { sessionId: string; lastRunId: string; permissionMode: string }): string {
-  const session = style(shortId(state.sessionId, 18), "cyan");
-  const run = state.lastRunId ? ` ${style(`run ${state.lastRunId.slice(0, 8)}`, "gray")}` : "";
-  const mode = state.permissionMode === "danger_full_access"
-    ? style("danger", "yellow")
-    : style(state.permissionMode === "read_only" ? "read" : "write", "gray");
-  return `${style("emily", "bold")} ${session}${run} ${mode} ${style(">", "green")} `;
+function promptFor(_state: { sessionId: string; lastRunId: string; permissionMode: string }): string {
+  return `${style("●", "cyan")} `;
+}
+
+function clearSubmittedPromptLine(): void {
+  if (!output.isTTY) return;
+  output.write("\x1b[1A\r\x1b[2K");
 }
 
 function isCommand(message: string): boolean {
@@ -337,10 +339,9 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
 }
 
 async function sendChat(runtime, state, message: string): Promise<void> {
-  printChatBlock("Human", message, "cyan");
+  output.write(formatTuiSubmittedInput(message));
   const detachProgress = attachProgressReporter(runtime, state);
   const startedAt = Date.now();
-  output.write(`${style("Working", "dim")} ${style("planner, agents, memory, and review will report progress here when active.", "gray")}\n`);
   let response;
   try {
     response = await runtime.handleUserMessage(message, {
@@ -767,6 +768,24 @@ export function formatTuiHome({
   lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
   lines.push("");
   lines.push(style("Welcome to Emily Agent! Type your message or /help for commands.", "gray"));
+  lines.push("");
+  return `${lines.join("\n")}\n`;
+}
+
+export function formatTuiSubmittedInput(message: string, width = terminalWidth()): string {
+  const contentWidth = Math.max(24, width - 4);
+  const rule = "─".repeat(Math.min(88, Math.max(40, width - 2)));
+  const lines = [
+    "",
+    style(rule, "gray"),
+  ];
+  wrapBlock(String(message || "").trim() || "(empty)", contentWidth).forEach((line, index) => {
+    const marker = index === 0 ? style("●", "cyan") : " ";
+    lines.push(`${marker} ${line}`);
+  });
+  lines.push("");
+  lines.push(style("Initializing agent...", "gray"));
+  lines.push(style(rule, "gray"));
   lines.push("");
   return `${lines.join("\n")}\n`;
 }
