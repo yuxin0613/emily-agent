@@ -59,16 +59,16 @@ export class RoleManager {
     model,
     temperature,
   }: {
-    provider?: string;
-    model?: string;
-    temperature?: number;
+    provider?: string | null;
+    model?: string | null;
+    temperature?: number | null;
   }): Promise<RoleDefinition> {
     const current = await this.getRole(name);
     const next = {
       ...current,
-      ...(provider !== undefined ? { provider } : {}),
-      ...(model !== undefined ? { model } : {}),
-      ...(temperature !== undefined ? { temperature } : {}),
+      ...(provider !== undefined ? { provider: provider || undefined } : {}),
+      ...(model !== undefined ? { model: model || undefined } : {}),
+      ...(temperature !== undefined ? { temperature: temperature ?? undefined } : {}),
     };
     this.validateProviderBinding({
       provider: next.provider,

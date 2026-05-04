@@ -61,6 +61,7 @@ Run after install:
 
 ```bash
 emily --doctor --deep
+emily model
 emily
 EMILY_WEB_TOKEN=change-me emily --web
 ```
@@ -185,6 +186,8 @@ Each role can define:
 - skills;
 - output contract;
 - operating instructions.
+
+Run `emily model` to configure the main agent provider/model first, then optionally customize individual roles. Roles with no explicit provider/model automatically inherit the main agent provider/model.
 
 Builtin role presets:
 

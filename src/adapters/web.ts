@@ -70,7 +70,7 @@ export async function startWebServer({
       outputContract?: string;
       instructions: string;
     }) => Promise<unknown>;
-    updateRoleProvider: (name: string, input: { provider?: string; model?: string; temperature?: number }) => Promise<unknown>;
+    updateRoleProvider: (name: string, input: { provider?: string | null; model?: string | null; temperature?: number | null }) => Promise<unknown>;
     initializeDefaultRoles: (options?: { overwrite?: boolean }) => Promise<unknown[]>;
     listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
     getSession: (sessionId: string) => unknown;

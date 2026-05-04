@@ -223,6 +223,7 @@ ${BOLD}Emily AgentOS installed.${NC}
 
 Try:
   $COMMAND_NAME --doctor --deep
+  $COMMAND_NAME model
   $COMMAND_NAME
   EMILY_WEB_TOKEN=change-me $COMMAND_NAME --web
 

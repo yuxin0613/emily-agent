@@ -18,6 +18,7 @@ After installation:
 
 ```bash
 emily --doctor --deep
+emily model
 emily
 EMILY_WEB_TOKEN=change-me emily --web
 ```
@@ -74,6 +75,14 @@ Use the gateway when another application wants to drive AgentOS directly.
 Providers are stored in `.emily/providers.json`.
 
 Use `echo` for local architecture tests only. Use `openai` or `ollama` for real model work.
+
+The easiest setup path is:
+
+```bash
+emily model
+```
+
+This opens an interactive provider/model setup flow. It configures the main agent first. After that, choose any role that needs a custom provider/model; pressing Enter for a role keeps it inherited from the main agent.
 
 OpenAI-compatible example:
 

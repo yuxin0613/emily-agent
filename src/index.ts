@@ -1,8 +1,10 @@
 import { createRuntime } from "./runtime/createRuntime.ts";
 import { startTui } from "./adapters/tui.ts";
 import { startWebServer } from "./adapters/web.ts";
+import { startModelConfig } from "./adapters/modelConfig.ts";
 
-const args = new Set(process.argv.slice(2));
+const rawArgs = process.argv.slice(2);
+const args = new Set(rawArgs);
 
 if (args.has("--help") || args.has("-h")) {
   printHelp();
@@ -22,6 +24,9 @@ if (args.has("--security-audit")) {
   await runtime.shutdown();
 } else if (args.has("--cron-once")) {
   console.log(JSON.stringify(await runtime.cronScheduler.runDue(), null, 2));
+  await runtime.shutdown();
+} else if (rawArgs[0] === "model") {
+  await startModelConfig({ runtime });
   await runtime.shutdown();
 } else if (args.has("--cron")) {
   console.log("Emily AgentOS cron scheduler running. Press Ctrl+C to stop.");
@@ -48,6 +53,7 @@ function printHelp(): void {
     "",
     "Usage:",
     "  emily                 start the terminal UI",
+    "  emily model           configure main and role providers/models",
     "  emily --tui           start the terminal UI",
     "  emily --web           start the WebUI and Gateway",
     "  emily --cron          run the internal cron scheduler",

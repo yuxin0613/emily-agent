@@ -1,0 +1,56 @@
+import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { PassThrough } from "node:stream";
+import { startModelConfig } from "../src/adapters/modelConfig.ts";
+import { createRuntime } from "../src/runtime/createRuntime.ts";
+
+const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-model-config-"));
+const roleDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-model-config-roles-"));
+const runtime = await createRuntime({ dataDir, roleDir, enableCron: false });
+
+try {
+  await runtime.initializeDefaultRoles();
+  await runtime.updateRoleProvider("planner", {
+    provider: "echo",
+    model: "old-planner-model",
+  });
+
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const chunks: Buffer[] = [];
+  output.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+
+  const configuring = startModelConfig({ runtime, input, output });
+  writePromptLines(input, [
+    "new",
+    "echo",
+    "main-echo",
+    "main-model",
+    "main-model",
+    "planner",
+    "y",
+    "done",
+  ]);
+  await configuring;
+
+  assert.equal(runtime.providerRegistry.defaultProviderId, "main-echo");
+  const mainProvider = runtime.providerRegistry.getConfig("main-echo");
+  assert.equal(mainProvider.model, "main-model");
+  const planner = await runtime.roleManager.getRole("planner");
+  assert.equal(planner.provider, undefined);
+  assert.equal(planner.model, undefined);
+  assert.match(Buffer.concat(chunks).toString("utf8"), /Model setup saved/);
+} finally {
+  await runtime.shutdown();
+}
+
+console.log("model config test passed");
+
+function writePromptLines(input: PassThrough, lines: string[]): void {
+  lines.forEach((line, index) => {
+    setTimeout(() => input.write(`${line}\n`), index * 20);
+  });
+  setTimeout(() => input.end(), lines.length * 20 + 20);
+}
