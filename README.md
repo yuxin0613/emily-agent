@@ -57,11 +57,18 @@ EMILY_REPO_URL=https://github.com/your-org/emily-agent.git \
 
 The installer clones or updates the repo under `~/.emily/emily-agent`, installs Node dependencies, and creates `~/.local/bin/emily`.
 
+Update an existing install:
+
+```bash
+emily update
+```
+
 Run after install:
 
 ```bash
 emily --doctor --deep
 emily model
+emily update
 emily
 EMILY_WEB_TOKEN=change-me emily --web
 ```
