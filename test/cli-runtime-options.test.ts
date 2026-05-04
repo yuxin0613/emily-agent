@@ -6,6 +6,7 @@ assert.equal(shouldStartCronForCliArgs(["--tui"]), true);
 assert.equal(shouldStartCronForCliArgs(["--web"]), true);
 assert.equal(shouldStartCronForCliArgs(["--cron"]), true);
 assert.equal(shouldStartCronForCliArgs(["model"]), false);
+assert.equal(shouldStartCronForCliArgs(["update"]), false);
 assert.equal(shouldStartCronForCliArgs(["--doctor"]), false);
 assert.equal(shouldStartCronForCliArgs(["--doctor", "--deep"]), false);
 assert.equal(shouldStartCronForCliArgs(["--security-audit"]), false);
