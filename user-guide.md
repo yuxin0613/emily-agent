@@ -248,9 +248,24 @@ EMILY_HTTP_EGRESS_ALLOWLIST=127.0.0.1 npm run web
 
 Use `EMILY_HTTP_ALLOW_PRIVATE=true` only when you understand the SSRF tradeoff.
 
-## 9. LLM Wiki Skill
+## 9. External LLM Wiki Skill
 
-Run `llm_wiki` as a separate service, then point AgentOS at its API:
+`llm-wiki` is not bundled as a builtin AgentOS skill. Keep the skill package in the `llm_wiki` project and mount it into AgentOS as an external skill folder.
+
+The external skill folder can be shaped like either:
+
+```text
+llm-wiki/skill.md
+llm-wiki/SKILL.md
+```
+
+Mount it by dropping or symlinking the folder under the configured skill directory, or by adding another skill root:
+
+```bash
+export EMILY_SKILL_DIRS="/path/to/emily-agent/skills:/path/to/llm_wiki/agentos-skills"
+```
+
+Then run `llm_wiki` as a separate service and point AgentOS at its API:
 
 ```bash
 export EMILY_LLM_WIKI_BASE_URL=http://127.0.0.1:6081
@@ -283,7 +298,7 @@ Supported actions:
 - `query`, `health`, `status`, `concepts`: require `network_read`.
 - `import_url`, `upload`, `analyze_page`: require `network_write`.
 
-Keep `llm_wiki` as an independently deployed knowledge compiler. AgentOS only calls its API through the `llm-wiki` skill and audited `llm_wiki` tool.
+Keep `llm_wiki` as an independently deployed knowledge compiler. AgentOS only calls its API when an external skill and a role explicitly opt into the audited `llm_wiki` tool.
 
 ## 10. GitHub Skill
 
@@ -352,7 +367,10 @@ File skills live at:
 
 ```text
 skills/<skill>/skill.md
+skills/<skill>/SKILL.md
 ```
+
+Mount additional skill roots with `EMILY_SKILL_DIRS` when a skill package lives in another project.
 
 Skill candidates are proposed from repeated successful workflows. Approve only skills that are reusable, stable, and worth keeping.
 

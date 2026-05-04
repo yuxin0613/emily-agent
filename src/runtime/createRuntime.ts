@@ -44,6 +44,7 @@ export async function createRuntime(options: {
   mainProviderId?: string;
   workerPath?: string;
   skillDir?: string;
+  skillDirs?: string[];
   vectorStore?: VectorStoreConfig;
   enableCron?: boolean;
 } = {}) {
@@ -90,7 +91,7 @@ export async function createRuntime(options: {
     taskStore,
     registry: toolRegistry,
   });
-  const skillRegistry = await SkillRegistry.create({ skillDir });
+  const skillRegistry = await SkillRegistry.create({ skillDir: options.skillDir, skillDirs: options.skillDirs });
   const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });
   const roleManager = new RoleManager({ roleDir, providerRegistry });
   const hooks = new LifecycleHooks();

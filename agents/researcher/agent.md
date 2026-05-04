@@ -4,7 +4,6 @@ singleton: true
 temperature: 0.2
 allowed_tools:
   - read_file
-  - llm_wiki
 forbidden_tools:
   - write_file
   - shell
@@ -15,7 +14,6 @@ capabilities:
   - comparison
 skills:
   - research
-  - llm-wiki
 output_contract: "Return facts, assumptions, and decision-relevant context."
 ---
 
@@ -28,10 +26,9 @@ Capabilities: summarization, context gathering, comparison
 
 1. Clarify the research question.
 2. Gather relevant memory, local files, package metadata, and task constraints.
-3. Query LLM Wiki when durable project knowledge, architecture decisions, or prior documentation may already exist.
-4. Separate facts, assumptions, decision-relevant context, and open questions.
-5. Mark whether current external information would be required before treating a claim as up to date.
-6. Return concise context the main agent can use directly.
+3. Separate facts, assumptions, decision-relevant context, and open questions.
+4. Mark whether current external information would be required before treating a claim as up to date.
+5. Return concise context the main agent can use directly.
 
 ## Output Shape
 

@@ -16,13 +16,15 @@ export class SkillRegistry {
 
   static async create({
     skillDir = defaultSkillDir(),
+    skillDirs,
     includeBuiltIns = true,
   }: {
     skillDir?: string;
+    skillDirs?: string[];
     includeBuiltIns?: boolean;
   } = {}): Promise<SkillRegistry> {
     const registry = new SkillRegistry(includeBuiltIns ? DEFAULT_SKILLS : []);
-    for (const skill of await readSkillDirectory(skillDir)) {
+    for (const skill of await readSkillDirectories(skillDirs || defaultSkillDirs(skillDir))) {
       registry.add(skill);
     }
     return registry;
@@ -148,18 +150,41 @@ export function defaultSkillDir(): string {
   return process.env.EMILY_SKILL_DIR || path.join(process.cwd(), "skills");
 }
 
+export function defaultSkillDirs(skillDir = defaultSkillDir()): string[] {
+  const configured = [
+    ...splitSkillDirs(process.env.EMILY_SKILL_DIRS),
+    ...splitSkillDirs(process.env.EMILY_SKILL_PATHS),
+    skillDir,
+  ].filter(Boolean);
+  return unique(configured);
+}
+
+async function readSkillDirectories(skillDirs: string[]): Promise<SkillDefinition[]> {
+  const skills: SkillDefinition[] = [];
+  const seen = new Set<string>();
+  for (const skillDir of skillDirs) {
+    const resolved = path.resolve(skillDir);
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    skills.push(...await readSkillDirectory(resolved));
+  }
+  return skills;
+}
+
 async function readSkillDirectory(skillDir: string): Promise<SkillDefinition[]> {
   try {
+    const directFile = await firstExistingSkillFile(skillDir);
+    if (directFile) {
+      return [parseSkillMarkdown(await readFile(directFile, "utf8"), path.basename(skillDir))];
+    }
+
     const entries = await readdir(skillDir, { withFileTypes: true });
     const skills: SkillDefinition[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const filePath = path.join(skillDir, entry.name, "skill.md");
-      try {
+      const filePath = await firstExistingSkillFile(path.join(skillDir, entry.name));
+      if (filePath) {
         skills.push(parseSkillMarkdown(await readFile(filePath, "utf8"), entry.name));
-      } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
-        throw error;
       }
     }
     return skills;
@@ -167,6 +192,20 @@ async function readSkillDirectory(skillDir: string): Promise<SkillDefinition[]> 
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
     throw error;
   }
+}
+
+async function firstExistingSkillFile(skillDir: string): Promise<string | null> {
+  for (const fileName of ["skill.md", "SKILL.md"]) {
+    const filePath = path.join(skillDir, fileName);
+    try {
+      await readFile(filePath, "utf8");
+      return filePath;
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+      throw error;
+    }
+  }
+  return null;
 }
 
 export function parseSkillMarkdown(content: string, fallbackName: string): SkillDefinition {
@@ -249,6 +288,10 @@ function titleCase(value: string): string {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+function splitSkillDirs(value: string | undefined): string[] {
+  return value ? value.split(path.delimiter).map((item) => item.trim()).filter(Boolean) : [];
 }
 
 function cloneSkillDefinition(definition: SkillDefinition): SkillDefinition {
@@ -360,24 +403,6 @@ const DEFAULT_SKILLS: SkillDefinition[] = [
       "Do not merge, close, delete, dispatch workflows, or publish comments without an explicit trusted approval.",
       "Summarize repository, issue or PR number, state, blockers, and the next safe action.",
       "Use local file tools for code review details instead of relying only on GitHub metadata.",
-    ].join("\n"),
-  },
-  {
-    name: "llm-wiki",
-    title: "LLM Wiki",
-    description: "Use a separately deployed LLM Wiki service as a durable, human-readable project knowledge base.",
-    capabilities: ["durable knowledge", "wiki query", "knowledge ingestion", "project documentation"],
-    toolHints: ["llm_wiki"],
-    aliases: ["wiki", "knowledge-base", "llm_wiki"],
-    triggers: ["wiki", "knowledge base", "durable knowledge", "知识库", "文档沉淀", "长期知识"],
-    antiTriggers: ["do not persist", "no wiki", "不要写入知识库"],
-    source: "builtin",
-    instructions: [
-      "Use AgentOS memory for task context and reusable experience; use LLM Wiki for stable knowledge pages.",
-      "Query the wiki before re-explaining project decisions, architecture, or prior research.",
-      "Ingest only durable source material, approved run summaries, project docs, or high-value experience.",
-      "Do not send secrets, raw private chat logs, credentials, or unapproved user data to the wiki.",
-      "Use network_read approval for query/status/list actions and network_write approval for import/analyze/upload actions.",
     ].join("\n"),
   },
   {
