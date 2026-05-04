@@ -93,7 +93,7 @@ export class ExperienceStore {
   }
 
   constructor({ dbPath, compressor }: { dbPath: string; compressor: VectorCompressor }) {
-    this.db = new DatabaseSync(dbPath);
+    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
     this.compressor = compressor;
     this.matcher = new ExperienceMatcher({ compressor });
     this.db.exec(`

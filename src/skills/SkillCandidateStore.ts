@@ -49,7 +49,7 @@ export class SkillCandidateStore {
   }
 
   constructor({ dbPath, skillDir }: { dbPath: string; skillDir: string }) {
-    this.db = new DatabaseSync(dbPath);
+    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
     this.skillDir = skillDir;
     this.db.exec(`
       PRAGMA journal_mode = WAL;

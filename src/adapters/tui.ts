@@ -1,14 +1,29 @@
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
+const ANSI = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  red: "\x1b[31m",
+  blue: "\x1b[34m",
+  gray: "\x1b[90m",
+};
+
+const VALID_PERMISSION_MODES = new Set(["read_only", "workspace_write", "danger_full_access"]);
+
 export async function startTui({ runtime }) {
   const rl = readline.createInterface({ input, output });
   const state = {
     sessionId: "tui",
     lastRunId: "",
+    permissionMode: "workspace_write",
   };
 
-  printBanner();
+  await printBanner(runtime, state);
   printHelp();
 
   try {
@@ -25,7 +40,7 @@ export async function startTui({ runtime }) {
           await sendChat(runtime, state, message);
         }
       } catch (error) {
-        output.write(`\nError: ${error instanceof Error ? error.message : String(error)}\n\n`);
+        printError(error);
       }
     }
   } finally {
@@ -33,57 +48,32 @@ export async function startTui({ runtime }) {
   }
 }
 
-function printBanner(): void {
-  output.write("\nEmily AgentOS TUI\n");
-  output.write("Runtime, tasks, knowledge, and chat in one console.\n\n");
+async function printBanner(runtime, state): Promise<void> {
+  const health = await safeHealth(runtime);
+  const summary = [
+    `session ${state.sessionId}`,
+    `mode ${state.permissionMode}`,
+    health ? `tasks ${health.pendingTasks}/${health.runningTasks}` : "tasks ?/?",
+    health ? `graphs ${health.openTaskGraphs}` : "graphs ?",
+  ].join("  ");
+  if (output.isTTY) output.write("\x1Bc");
+  else output.write("\n");
+  output.write(`${style("Emily AgentOS", "bold")} ${style("terminal workspace", "dim")}\n`);
+  output.write(`${style(summary, "gray")}\n`);
+  output.write(`${style("Type a request, or use :help for commands. /new starts fresh; /clear hides this session.", "dim")}\n\n`);
 }
 
 function printHelp(): void {
-  output.write([
-    "Commands:",
-    "  :help                         show commands",
-    "  :health                       runtime health",
-    "  :doctor [deep|repair]         aggregated runtime doctor",
-    "  :providers                    list providers",
-    "  :roles                        list roles",
-    "  :commands                     list command registry entries",
-    "  :cron                         list cron jobs",
-    "  :cron-add <name> <cron> <msg>  schedule a chat cron job",
-    "  :cron-pause <id>               pause cron job",
-    "  :cron-resume <id>              resume cron job",
-    "  :cron-run <id>                 run cron job now",
-    "  :cron-delete <id>              delete cron job",
-    "  :sessions [all|hidden|trash]  list sessions",
-    "  :resume latest [hidden]       resume latest session",
-    "  :export-session <id> [md]     export session",
-    "  :compact-preview <id> [n]     preview session compaction",
-    "  :session-usage <id>           provider usage for a session",
-    "  :tools                        list tools",
-    "  :skills                       list skills",
-    "  :candidates [status]          list skill candidates",
-    "  :build-skills                 build skill candidates",
-    "  :approve-skill <id> [reason]  approve proposed skill",
-    "  :reject-skill <id> [reason]   reject proposed skill",
-    "  :experiences [query]          list or search experiences",
-    "  :timeline [runId]             show run timeline",
-    "  :trace <taskId>               show task trace",
-    "  :diagnostics [repair]         runtime diagnostics",
-    "  :maintenance                  run maintenance",
-    "  :session <id>                 set chat session",
-    "  :messages                    show current session messages",
-    "  :restore-session <id>         restore hidden or trashed session",
-    "  :trash-session <id>           move session to trash",
-    "  /new                          start a new visible session",
-    "  /clear                        hide current session and start a new one",
-    "  :clear-screen                 clear screen",
-    "  exit                          quit",
-    "",
-  ].join("\n"));
+  output.write(formatTuiHelp());
 }
 
-function promptFor(state: { sessionId: string; lastRunId: string }): string {
-  const run = state.lastRunId ? ` run:${state.lastRunId.slice(0, 8)}` : "";
-  return `[${state.sessionId}${run}] > `;
+function promptFor(state: { sessionId: string; lastRunId: string; permissionMode: string }): string {
+  const session = style(shortId(state.sessionId, 18), "cyan");
+  const run = state.lastRunId ? ` ${style(`run ${state.lastRunId.slice(0, 8)}`, "gray")}` : "";
+  const mode = state.permissionMode === "danger_full_access"
+    ? style("danger", "yellow")
+    : style(state.permissionMode === "read_only" ? "read" : "write", "gray");
+  return `${style("emily", "bold")} ${session}${run} ${mode} ${style(">", "green")} `;
 }
 
 function isCommand(message: string): boolean {
@@ -100,6 +90,12 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     case "health":
       printText(await runtime.runCommand("health", { format: "text" }));
+      return;
+    case "status":
+      await printStatus(runtime, state);
+      return;
+    case "mode":
+      setPermissionMode(state, args[0]);
       return;
     case "doctor":
       printText(await runtime.runCommand("doctor", { args, format: "text" }));
@@ -220,7 +216,7 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
     case "session":
       if (!args[0]) throw new Error("session id is required");
       await selectSession(runtime, state, args[0]);
-      output.write(`\nSession: ${state.sessionId}\n\n`);
+      printPanel("Session", state.sessionId, "cyan");
       return;
     case "messages":
       printText(await runtime.runCommand("session.messages", {
@@ -234,9 +230,10 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
         return;
       }
       output.write("\x1Bc");
+      await printBanner(runtime, state);
       return;
     case "clear-screen":
-      output.write("\x1Bc");
+      await printBanner(runtime, state);
       return;
     default:
       output.write(`\nUnknown command: ${command}\n\n`);
@@ -245,22 +242,62 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
 }
 
 async function sendChat(runtime, state, message: string): Promise<void> {
-  const response = await runtime.handleUserMessage(message, {
-    sessionId: state.sessionId,
-    source: "tui",
-  });
+  printChatBlock("Human", message, "cyan");
+  const detachProgress = attachProgressReporter(runtime, state);
+  const startedAt = Date.now();
+  output.write(`${style("Working", "dim")} ${style("planner, agents, memory, and review will report progress here when active.", "gray")}\n`);
+  let response;
+  try {
+    response = await runtime.handleUserMessage(message, {
+      sessionId: state.sessionId,
+      source: "tui",
+      permissionMode: state.permissionMode,
+    });
+  } finally {
+    detachProgress();
+  }
   if (response.runId) state.lastRunId = response.runId;
-  output.write(`\n${response.content}\n`);
-  if (response.delegatedTo?.length) {
-    output.write(`\nDelegated: ${response.delegatedTo.join(", ")}\n`);
-  }
-  if (response.runId) {
-    output.write(`Run: ${response.runId}\n`);
-  }
+  printChatBlock("Emily", response.content, "green");
+  const meta = [];
+  if (response.runId) meta.push(`run ${response.runId}`);
+  if (response.delegatedTo?.length) meta.push(`agents ${response.delegatedTo.join(", ")}`);
+  meta.push(`elapsed ${formatDuration(Date.now() - startedAt)}`);
+  printMeta(meta);
   if (response.needsUserInput?.questions?.length) {
-    output.write(`Questions: ${response.needsUserInput.questions.join(" | ")}\n`);
+    printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
   }
   output.write("\n");
+}
+
+async function printStatus(runtime, state): Promise<void> {
+  const health = await safeHealth(runtime);
+  const session = await runtime.runCommand("session.messages", {
+    input: { sessionId: state.sessionId, limit: 1 },
+  }).catch(() => []);
+  const lines = [
+    `session: ${state.sessionId}`,
+    `permission mode: ${state.permissionMode}`,
+    `last run: ${state.lastRunId || "(none)"}`,
+    `messages loaded: ${Array.isArray(session) ? session.length : 0}`,
+    health ? `tasks: ${health.pendingTasks} pending, ${health.runningTasks} running, ${health.expiredLeases} expired leases` : "tasks: unavailable",
+    health ? `graphs: ${health.openTaskGraphs} open, diagnostics ${health.diagnostics}` : "graphs: unavailable",
+  ];
+  printPanel("Status", lines.join("\n"), "cyan");
+}
+
+function setPermissionMode(state, value?: string): void {
+  if (!value) {
+    printPanel("Permission Mode", [
+      `current: ${state.permissionMode}`,
+      "available: read_only, workspace_write, danger_full_access",
+    ].join("\n"), "cyan");
+    return;
+  }
+  if (!VALID_PERMISSION_MODES.has(value)) {
+    throw new Error(`invalid permission mode: ${value}`);
+  }
+  state.permissionMode = value;
+  printPanel("Permission Mode", `current: ${state.permissionMode}`, value === "danger_full_access" ? "yellow" : "cyan");
 }
 
 function printCommands(commands): void {
@@ -287,7 +324,7 @@ async function startNewSession(runtime, state, args: string[] = []): Promise<voi
   });
   state.sessionId = session.id;
   state.lastRunId = "";
-  output.write(`\nNew session: ${session.id}\n\n`);
+  printPanel("New Session", session.id, "cyan");
 }
 
 async function addCron(runtime, state, args: string[]): Promise<void> {
@@ -313,11 +350,11 @@ async function resumeLatest(runtime, state, args: string[]): Promise<void> {
     input: { includeHidden: args.includes("hidden") || args.includes("--hidden") },
   });
   if (!session) {
-    output.write("\nNo session to resume.\n\n");
+    printPanel("Resume", "No session to resume.", "yellow");
     return;
   }
   await selectSession(runtime, state, session.id);
-  output.write(`\nResumed session: ${session.id}\n\n`);
+  printPanel("Resumed Session", session.id, "cyan");
 }
 
 async function exportSession(runtime, args: string[]): Promise<void> {
@@ -354,7 +391,10 @@ async function clearCurrentSession(runtime, state): Promise<void> {
   });
   state.sessionId = result.next.id;
   state.lastRunId = "";
-  output.write(`\nHidden session: ${result.hidden?.id || "(none)"}\nNew session: ${result.next.id}\n\n`);
+  printPanel("Session Cleared", [
+    `hidden: ${result.hidden?.id || "(none)"}`,
+    `current: ${result.next.id}`,
+  ].join("\n"), "cyan");
 }
 
 async function restoreSession(runtime, state, args: string[]): Promise<void> {
@@ -363,7 +403,7 @@ async function restoreSession(runtime, state, args: string[]): Promise<void> {
     input: { sessionId: args[0] },
   });
   await selectSession(runtime, state, session.id);
-  output.write(`\nRestored session: ${session.id}\n\n`);
+  printPanel("Restored Session", session.id, "cyan");
 }
 
 async function trashSession(runtime, args: string[]): Promise<void> {
@@ -374,7 +414,10 @@ async function trashSession(runtime, args: string[]): Promise<void> {
       reason: "trashed from TUI",
     },
   });
-  output.write(`\nTrashed session: ${session.id}\nDelete after: ${session.deleteAfter || "(not scheduled)"}\n\n`);
+  printPanel("Trashed Session", [
+    `session: ${session.id}`,
+    `delete after: ${session.deleteAfter || "(not scheduled)"}`,
+  ].join("\n"), "yellow");
 }
 
 async function approveSkill(runtime, args: string[]): Promise<void> {
@@ -425,12 +468,89 @@ async function printTrace(runtime, taskId?: string): Promise<void> {
   printJson(trace);
 }
 
+function attachProgressReporter(runtime, state): () => void {
+  const manager = runtime.roleAgentManager;
+  if (!manager?.on || !manager?.off) return () => undefined;
+  const seen = new Set<string>();
+  const handler = (envelope) => {
+    const event = envelope?.event || null;
+    const task = envelope?.task || null;
+    const type = event?.type || envelope?.type || "";
+    if (!shouldShowProgressEvent(type)) return;
+    const eventKey = event?.id ? String(event.id) : `${type}:${envelope?.taskId || ""}:${task?.status || ""}`;
+    if (seen.has(eventKey)) return;
+    seen.add(eventKey);
+    if (task?.metadata?.sessionId && task.metadata.sessionId !== state.sessionId) return;
+    const line = formatProgressEvent(type, task, event);
+    if (line) output.write(`${style("  |", "gray")} ${style(line, "gray")}\n`);
+  };
+  manager.on("event", handler);
+  return () => manager.off("event", handler);
+}
+
+function shouldShowProgressEvent(type: string): boolean {
+  if (!type) return false;
+  if (/heartbeat|acknowledged|metadata|session\./.test(type)) return false;
+  return type.startsWith("task.")
+    || type.startsWith("task_graph.")
+    || type.startsWith("tool.execution.")
+    || type === "runtime.anomaly";
+}
+
+function formatProgressEvent(type: string, task, event): string {
+  if (type.startsWith("task.")) {
+    const status = type.replace(/^task\./, "");
+    const role = task?.role ? `${task.role} ` : "";
+    const title = task?.title ? ` - ${truncate(task.title, 72)}` : "";
+    return `${role}${status}${title}`;
+  }
+  if (type.startsWith("task_graph.")) {
+    return type.replace(/^task_graph\./, "graph ");
+  }
+  if (type.startsWith("tool.execution.")) {
+    const tool = event?.payload?.tool || "tool";
+    return `${tool} ${type.replace(/^tool\.execution\./, "")}`;
+  }
+  if (type === "runtime.anomaly") {
+    return `anomaly: ${event?.payload?.code || event?.payload?.message || "runtime"}`;
+  }
+  return type;
+}
+
+function printChatBlock(label: string, content: string, color: keyof typeof ANSI): void {
+  output.write("\n");
+  output.write(`${style(label, color)}\n`);
+  for (const line of wrapBlock(String(content || "").trim() || "(empty)", terminalWidth() - 4)) {
+    output.write(`  ${line}\n`);
+  }
+  output.write("\n");
+}
+
+function printPanel(title: string, content: string, color: keyof typeof ANSI = "cyan"): void {
+  output.write("\n");
+  output.write(`${style(title, color)}\n`);
+  for (const line of String(content || "").split("\n")) {
+    output.write(`  ${line}\n`);
+  }
+  output.write("\n");
+}
+
+function printMeta(items: string[]): void {
+  if (!items.length) return;
+  output.write(`${style(items.map((item) => `[${item}]`).join(" "), "gray")}\n`);
+}
+
 function printJson(value): void {
   output.write(`\n${JSON.stringify(value, null, 2)}\n\n`);
 }
 
 function printText(value): void {
-  output.write(`\n${String(value)}\n\n`);
+  output.write(`\n${String(value).trimEnd()}\n\n`);
+}
+
+function printError(error): void {
+  const message = error instanceof Error ? error.message : String(error);
+  printPanel("Error", message, "red");
 }
 
 function printTable(rows: string[][]): void {
@@ -465,6 +585,68 @@ function sessionListOptions(value?: string): {
   throw new Error(`invalid session list mode: ${value}`);
 }
 
+export function formatTuiHelp(): string {
+  const sections: Array<[string, string[][]]> = [
+    ["Chat", [
+      ["type anything", "send a message to the current session"],
+      ["/new [title]", "create a new visible session"],
+      ["/clear", "hide current session and create a new one"],
+      [":mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
+      [":status", "show current TUI/runtime status"],
+    ]],
+    ["Runtime", [
+      [":health", "runtime health"],
+      [":doctor [deep|repair]", "aggregated runtime doctor"],
+      [":diagnostics [repair]", "runtime diagnostics"],
+      [":maintenance", "run maintenance"],
+      [":commands", "list command registry entries"],
+    ]],
+    ["Sessions", [
+      [":sessions [all|hidden|trash]", "list sessions"],
+      [":session <id>", "switch session"],
+      [":messages [limit]", "show current session messages"],
+      [":resume latest [hidden]", "resume latest session"],
+      [":export-session <id> [md]", "export session"],
+      [":compact-preview <id> [n]", "preview session compaction"],
+      [":session-usage <id>", "provider usage for a session"],
+      [":restore-session <id>", "restore hidden or trashed session"],
+      [":trash-session <id>", "move session to trash"],
+    ]],
+    ["Work", [
+      [":timeline [runId]", "show run timeline"],
+      [":trace <taskId>", "show task trace"],
+      [":providers", "list providers"],
+      [":roles", "list roles"],
+      [":tools", "list tools"],
+      [":skills", "list skills"],
+      [":experiences [query]", "list or search experiences"],
+    ]],
+    ["Skills And Cron", [
+      [":candidates [status]", "list skill candidates"],
+      [":build-skills", "build skill candidates"],
+      [":approve-skill <id> [reason]", "approve proposed skill"],
+      [":reject-skill <id> [reason]", "reject proposed skill"],
+      [":cron", "list cron jobs"],
+      [":cron-add <name> <cron> <msg>", "schedule a chat cron job"],
+      [":cron-pause|resume|run|delete <id>", "control cron jobs"],
+    ]],
+    ["Shell", [
+      [":clear-screen", "redraw the TUI"],
+      ["exit", "quit"],
+    ]],
+  ];
+  const lines = ["Commands"];
+  for (const [section, rows] of sections) {
+    lines.push("", `  ${section}`);
+    const width = Math.max(...rows.map(([command]) => command.length));
+    for (const [command, description] of rows) {
+      lines.push(`    ${command.padEnd(width)}  ${description}`);
+    }
+  }
+  lines.push("");
+  return `${lines.join("\n")}\n`;
+}
+
 function numberArg(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -477,14 +659,87 @@ function requiredArg(value: string | undefined, label: string): string {
 }
 
 function truncate(value: string, maxLength: number): string {
+  value = stripAnsi(value);
   if (value.length <= maxLength) return value;
   return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 function visibleLength(value: string): number {
-  return value.length;
+  return stripAnsi(value).length;
 }
 
 function pad(value: string, width: number): string {
   return value + " ".repeat(Math.max(0, width - visibleLength(value)));
+}
+
+async function safeHealth(runtime): Promise<Record<string, number> | null> {
+  try {
+    return runtime.health();
+  } catch {
+    return null;
+  }
+}
+
+function supportsColor(): boolean {
+  return Boolean(output.isTTY && !process.env.NO_COLOR);
+}
+
+function style(value: string, key: keyof typeof ANSI): string {
+  if (!supportsColor()) return value;
+  const code = ANSI[key] || "";
+  return `${code}${value}${ANSI.reset}`;
+}
+
+function stripAnsi(value: string): string {
+  return String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function terminalWidth(): number {
+  return Math.max(60, Math.min(120, output.columns || 88));
+}
+
+function wrapBlock(content: string, width: number): string[] {
+  const lines: string[] = [];
+  for (const rawLine of content.split("\n")) {
+    if (!rawLine.trim()) {
+      lines.push("");
+      continue;
+    }
+    lines.push(...wrapLine(rawLine, width));
+  }
+  return lines;
+}
+
+function wrapLine(line: string, width: number): string[] {
+  if (visibleLength(line) <= width) return [line];
+  const words = line.split(/(\s+)/);
+  const lines: string[] = [];
+  let current = "";
+  for (const word of words) {
+    if (!word) continue;
+    if (visibleLength(`${current}${word}`) <= width) {
+      current += word;
+      continue;
+    }
+    if (current.trim()) lines.push(current.trimEnd());
+    current = word.trimStart();
+    while (visibleLength(current) > width) {
+      lines.push(current.slice(0, width));
+      current = current.slice(width);
+    }
+  }
+  if (current.trim()) lines.push(current.trimEnd());
+  return lines.length ? lines : [line.slice(0, width)];
+}
+
+function shortId(value: string, maxLength = 12): string {
+  if (!value) return "";
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 1)}...`;
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 }

@@ -73,7 +73,7 @@ export class TaskStore {
   constructor({ dataDir, taskDir, dbPath }: { dataDir: string; taskDir: string; dbPath: string }) {
     this.dataDir = dataDir;
     this.taskDir = taskDir;
-    this.db = new DatabaseSync(dbPath);
+    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;

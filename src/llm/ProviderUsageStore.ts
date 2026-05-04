@@ -85,7 +85,7 @@ export class ProviderUsageStore {
 
   constructor({ dataDir, dbPath }: { dataDir: string; dbPath: string }) {
     this.dataDir = dataDir;
-    this.db = new DatabaseSync(dbPath);
+    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
