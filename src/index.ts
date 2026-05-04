@@ -2,6 +2,7 @@ import { createRuntime } from "./runtime/createRuntime.ts";
 import { startTui } from "./adapters/tui.ts";
 import { startWebServer } from "./adapters/web.ts";
 import { startModelConfig } from "./adapters/modelConfig.ts";
+import { shouldStartCronForCliArgs } from "./runtime/CronStartup.ts";
 
 const rawArgs = process.argv.slice(2);
 const args = new Set(rawArgs);
@@ -11,7 +12,9 @@ if (args.has("--help") || args.has("-h")) {
   process.exit(0);
 }
 
-const runtime = await createRuntime();
+const runtime = await createRuntime({
+  enableCron: shouldStartCronForCliArgs(rawArgs),
+});
 
 if (args.has("--security-audit")) {
   console.log(JSON.stringify(await runtime.securityAudit(), null, 2));

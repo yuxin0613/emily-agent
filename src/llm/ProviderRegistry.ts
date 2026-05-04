@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { EchoModelProvider } from "./EchoModelProvider.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealth } from "./ModelProvider.ts";
@@ -19,6 +19,7 @@ export class ProviderRegistry {
   defaultProviderId: string;
   fallbackMode: ProviderFallbackMode;
   usageStore?: ProviderUsageStore;
+  private persistedSnapshot: ProviderFile;
 
   static async create({
     dataDir,
@@ -35,14 +36,16 @@ export class ProviderRegistry {
     persist?: boolean;
     usageStore?: ProviderUsageStore;
   }): Promise<ProviderRegistry> {
+    const persistedSnapshot = await readProviderConfig(dataDir, defaultProviderId);
     const loaded = providers
       ? { defaultProviderId, fallbackMode, providers }
-      : await readProviderConfig(dataDir, defaultProviderId);
+      : persistedSnapshot;
     const registry = new ProviderRegistry({
       providers: loaded.providers,
       defaultProviderId: loaded.defaultProviderId || defaultProviderId,
       fallbackMode: loaded.fallbackMode || fallbackMode,
       usageStore,
+      persistedSnapshot,
     });
     registry.ensureDefault();
     if (persist) {
@@ -52,7 +55,19 @@ export class ProviderRegistry {
     return registry;
   }
 
-  constructor({ providers, defaultProviderId = "echo", fallbackMode = "strict", usageStore }: { providers: ProviderConfig[]; defaultProviderId?: string; fallbackMode?: ProviderFallbackMode; usageStore?: ProviderUsageStore }) {
+  constructor({
+    providers,
+    defaultProviderId = "echo",
+    fallbackMode = "strict",
+    usageStore,
+    persistedSnapshot,
+  }: {
+    providers: ProviderConfig[];
+    defaultProviderId?: string;
+    fallbackMode?: ProviderFallbackMode;
+    usageStore?: ProviderUsageStore;
+    persistedSnapshot?: ProviderFile;
+  }) {
     this.providers = new Map(providers.map((provider) => {
       validateProviderConfig(provider);
       return [provider.id, cloneProviderConfig(provider)];
@@ -60,6 +75,11 @@ export class ProviderRegistry {
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
     this.usageStore = usageStore;
+    this.persistedSnapshot = cloneProviderFile(persistedSnapshot || {
+      defaultProviderId,
+      fallbackMode,
+      providers,
+    });
   }
 
   ensureDefault(): void {
@@ -176,18 +196,35 @@ export class ProviderRegistry {
   async write(dataDir: string): Promise<void> {
     await mkdir(dataDir, { recursive: true });
     const targetPath = providerConfigPath(dataDir);
-    const tmpPath = path.join(dataDir, `.config.${process.pid}.${Date.now()}.tmp`);
-    await writeFile(tmpPath, JSON.stringify({
+    const desired = this.toProviderFile();
+    await withProviderConfigLock(dataDir, async () => {
+      const disk = await readProviderConfig(dataDir, desired.defaultProviderId);
+      const merged = mergeProviderFiles({
+        base: this.persistedSnapshot,
+        desired,
+        disk,
+      });
+      await writeProviderFileUnlocked(dataDir, targetPath, merged);
+      this.applyProviderFile(merged);
+      this.persistedSnapshot = cloneProviderFile(merged);
+    });
+  }
+
+  private toProviderFile(): ProviderFile {
+    return {
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
       providers: this.list(),
-    }, null, 2), "utf8");
-    try {
-      await rename(tmpPath, targetPath);
-    } catch (error) {
-      await unlink(tmpPath).catch(() => undefined);
-      throw error;
-    }
+    };
+  }
+
+  private applyProviderFile(file: ProviderFile): void {
+    this.defaultProviderId = file.defaultProviderId;
+    this.fallbackMode = file.fallbackMode || "strict";
+    this.providers = new Map(file.providers.map((provider) => {
+      validateProviderConfig(provider);
+      return [provider.id, cloneProviderConfig(provider)];
+    }));
   }
 
   private withOverrides(config: ProviderConfig, overrides: { model?: string; temperature?: number }): ProviderConfig {
@@ -358,6 +395,147 @@ async function readProviderConfig(dataDir: string, defaultProviderId: string): P
     || defaultProviderFile(defaultProviderId);
 }
 
+async function writeProviderFileUnlocked(dataDir: string, targetPath: string, file: ProviderFile): Promise<void> {
+  const tmpPath = path.join(dataDir, `.config.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
+  try {
+    await writeFile(tmpPath, JSON.stringify(file, null, 2), "utf8");
+    await rename(tmpPath, targetPath);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+function mergeProviderFiles({
+  base,
+  desired,
+  disk,
+}: {
+  base: ProviderFile;
+  desired: ProviderFile;
+  disk: ProviderFile;
+}): ProviderFile {
+  const baseProviders = providerMap(base.providers);
+  const desiredProviders = providerMap(desired.providers);
+  const mergedProviders = providerMap(disk.providers);
+
+  if (desired.defaultProviderId !== base.defaultProviderId) {
+    disk.defaultProviderId = desired.defaultProviderId;
+  }
+  if ((desired.fallbackMode || "strict") !== (base.fallbackMode || "strict")) {
+    disk.fallbackMode = desired.fallbackMode || "strict";
+  }
+
+  for (const [id, provider] of desiredProviders) {
+    const previous = baseProviders.get(id);
+    if (!previous || !sameProviderConfig(previous, provider)) {
+      mergedProviders.set(id, cloneProviderConfig(provider));
+    }
+  }
+
+  for (const id of baseProviders.keys()) {
+    if (!desiredProviders.has(id)) {
+      mergedProviders.delete(id);
+    }
+  }
+
+  let defaultProviderId = disk.defaultProviderId || desired.defaultProviderId || "echo";
+  if (!mergedProviders.has(defaultProviderId)) {
+    const desiredDefault = desiredProviders.get(desired.defaultProviderId);
+    if (desiredDefault) {
+      defaultProviderId = desired.defaultProviderId;
+      mergedProviders.set(defaultProviderId, cloneProviderConfig(desiredDefault));
+    } else {
+      const fallbackProvider = mergedProviders.values().next().value as ProviderConfig | undefined;
+      if (fallbackProvider) defaultProviderId = fallbackProvider.id;
+      else {
+        defaultProviderId = "echo";
+        mergedProviders.set("echo", {
+          id: "echo",
+          type: "echo",
+          model: "echo-local",
+          enabled: true,
+        });
+      }
+    }
+  }
+
+  const merged: ProviderFile = {
+    defaultProviderId,
+    fallbackMode: disk.fallbackMode === "fallback" ? "fallback" : "strict",
+    providers: [...mergedProviders.values()].map(cloneProviderConfig),
+  };
+  for (const provider of merged.providers) validateProviderConfig(provider);
+  return merged;
+}
+
+function providerMap(providers: ProviderConfig[]): Map<string, ProviderConfig> {
+  return new Map(providers.map((provider) => [provider.id, cloneProviderConfig(provider)]));
+}
+
+function sameProviderConfig(left: ProviderConfig, right: ProviderConfig): boolean {
+  return stableJson(left) === stableJson(right);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function cloneProviderFile(file: ProviderFile): ProviderFile {
+  return {
+    defaultProviderId: file.defaultProviderId || "echo",
+    fallbackMode: file.fallbackMode === "fallback" ? "fallback" : "strict",
+    providers: file.providers.map(cloneProviderConfig),
+  };
+}
+
+async function withProviderConfigLock<T>(dataDir: string, operation: () => Promise<T>): Promise<T> {
+  const lockPath = `${providerConfigPath(dataDir)}.lock`;
+  const staleLockMs = 30_000;
+  const deadline = Date.now() + 5000;
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+
+  while (!handle) {
+    try {
+      const acquired = await open(lockPath, "wx");
+      try {
+        await acquired.writeFile(JSON.stringify({
+          pid: process.pid,
+          createdAt: new Date().toISOString(),
+        }), "utf8");
+        handle = acquired;
+      } catch (error) {
+        await acquired.close().catch(() => undefined);
+        await unlink(lockPath).catch(() => undefined);
+        throw error;
+      }
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+      const current = await stat(lockPath).catch(() => null);
+      if (current && Date.now() - current.mtimeMs > staleLockMs) {
+        await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for provider config lock: ${lockPath}`);
+      }
+      await delay(25);
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await handle.close().catch(() => undefined);
+    await unlink(lockPath).catch(() => undefined);
+  }
+}
+
 async function removeLegacyProviderConfig(dataDir: string): Promise<void> {
   await unlink(legacyProviderConfigPath(dataDir)).catch((error) => {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
@@ -476,4 +654,12 @@ function cloneProviderConfig(config: ProviderConfig): ProviderConfig {
     ...config,
     config: config.config ? { ...config.config } : undefined,
   };
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -107,6 +107,35 @@ assert.equal(migratedRegistry.getConfig("legacy-main").model, "legacy-model");
 assert.equal(JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")).defaultProviderId, "legacy-main");
 await assert.rejects(() => access(legacyProviderConfigPath(legacyConfigDir)), /ENOENT/);
 
+const concurrentConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-concurrent-"));
+const concurrentA = await ProviderRegistry.create({ dataDir: concurrentConfigDir });
+const concurrentB = await ProviderRegistry.create({ dataDir: concurrentConfigDir });
+concurrentA.add({ id: "provider-a", type: "echo", model: "model-a" });
+concurrentB.add({ id: "provider-b", type: "echo", model: "model-b" });
+await Promise.all([
+  concurrentA.write(concurrentConfigDir),
+  concurrentB.write(concurrentConfigDir),
+]);
+const mergedProviderIds = (JSON.parse(await readFile(providerConfigPath(concurrentConfigDir), "utf8")) as { providers: ProviderConfig[] })
+  .providers
+  .map((provider) => provider.id)
+  .sort();
+assert.deepEqual(mergedProviderIds, ["echo", "provider-a", "provider-b"]);
+
+const removeA = await ProviderRegistry.create({ dataDir: concurrentConfigDir });
+const addC = await ProviderRegistry.create({ dataDir: concurrentConfigDir });
+removeA.remove("provider-a");
+addC.add({ id: "provider-c", type: "echo", model: "model-c" });
+await Promise.all([
+  removeA.write(concurrentConfigDir),
+  addC.write(concurrentConfigDir),
+]);
+const afterRemoveProviderIds = (JSON.parse(await readFile(providerConfigPath(concurrentConfigDir), "utf8")) as { providers: ProviderConfig[] })
+  .providers
+  .map((provider) => provider.id)
+  .sort();
+assert.deepEqual(afterRemoveProviderIds, ["echo", "provider-b", "provider-c"]);
+
 assert.rejects(() => runtime.addProvider({
   id: "bad secret",
   type: "openai",
