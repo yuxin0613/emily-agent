@@ -50,6 +50,14 @@ interface SelectChoice {
   value: string;
 }
 
+interface TextQuestionOptions {
+  prompt: string;
+  fallback?: string;
+  hint?: string;
+  secret?: boolean;
+  summarize?: boolean;
+}
+
 interface ProviderTemplate {
   key: string;
   aliases?: string[];
@@ -235,7 +243,7 @@ async function configureMainAgent(
   writeLine(output, `Main agent: ${formatProvider(current)}`);
   const configured = !(current.id === "echo" && current.type === "echo" && (current.model || "echo-local") === "echo-local");
   if (configured) {
-    const modify = await yesNo(rl, `Main agent is already configured. Modify it?`, false);
+    const modify = await yesNo(rl, input, output, `Main agent is already configured. Modify it?`, false);
     if (!modify) return { providerId: current.id, model: current.model || defaultModelForType(current.type) };
   } else {
     writeLine(output, "Main agent is still using the local echo provider. Configure it now.");
@@ -271,7 +279,7 @@ async function configureRoles(
   writeLine(output, "Roles inherit the main agent provider/model by default.");
   for (;;) {
     printRoles(output, roles, main);
-    const answer = (await question(rl, "Role to configure: name, number, all, or done", "done")).trim();
+    const answer = (await question(rl, input, output, "Role to configure: name, number, all, or done", "done")).trim();
     if (!answer || answer.toLowerCase() === "done" || answer.toLowerCase() === "none") return;
     const selected = resolveRoles(roles, answer);
     if (!selected.length) {
@@ -279,7 +287,7 @@ async function configureRoles(
       continue;
     }
     for (const role of selected) {
-      const inherit = await yesNo(rl, `${role.name}: inherit main agent provider/model?`, true);
+      const inherit = await yesNo(rl, input, output, `${role.name}: inherit main agent provider/model?`, true);
       if (inherit) {
         const updated = await runtime.updateRoleProvider(role.name, { provider: null, model: null });
         replaceRole(roles, updated);
@@ -330,7 +338,7 @@ async function configureProviderModel(
     if (resolved.created) {
       return { providerId: provider.id, model: provider.model || defaultModelForType(provider.type) };
     }
-    const model = await question(rl, `${label} model`, provider.model || currentModel || defaultModelForType(provider.type));
+    const model = await question(rl, input, output, `${label} model`, provider.model || currentModel || defaultModelForType(provider.type));
     const updated: ProviderConfig = {
       ...provider,
       model,
@@ -353,7 +361,7 @@ async function selectProvider(
   const providers = runtime.listProviders();
   if (!canUseInteractiveSelect(input, output)) {
     printProviders(output, providers);
-    return question(rl, `${label} provider id, number, or new`, currentProviderId);
+    return question(rl, input, output, `${label} provider id, number, or new`, currentProviderId);
   }
 
   const choices: SelectChoice[] = [
@@ -391,7 +399,7 @@ async function resolveProvider(
   }
   const existing = providers.find((provider) => provider.id === value);
   if (existing) return { provider: existing, created: false };
-  const create = await yesNo(rl, `Provider ${value} does not exist. Create it?`, false);
+  const create = await yesNo(rl, input, output, `Provider ${value} does not exist. Create it?`, false);
   return create
     ? { provider: await createProvider(runtime, rl, input, output, value || idPrefix), created: true }
     : null;
@@ -535,6 +543,8 @@ async function selectProviderTemplate(
   for (;;) {
     const answer = await question(
       rl,
+      input,
+      output,
       "Provider template: openai, deepseek, dashscope/qwen, moonshot/kimi, zhipu/glm, qianfan/baidu, hunyuan/tencent, doubao, minimax, ollama, echo, or custom",
       "openai",
     );
@@ -569,7 +579,7 @@ async function providerConfigForTemplate(
   if (template.type === "openai") {
     const apiKeyEnv = template.apiKeyEnv || "OPENAI_API_KEY";
     await configureApiKey({ dataDir, input, output, rl, template, apiKeyEnv });
-    const baseUrl = await question(rl, "OpenAI-compatible base URL", defaultBaseUrlForTemplate(template));
+    const baseUrl = await question(rl, input, output, "OpenAI-compatible base URL", defaultBaseUrlForTemplate(template));
     return {
       apiKeyEnv,
       baseUrl,
@@ -578,7 +588,7 @@ async function providerConfigForTemplate(
     };
   }
   if (template.type === "ollama") {
-    const baseUrl = await question(rl, "Ollama base URL", defaultBaseUrlForTemplate(template));
+    const baseUrl = await question(rl, input, output, "Ollama base URL", defaultBaseUrlForTemplate(template));
     return { baseUrl };
   }
   return undefined;
@@ -593,7 +603,7 @@ async function selectDefaultModel(
 ): Promise<string> {
   const fallback = template.model || defaultModelForType(template.type);
   if (!canUseInteractiveSelect(input, output)) {
-    return question(rl, "Provider default model", fallback);
+    return question(rl, input, output, "Provider default model", fallback);
   }
 
   const endpointModels = await fetchProviderModels(template, providerOptions);
@@ -610,7 +620,7 @@ async function selectDefaultModel(
     initialIndex: Math.max(0, registryModels.indexOf(fallback)),
   });
   if (model === customValue) {
-    return question(rl, "Custom model name", fallback);
+    return question(rl, input, output, "Custom model name", fallback);
   }
   return model;
 }
@@ -685,7 +695,7 @@ async function configureApiKey({
   const hint = existing
     ? `already set ${maskSecret(existing)}, Enter to keep`
     : `saved as ${apiKeyEnv}, Enter to skip`;
-  const apiKey = await secretQuestion(rl, input, output, `${label} [${hint}]`);
+  const apiKey = await secretQuestion(rl, input, output, label, hint);
   if (apiKey) {
     await upsertEnvValue(dataDir, apiKeyEnv, apiKey);
     process.env[apiKeyEnv] = apiKey;
@@ -708,71 +718,13 @@ async function secretQuestion(
   input: Readable,
   output: Writable,
   prompt: string,
+  hint?: string,
 ): Promise<string> {
-  if (!canUseInteractiveSelect(input, output)) {
-    return (await rl.question(`${prompt}: `)).trim();
-  }
-
-  const ttyInput = input as TtyReadable;
-  let value = "";
-  let settled = false;
-  const wasRaw = Boolean(ttyInput.isRaw);
-
-  return new Promise<string>((resolve, reject) => {
-    const render = (): void => {
-      output.write(`\r\x1b[2K${prompt}: ${"*".repeat([...value].length)}`);
-    };
-    const cleanup = (resumeReadline: boolean): void => {
-      input.off("keypress", onKeypress);
-      if (ttyInput.setRawMode) ttyInput.setRawMode(wasRaw);
-      input.pause();
-      if (resumeReadline) rl.resume();
-    };
-    const finish = (): void => {
-      if (settled) return;
-      settled = true;
-      output.write("\n");
-      cleanup(true);
-      resolve(value.trim());
-    };
-    const abort = (): void => {
-      if (settled) return;
-      settled = true;
-      output.write("\n");
-      cleanup(false);
-      reject(modelConfigAbortError());
-    };
-    const onKeypress = (text: string, key: Keypress = {}): void => {
-      if (key.ctrl && key.name === "c") {
-        abort();
-        return;
-      }
-      if (key.name === "escape") {
-        abort();
-        return;
-      }
-      if (key.name === "return" || key.name === "enter") {
-        finish();
-        return;
-      }
-      if (key.name === "backspace" || key.name === "delete") {
-        if (!value.length) return;
-        value = value.slice(0, -1);
-        render();
-        return;
-      }
-      if (text && text >= " " && text !== "\x7f") {
-        value += text;
-        render();
-      }
-    };
-
-    rl.pause();
-    emitKeypressEvents(input);
-    if (ttyInput.setRawMode) ttyInput.setRawMode(true);
-    input.resume();
-    input.on("keypress", onKeypress);
-    render();
+  return textQuestion(rl, input, output, {
+    prompt,
+    hint,
+    secret: true,
+    summarize: false,
   });
 }
 
@@ -832,7 +784,7 @@ function printProviders(output: Writable, providers: ProviderConfig[]): void {
 function renderSelectLines(prompt: string, choices: SelectChoice[], selectedIndex: number): string[] {
   const lines = [
     "",
-    style(`Select ${prompt}:`, "amber"),
+    style(selectTitle(prompt), "amber"),
     `  ${style("↕", "dimGreen")} ${style("navigate", "dimGreen")}  ${style("ENTER/SPACE", "dimGreen")} ${style("select", "dimGreen")}  ${style("ESC", "dimGreen")} ${style("cancel", "dimGreen")}`,
     "",
   ];
@@ -846,6 +798,11 @@ function renderSelectLines(prompt: string, choices: SelectChoice[], selectedInde
     lines.push(`  ${style(line, selected ? "cyan" : "green")}`);
   });
   return lines;
+}
+
+function selectTitle(prompt: string): string {
+  const trimmed = prompt.trim();
+  return /[?:]$/.test(trimmed) ? trimmed : `Select ${trimmed}:`;
 }
 
 function formatSelectedChoice(choice: SelectChoice): string {
@@ -898,12 +855,39 @@ function replaceRole(roles: RoleDefinition[], updated: RoleDefinition): void {
   if (index >= 0) roles[index] = updated;
 }
 
-async function question(rl: readline.Interface, prompt: string, fallback: string): Promise<string> {
-  const answer = await rl.question(`${prompt} [${fallback}]: `);
-  return answer.trim() || fallback;
+async function question(
+  rl: readline.Interface,
+  input: Readable,
+  output: Writable,
+  prompt: string,
+  fallback: string,
+): Promise<string> {
+  return textQuestion(rl, input, output, {
+    prompt,
+    fallback,
+    hint: `default ${fallback}`,
+  });
 }
 
-async function yesNo(rl: readline.Interface, prompt: string, fallback: boolean): Promise<boolean> {
+async function yesNo(
+  rl: readline.Interface,
+  input: Readable,
+  output: Writable,
+  prompt: string,
+  fallback: boolean,
+): Promise<boolean> {
+  if (canUseInteractiveSelect(input, output)) {
+    const value = await selectChoice(rl, input, output, {
+      prompt,
+      choices: [
+        { label: "Yes", description: fallback ? "default" : undefined, value: "yes" },
+        { label: "No", description: fallback ? undefined : "default", value: "no" },
+      ],
+      initialIndex: fallback ? 0 : 1,
+    });
+    return value === "yes";
+  }
+
   const suffix = fallback ? "Y/n" : "y/N";
   for (;;) {
     const answer = (await rl.question(`${prompt} [${suffix}]: `)).trim().toLowerCase();
@@ -911,6 +895,142 @@ async function yesNo(rl: readline.Interface, prompt: string, fallback: boolean):
     if (["y", "yes"].includes(answer)) return true;
     if (["n", "no"].includes(answer)) return false;
   }
+}
+
+async function textQuestion(
+  rl: readline.Interface,
+  input: Readable,
+  output: Writable,
+  {
+    prompt,
+    fallback,
+    hint,
+    secret = false,
+    summarize = true,
+  }: TextQuestionOptions,
+): Promise<string> {
+  if (!canUseInteractiveSelect(input, output)) {
+    const suffix = fallback === undefined ? "" : ` [${fallback}]`;
+    const answer = await rl.question(`${prompt}${suffix}: `);
+    return answer.trim() || fallback || "";
+  }
+
+  const ttyInput = input as TtyReadable;
+  let value = "";
+  let renderedLines = 0;
+  let settled = false;
+  const wasRaw = Boolean(ttyInput.isRaw);
+
+  return new Promise<string>((resolve, reject) => {
+    const cleanup = (resumeReadline: boolean): void => {
+      input.off("keypress", onKeypress);
+      if (ttyInput.setRawMode) ttyInput.setRawMode(wasRaw);
+      input.pause();
+      if (resumeReadline) rl.resume();
+    };
+    const currentValue = (): string => value.trim() || fallback || "";
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      const answer = currentValue();
+      clearRender(output, renderedLines);
+      if (summarize) {
+        writeLine(output, `${prompt}: ${formatTextQuestionSummary(answer, { fallback, secret })}`);
+      }
+      cleanup(true);
+      resolve(answer);
+    };
+    const abort = (): void => {
+      if (settled) return;
+      settled = true;
+      clearRender(output, renderedLines);
+      cleanup(false);
+      reject(modelConfigAbortError());
+    };
+    const render = (): void => {
+      clearRender(output, renderedLines);
+      const lines = renderTextQuestionLines(prompt, value, { fallback, hint, secret });
+      output.write(`${lines.join("\n")}\n`);
+      renderedLines = lines.length;
+    };
+    const onKeypress = (text: string, key: Keypress = {}): void => {
+      if (key.ctrl && key.name === "c") {
+        abort();
+        return;
+      }
+      if (key.name === "escape") {
+        abort();
+        return;
+      }
+      if (key.name === "return" || key.name === "enter") {
+        finish();
+        return;
+      }
+      if (key.name === "backspace" || key.name === "delete") {
+        if (!value.length) return;
+        value = value.slice(0, -1);
+        render();
+        return;
+      }
+      if (text && text >= " " && text !== "\x7f") {
+        value += text;
+        render();
+      }
+    };
+
+    rl.pause();
+    emitKeypressEvents(input);
+    if (ttyInput.setRawMode) ttyInput.setRawMode(true);
+    input.resume();
+    input.on("keypress", onKeypress);
+    render();
+  });
+}
+
+function renderTextQuestionLines(
+  prompt: string,
+  value: string,
+  {
+    fallback,
+    hint,
+    secret,
+  }: {
+    fallback?: string;
+    hint?: string;
+    secret?: boolean;
+  },
+): string[] {
+  const details = [
+    style("ENTER", "dimGreen"),
+    style(fallback === undefined ? "confirm" : "keep default", "dimGreen"),
+    style("ESC", "dimGreen"),
+    style("cancel", "dimGreen"),
+  ];
+  const lines = [
+    "",
+    style(`${prompt}:`, "amber"),
+    `  ${details.join("  ")}`,
+  ];
+  if (hint) lines.push(`  ${style(hint, "dimGreen")}`);
+  lines.push("");
+  const visible = secret ? "*".repeat([...value].length) : value;
+  lines.push(`  ${style("›", "cyan")} ${visible}`);
+  return lines;
+}
+
+function formatTextQuestionSummary(
+  answer: string,
+  {
+    fallback,
+    secret,
+  }: {
+    fallback?: string;
+    secret?: boolean;
+  },
+): string {
+  if (secret) return answer ? maskSecret(answer) : "(blank)";
+  if (!answer && fallback === undefined) return "(blank)";
+  return answer;
 }
 
 function modelConfigAbortError(): Error {
