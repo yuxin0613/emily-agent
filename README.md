@@ -24,6 +24,8 @@ Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime
 - **Main agent + role subagents**: main agent handles the user, planning, delegation, recovery, and final summaries; subagents run as independent worker processes.
 - **Adaptive task graph**: `PlanSpec` creates the initial DAG, `GraphPatchSpec` adds dynamic tasks as work completes, and the executor tracks dependencies, waves, retries, and exit criteria.
 - **Long task support**: result-oriented requests can require a delivery level such as `poc`, `uat`, or `production` before execution starts.
+- **Hermes-inspired TUI flow**: the terminal UI uses a transcript/composer layout with compact prompt glyphs, live thinking feedback, and command hints.
+- **Interactive model setup**: `emily model` supports keyboard navigation, provider templates, default base URLs, API-key environment storage, model discovery, custom models, and role-specific overrides.
 - **SQLite as source of truth**: tasks, runs, sessions, events, memory candidates, provider usage, skill candidates, and experience revisions are persisted.
 - **Lease token safety**: worker heartbeat, finish, fail, and cancel paths require the current lease token, so stale workers cannot overwrite a retried task.
 - **Provider registry**: main agent and each role can choose separate providers/models; subagents fall back to the main provider when role-specific provider selection cannot be used.
@@ -31,6 +33,12 @@ Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime
 - **Tools and skills**: declarative tools with hard permission filtering; builtin skills for planning, coding, research, web search, GitHub, review, recovery, and memory curation; external skill folders can be mounted without code changes.
 - **Control plane**: TUI, WebUI, REST endpoints, SSE events, and typed WebSocket gateway share the same runtime commands.
 - **Security defaults**: token-protected Web/API, origin checks for unsafe methods, bounded HTTP bodies, tool approvals, SSRF denylist, provider secret validation, and runtime security audit.
+
+## Project Status
+
+Emily AgentOS is approaching a 1.0 baseline. The runtime is useful today, but agent behavior, provider templates, and TUI details can still change while hardening continues.
+
+The default install branch is `master`. Active development and preview testing happen on `dev`.
 
 ## Quick Start
 
@@ -42,16 +50,24 @@ Requirements:
 - optional: `gh` for GitHub tool actions
 - optional: external model API key, Ollama, or OpenAI-compatible gateway
 
-One-command install:
+One-command install from the default branch:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
-The repository is currently private while 1.0 hardening is in progress, so the install command requires GitHub access to `yuxin0613/emily-agent`. If you host AgentOS in another Git repository, override the clone URL:
+Install or update from the development branch:
+
+```bash
+EMILY_BRANCH=dev \
+  curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
+```
+
+If you host AgentOS in another Git repository, override the clone URL and branch:
 
 ```bash
 EMILY_REPO_URL=https://github.com/your-org/emily-agent.git \
+EMILY_BRANCH=main \
   curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
@@ -61,6 +77,7 @@ Update an existing install:
 
 ```bash
 emily update
+emily update --branch dev
 ```
 
 Run after install:
@@ -107,6 +124,84 @@ npm audit --audit-level=moderate
 node src/index.ts --doctor --deep
 node src/index.ts --security-audit
 ```
+
+## Terminal UI
+
+Start the local TUI:
+
+```bash
+emily
+```
+
+or, from a source checkout:
+
+```bash
+npm run tui
+```
+
+The TUI is designed around a compact transcript/composer loop:
+
+| Glyph | Meaning |
+| --- | --- |
+| `❯` | User input and the active prompt. |
+| `┊` | Assistant output, progress, and live thinking state. |
+| `·` | Run metadata such as run id, delegated agents, and elapsed time. |
+| `⚡` | Tool output in views that expose tool events. |
+
+Typical flow:
+
+1. Type a message after `❯`.
+2. Press Enter to send.
+3. If the runtime is waiting on a model call, the TUI shows an animated `┊ thinking...` line.
+4. Plain chat stays conversational; task-like requests can still invoke planner/subagent execution.
+5. Use `/help` or `:help` for commands, and `exit` or `quit` to leave.
+
+Useful TUI commands:
+
+| Command | Purpose |
+| --- | --- |
+| `/new [title]` | Start a new visible session. |
+| `/clear` | Hide the current session and create a fresh one. |
+| `:status` | Show current session/runtime status. |
+| `:providers` | List configured providers. |
+| `:tools` | List available tools. |
+| `:skills` | List available skills. |
+| `:timeline [runId]` | Inspect the latest or selected run timeline. |
+| `:mode [mode]` | Show or set permission mode. |
+
+## Model Setup
+
+Run:
+
+```bash
+emily model
+```
+
+The model setup flow is interactive:
+
+1. Choose an existing provider or `Add a provider` with the arrow keys.
+2. Choose a provider template.
+3. Enter an API key when the selected provider needs one. Keys are written to the local environment file and provider config stores only `apiKeyEnv`.
+4. Confirm or edit the default base URL.
+5. Let Emily discover available models when the provider exposes a compatible model endpoint.
+6. Pick a default model, enter a custom model name, or skip and keep the current model.
+7. Optionally configure role-specific providers/models for subagents.
+
+Common provider templates:
+
+| Template | Default base URL |
+| --- | --- |
+| OpenAI | `https://api.openai.com/v1` |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| Alibaba Cloud DashScope / Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Moonshot / Kimi | `https://api.moonshot.cn/v1` |
+| Zhipu / GLM | `https://open.bigmodel.cn/api/paas/v4` |
+| Baidu Qianfan | `https://qianfan.baidubce.com/v2` |
+| Tencent Hunyuan | `https://api.hunyuan.cloud.tencent.com/v1` |
+| Volcengine Doubao / Ark | `https://ark.cn-beijing.volces.com/api/v3` |
+| MiniMax | `https://api.minimax.chat/v1` |
+| Ollama | `http://127.0.0.1:11434/v1` |
+| Custom provider | User-provided OpenAI-compatible URL |
 
 ## Configuration
 
@@ -468,6 +563,37 @@ EMILY_VECTOR_INTEGRATION=true npm run check
 EMILY_PROVIDER_INTEGRATION=true npm run check
 ```
 
+Before submitting a change, prefer:
+
+```bash
+npm run typecheck
+node test/ui.test.ts
+node test/model-config.test.ts
+node test/chat-routing.test.ts
+```
+
+Run the full suite when touching runtime behavior, persistence, providers, planning, security, or command routing:
+
+```bash
+npm run check
+```
+
+## Contributing
+
+Contributions are welcome when they keep the runtime auditable and local-first.
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request. In short:
+
+- branch from `dev` for active development;
+- keep pull requests focused;
+- include tests or a clear reason tests are not needed;
+- avoid committing secrets, generated state, `.emily/` data, or unrelated formatting churn;
+- document user-facing behavior changes in this README or `user-guide.md`.
+
+## Security Reporting
+
+Please do not open a public issue for a suspected vulnerability. Follow [SECURITY.md](./SECURITY.md) for private reporting, expected triage, and supported-version guidance.
+
 ## Project Layout
 
 ```text
@@ -518,7 +644,7 @@ Emily AgentOS keeps third-party references explicit so downstream agent applicat
 Design references:
 
 - [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model.
-- [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics and local agent runtime packaging conventions. Emily AgentOS keeps its own runtime architecture and install script.
+- [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics, local agent runtime packaging conventions, `hermes model`-style provider setup, and terminal transcript/composer interaction patterns. Hermes Agent is MIT-licensed; Emily AgentOS keeps its own runtime architecture and does not vendor Hermes source.
 
 Optional integrations:
 
