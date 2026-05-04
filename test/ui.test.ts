@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { formatTuiHelp } from "../src/adapters/tui.ts";
+import { formatTuiHelp, isTuiAbortError } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -24,6 +24,11 @@ assert.match(tuiHelp, /:mode \[mode\]/);
 assert.match(tuiHelp, /:status/);
 assert.match(tuiHelp, /:timeline \[runId\]/);
 assert.ok(!tuiHelp.includes("undefined"));
+assert.equal(isTuiAbortError(Object.assign(new Error("Aborted with Ctrl+C"), {
+  name: "AbortError",
+  code: "ABORT_ERR",
+})), true);
+assert.equal(isTuiAbortError(new Error("regular failure")), false);
 
 const cliHelp = await execFileAsync(process.execPath, ["src/index.ts", "--help"], {
   cwd: process.cwd(),
