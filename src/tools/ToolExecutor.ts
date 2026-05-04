@@ -177,6 +177,7 @@ export class ToolExecutor {
     if (tool === "web_search") return this.webSearch(args);
     if (tool === "browser") return this.browser(args);
     if (tool === "github") return this.github(args);
+    if (tool === "llm_wiki") return this.llmWiki(args);
     if (tool === "git_reset") throw new Error("git_reset is declared but not executable without an external approval executor.");
     if (tool === "shell") throw new Error("shell is declared but not executable through the built-in executor.");
     if (tool === "network") throw new Error("network is declared as a broad permission; use web_search, http_fetch, browser, or github instead.");
@@ -377,6 +378,104 @@ export class ToolExecutor {
     if (provider === "endpoint") return this.endpointWebSearch(args, query, count, startedAt);
     if (provider === "ollama") return this.ollamaWebSearch(args, query, count, startedAt);
     return this.duckDuckGoWebSearch(query, count, startedAt);
+  }
+
+  private async llmWiki(args: Record<string, unknown>): Promise<unknown> {
+    const action = parseLlmWikiAction(args.action);
+    const baseUrl = parseHttpUrl(String(args.baseUrl || process.env.EMILY_LLM_WIKI_BASE_URL || process.env.LLM_WIKI_BASE_URL || "http://127.0.0.1:6081"));
+    await assertAllowedHttpEgress(baseUrl);
+    if (action === "health") {
+      return this.llmWikiRequest(baseUrl, "/health", { method: "GET", args });
+    }
+    if (action === "query") {
+      return this.llmWikiRequest(baseUrl, "/v1/query", {
+        method: "POST",
+        args,
+        body: {
+          query: requiredString(args.query ?? args.q, "query"),
+          top_k: boundedPositiveNumber(args.topK ?? args.top_k ?? args.limit, 5, 1, 50),
+        },
+      });
+    }
+    if (action === "import_url") {
+      const urls = stringArray(args.urls ?? args.url, "urls");
+      if (!urls.length) throw new Error("llm_wiki import_url requires urls.");
+      return this.llmWikiRequest(baseUrl, "/v1/import-url", {
+        method: "POST",
+        args,
+        body: { urls },
+      });
+    }
+    if (action === "status") {
+      const url = new URL("/v1/worker/status", baseUrl);
+      url.searchParams.set("limit", String(boundedPositiveNumber(args.limit, 20, 1, 100)));
+      return this.llmWikiRequest(url, "", { method: "GET", args });
+    }
+    if (action === "concepts") {
+      return this.llmWikiRequest(baseUrl, "/v1/concepts", { method: "GET", args });
+    }
+    if (action === "analyze_page") {
+      return this.llmWikiRequest(baseUrl, "/v1/pages/analyze", {
+        method: "POST",
+        args,
+        body: {
+          page_slug: requiredString(args.pageSlug ?? args.page_slug ?? args.slug, "pageSlug"),
+          analysis_request: requiredString(args.analysisRequest ?? args.analysis_request ?? args.prompt, "analysisRequest"),
+          ...(args.maxPages || args.max_pages ? { max_pages: boundedPositiveNumber(args.maxPages ?? args.max_pages, 3, 1, 20) } : {}),
+        },
+      });
+    }
+    if (action === "upload") {
+      return this.llmWikiUpload(baseUrl, args);
+    }
+    throw new Error(`Unsupported llm_wiki action: ${action}`);
+  }
+
+  private async llmWikiRequest(baseUrl: URL, endpoint: string, {
+    method,
+    args,
+    body,
+  }: {
+    method: "GET" | "POST";
+    args: Record<string, unknown>;
+    body?: unknown;
+  }): Promise<unknown> {
+    const url = endpoint ? new URL(endpoint, baseUrl) : baseUrl;
+    await assertAllowedHttpEgress(url);
+    const response = await fetch(url.toString(), {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Emily-AgentOS/1.0 llm_wiki",
+        ...llmWikiAuthHeaders(args),
+      },
+      body: method === "POST" ? JSON.stringify(body || {}) : undefined,
+      signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 30000)),
+    });
+    const text = await readResponseText(response, positiveNumber(args.maxBytes, 512000));
+    if (!response.ok) throw new Error(`llm_wiki ${url.pathname} failed (${response.status}): ${text.text}`);
+    return text.text ? parseJsonPayload(text.text, `llm_wiki ${url.pathname} response`) : {};
+  }
+
+  private async llmWikiUpload(baseUrl: URL, args: Record<string, unknown>): Promise<unknown> {
+    const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path ?? args.filePath ?? args.file, "path"));
+    const url = new URL("/v1/upload", baseUrl);
+    await assertAllowedHttpEgress(url);
+    const content = await readFile(filePath);
+    const form = new FormData();
+    form.append("files", new Blob([content]), typeof args.name === "string" && args.name.trim() ? args.name.trim() : path.basename(filePath));
+    const response = await fetch(url.toString(), {
+      method: "POST",
+      headers: {
+        "User-Agent": "Emily-AgentOS/1.0 llm_wiki",
+        ...llmWikiAuthHeaders(args),
+      },
+      body: form,
+      signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 60000)),
+    });
+    const text = await readResponseText(response, positiveNumber(args.maxBytes, 512000));
+    if (!response.ok) throw new Error(`llm_wiki upload failed (${response.status}): ${text.text}`);
+    return text.text ? parseJsonPayload(text.text, "llm_wiki upload response") : {};
   }
 
   private async endpointWebSearch(args: Record<string, unknown>, query: string, count: number, startedAt: number): Promise<{
@@ -615,6 +714,18 @@ function parseHeaders(input: unknown): Record<string, string> | undefined {
   return result;
 }
 
+function llmWikiAuthHeaders(args: Record<string, unknown>): Record<string, string> {
+  const token = typeof args.token === "string" && args.token.trim()
+    ? args.token.trim()
+    : String(process.env.EMILY_LLM_WIKI_TOKEN || process.env.LLM_WIKI_API_TOKEN || process.env.API_ACCESS_TOKEN || "").trim();
+  return token ? { "X-API-Key": token, Authorization: `Bearer ${token}` } : {};
+}
+
+function stringArray(value: unknown, label: string): string[] {
+  const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return values.map(String).map((item) => item.trim()).filter(Boolean);
+}
+
 async function assertAllowedHttpEgress(url: URL): Promise<void> {
   if (isHttpEgressAllowedByPolicy(url)) return;
   const hostname = url.hostname.toLowerCase();
@@ -766,6 +877,14 @@ function approvalRequirementFor(definition: ToolDefinition, args: Record<string,
       reason: "GitHub tool execution requires explicit approval",
     };
   }
+  if (definition.name === "llm_wiki") {
+    const template = llmWikiActionCategory(args) === "write" ? "network_write" : "network_read";
+    return {
+      required: true,
+      template,
+      reason: "LLM Wiki tool execution requires explicit network approval",
+    };
+  }
   if (definition.name === "delete_file" || definition.sideEffects === "destructive") {
     return {
       required: true,
@@ -781,6 +900,25 @@ function approvalRequirementFor(definition: ToolDefinition, args: Record<string,
     };
   }
   return { required: false };
+}
+
+type LlmWikiAction = "health" | "query" | "import_url" | "status" | "concepts" | "analyze_page" | "upload";
+
+function parseLlmWikiAction(value: unknown): LlmWikiAction {
+  const action = String(value || "query").trim().toLowerCase().replace(/[-\s]+/g, "_");
+  if (action === "health") return "health";
+  if (action === "query" || action === "search") return "query";
+  if (action === "import_url" || action === "import" || action === "import_urls") return "import_url";
+  if (action === "status" || action === "worker_status") return "status";
+  if (action === "concepts" || action === "list_concepts" || action === "pages") return "concepts";
+  if (action === "analyze_page" || action === "analyze") return "analyze_page";
+  if (action === "upload" || action === "ingest_file" || action === "file") return "upload";
+  throw new Error(`Unsupported llm_wiki action: ${String(value)}`);
+}
+
+function llmWikiActionCategory(args: Record<string, unknown>): "read" | "write" {
+  const action = parseLlmWikiAction(args.action);
+  return action === "import_url" || action === "analyze_page" || action === "upload" ? "write" : "read";
 }
 
 function parseWebSearchProvider(value: unknown): "endpoint" | "ollama" | "duckduckgo" {

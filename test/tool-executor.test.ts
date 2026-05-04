@@ -21,7 +21,7 @@ const role: RoleDefinition = {
   name: "network-researcher",
   role: "Use approved external tools.",
   singleton: true,
-  allowedTools: ["read_file", "http_fetch", "web_search", "browser", "github", "delete_file"],
+  allowedTools: ["read_file", "http_fetch", "web_search", "browser", "github", "llm_wiki", "delete_file"],
   forbiddenTools: ["delete_file"],
   maxConcurrentTasks: 1,
   capabilities: ["research"],
@@ -68,6 +68,26 @@ const webSearchApprovalRequired = await executor.execute({
 });
 assert.equal(webSearchApprovalRequired.ok, false);
 assert.match(String(webSearchApprovalRequired.error || ""), /network_read/);
+
+const llmWikiReadApprovalRequired = await executor.execute({
+  tool: "llm_wiki",
+  args: { action: "query", query: "agentos" },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(llmWikiReadApprovalRequired.ok, false);
+assert.match(String(llmWikiReadApprovalRequired.error || ""), /network_read/);
+
+const llmWikiWriteApprovalRequired = await executor.execute({
+  tool: "llm_wiki",
+  args: { action: "import_url", urls: ["https://example.com/docs.md"] },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(llmWikiWriteApprovalRequired.ok, false);
+assert.match(String(llmWikiWriteApprovalRequired.error || ""), /network_write/);
 
 const wrongTemplate = await executor.execute({
   tool: "http_fetch",
@@ -140,6 +160,25 @@ assert.equal(symlinkRead.ok, false);
 assert.match(String(symlinkRead.error || ""), /symlink|escapes workspace/);
 
 const browserServer = http.createServer((request, response) => {
+  if (request.url === "/v1/query" && request.method === "POST") {
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      mode: "semantic_search",
+      query: "agentos memory",
+      results: [{ title: "AgentOS Memory", confidence: 0.9 }],
+      total_found: 1,
+    }));
+    return;
+  }
+  if (request.url === "/v1/import-url" && request.method === "POST") {
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      message: "imported",
+      count: 1,
+      items: [{ source_url: "https://example.com/docs.md", status: "pending" }],
+    }));
+    return;
+  }
   if (request.url?.startsWith("/web-search")) {
     response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({
@@ -177,6 +216,28 @@ try {
   assert.equal(webSearchOutput.count, 1);
   assert.equal(webSearchOutput.results?.[0]?.title, "AgentOS launch notes");
   assert.equal(webSearchOutput.results?.[0]?.snippet, "Bounded external search result for launch readiness.");
+
+  const wikiQuery = await executor.execute({
+    tool: "llm_wiki",
+    args: { action: "query", query: "agentos memory", baseUrl: `http://127.0.0.1:${address.port}` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test llm wiki query" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(wikiQuery.ok, true);
+  assert.equal((wikiQuery.output as { total_found?: number }).total_found, 1);
+
+  const wikiImport = await executor.execute({
+    tool: "llm_wiki",
+    args: { action: "import_url", urls: ["https://example.com/docs.md"], baseUrl: `http://127.0.0.1:${address.port}` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_write", reason: "local test llm wiki import" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(wikiImport.ok, true);
+  assert.equal((wikiImport.output as { count?: number }).count, 1);
 
   const browser = await executor.execute({
     tool: "browser",

@@ -216,6 +216,7 @@ Common tools:
 - `http_fetch`
 - `browser`
 - `github`
+- `llm_wiki`
 - `inspect_task`
 - `create_task`
 
@@ -236,7 +237,44 @@ EMILY_HTTP_EGRESS_ALLOWLIST=127.0.0.1 npm run web
 
 Use `EMILY_HTTP_ALLOW_PRIVATE=true` only when you understand the SSRF tradeoff.
 
-## 9. GitHub Skill
+## 9. LLM Wiki Skill
+
+Run `llm_wiki` as a separate service, then point AgentOS at its API:
+
+```bash
+export EMILY_LLM_WIKI_BASE_URL=http://127.0.0.1:6081
+export EMILY_LLM_WIKI_TOKEN=your-shared-api-token
+export EMILY_HTTP_EGRESS_ALLOWLIST=http://127.0.0.1:6081
+```
+
+Use the tool through CommandRegistry:
+
+```json
+{
+  "tool": "llm_wiki",
+  "role": "researcher",
+  "permissionMode": "danger_full_access",
+  "approval": {
+    "approved": true,
+    "template": "network_read",
+    "reason": "query durable project knowledge"
+  },
+  "args": {
+    "action": "query",
+    "query": "AgentOS memory architecture",
+    "topK": 5
+  }
+}
+```
+
+Supported actions:
+
+- `query`, `health`, `status`, `concepts`: require `network_read`.
+- `import_url`, `upload`, `analyze_page`: require `network_write`.
+
+Keep `llm_wiki` as an independently deployed knowledge compiler. AgentOS only calls its API through the `llm-wiki` skill and audited `llm_wiki` tool.
+
+## 10. GitHub Skill
 
 The builtin `github` skill uses the `github` tool, which wraps structured GitHub operations and restricted `gh` commands.
 
@@ -257,7 +295,7 @@ Good GitHub tasks:
 
 Use local file tools for detailed code review. GitHub metadata is not a replacement for reading the changed files.
 
-## 10. Web Search
+## 11. Web Search
 
 The builtin `web-search` skill uses `web_search` for discovery and `http_fetch` for specific URLs.
 
@@ -269,7 +307,7 @@ Providers:
 
 All search output is marked as untrusted external content. Treat snippets as leads, not facts.
 
-## 11. Memory And Experience
+## 12. Memory And Experience
 
 Memory layers:
 
@@ -286,7 +324,7 @@ Experience is curated memory:
 
 Use experience for reusable decisions and best practices, not logs.
 
-## 12. Skills
+## 13. Skills
 
 Builtin skills:
 
@@ -307,7 +345,7 @@ skills/<skill>/skill.md
 
 Skill candidates are proposed from repeated successful workflows. Approve only skills that are reusable, stable, and worth keeping.
 
-## 13. Runtime Operations
+## 14. Runtime Operations
 
 Doctor:
 
@@ -370,7 +408,7 @@ Events:
 curl 'http://127.0.0.1:3000/events?token=<token>'
 ```
 
-## 14. Gateway Examples
+## 15. Gateway Examples
 
 Send chat:
 
@@ -414,7 +452,7 @@ Cancel a run:
 }
 ```
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 `provider.default_echo` appears:
 
@@ -440,7 +478,7 @@ External provider tests are skipped:
 
 Set `EMILY_PROVIDER_INTEGRATION=true` and provider environment variables.
 
-## 16. Production Checklist
+## 17. Production Checklist
 
 Before production use:
 

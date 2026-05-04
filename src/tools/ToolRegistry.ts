@@ -142,6 +142,16 @@ const DEFAULT_TOOL_DEFINITIONS: ToolDefinition[] = [
     instructions: "Use github_read approval for read actions and github_write approval for comments or mutations; avoid shell interpolation.",
   },
   {
+    name: "llm_wiki",
+    permission: "llm_wiki",
+    category: "knowledge",
+    sideEffects: "network",
+    requiresApproval: true,
+    aliases: ["wiki", "llm-wiki", "knowledge_wiki"],
+    description: "Query or ingest content into a separately deployed LLM Wiki service.",
+    instructions: "Use network_read approval for query/status/list actions and network_write approval for import/analyze/upload actions.",
+  },
+  {
     name: "create_task",
     permission: "create_task",
     category: "task",

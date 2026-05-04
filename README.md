@@ -125,6 +125,8 @@ Useful environment variables:
 | `EMILY_HTTP_ALLOW_PRIVATE` | Set to `true` only for local development that must access private hosts. |
 | `EMILY_WEB_SEARCH_PROVIDER` | `duckduckgo`, `endpoint`, or `ollama`. |
 | `EMILY_WEB_SEARCH_ENDPOINT` | Custom web search endpoint for `provider=endpoint`. |
+| `EMILY_LLM_WIKI_BASE_URL` | Base URL for the separately deployed LLM Wiki API, for example `http://127.0.0.1:6081`. |
+| `EMILY_LLM_WIKI_TOKEN` | Shared API token for LLM Wiki. Falls back to `LLM_WIKI_API_TOKEN` or `API_ACCESS_TOKEN`. |
 | `EMILY_VECTOR_STORE` | `file`, `chroma`, `qdrant`, `milvus`, or `pgvector`. |
 | `OPENAI_API_KEY` | Default key used by OpenAI-compatible provider examples. |
 
@@ -240,7 +242,7 @@ Experience is higher-value memory:
 
 Skills are reusable workflows:
 
-- builtin skills: `planning`, `coding`, `research`, `web-search`, `github`, `review`, `recovery`, `memory-curation`;
+- builtin skills: `planning`, `coding`, `research`, `web-search`, `github`, `llm-wiki`, `review`, `recovery`, `memory-curation`;
 - file skills: `skills/<skill>/skill.md`;
 - skill candidates are proposed from repeated successful work and require approval before becoming active files.
 
@@ -261,6 +263,7 @@ Builtin tools:
 | `http_fetch` | Bounded HTTP/HTTPS fetch. |
 | `browser` | Lightweight browser-style page actions. |
 | `github` | Structured GitHub PR/issue actions and restricted `gh` allowlist. |
+| `llm_wiki` | Query or ingest durable knowledge through an external LLM Wiki service. |
 | `delete_file` | Destructive workspace delete with approval. |
 | `git_reset` | Declared high-risk capability; not executed by builtin executor. |
 | `shell` | Declared broad capability; not executed by builtin executor. |

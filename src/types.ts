@@ -21,6 +21,7 @@ export type ToolPermission =
   | "web_search"
   | "browser"
   | "github"
+  | "llm_wiki"
   | "create_task"
   | "inspect_task"
   | "git_reset"
@@ -32,7 +33,7 @@ export interface ToolDefinition {
   name: ToolPermission;
   description: string;
   permission: ToolPermission;
-  category: "filesystem" | "process" | "network" | "task" | "vcs";
+  category: "filesystem" | "process" | "network" | "task" | "vcs" | "knowledge";
   sideEffects: "none" | "read" | "write" | "execute" | "network" | "destructive";
   requiresApproval: boolean;
   aliases: string[];

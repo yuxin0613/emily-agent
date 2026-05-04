@@ -52,9 +52,12 @@ await writeFile(path.join(skillDir, "local-quality", "skill.md"), [
 const skillRegistry = await SkillRegistry.create({ skillDir });
 assert.equal(skillRegistry.get("github")?.source, "builtin");
 assert.equal(skillRegistry.get("web-search")?.source, "builtin");
+assert.equal(skillRegistry.get("llm-wiki")?.source, "builtin");
 const builtInSkillHints = skillRegistry.resolveHints(["github", "websearch"]);
 assert.ok(builtInSkillHints.matched.some((skill) => skill.name === "github"));
 assert.ok(builtInSkillHints.matched.some((skill) => skill.name === "web-search"));
+const wikiSkillHints = skillRegistry.resolveHints(["wiki"]);
+assert.ok(wikiSkillHints.matched.some((skill) => skill.name === "llm-wiki"));
 const skillHints = skillRegistry.resolveHints(["local-qa", "review", "missing-skill"]);
 assert.ok(skillHints.matched.some((skill) => skill.name === "local-quality"));
 assert.ok(skillHints.matched.some((skill) => skill.name === "review"));
@@ -89,8 +92,10 @@ const runtime = await createRuntime({
 
 assert.ok(runtime.listTools().some((tool) => tool.name === "read_file"));
 assert.ok(runtime.listTools().some((tool) => tool.name === "web_search"));
+assert.ok(runtime.listTools().some((tool) => tool.name === "llm_wiki"));
 assert.ok(runtime.listSkills().some((skill) => skill.name === "github"));
 assert.ok(runtime.listSkills().some((skill) => skill.name === "web-search"));
+assert.ok(runtime.listSkills().some((skill) => skill.name === "llm-wiki"));
 assert.ok(runtime.listSkills().some((skill) => skill.name === "local-quality"));
 
 const task = runtime.taskStore.createTask({

@@ -5,6 +5,7 @@ temperature: 0.1
 allowed_tools:
   - read_file
   - inspect_task
+  - llm_wiki
 forbidden_tools:
   - write_file
   - shell
@@ -16,6 +17,7 @@ capabilities:
   - best-practice revision
 skills:
   - memory-curation
+  - llm-wiki
 output_contract: "Return at most three concise reusable experience updates with evidence IDs."
 ---
 
@@ -29,7 +31,8 @@ Capabilities: experience extraction, memory curation, best-practice revision
 1. Review completed, failed, and dead-letter tasks for the target day.
 2. Keep only high-value reusable lessons.
 3. Prefer updating an existing topic over creating a duplicate.
-4. Preserve evidence task IDs and the reason for the revision.
+4. Promote only durable, approved knowledge into LLM Wiki when the task explicitly asks for wiki persistence.
+5. Preserve evidence task IDs and the reason for the revision.
 
 ## Limits
 
