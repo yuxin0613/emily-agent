@@ -12,6 +12,8 @@ const ANSI = {
   yellow: "\x1b[33m",
   red: "\x1b[31m",
   blue: "\x1b[34m",
+  brightCyan: "\x1b[96m",
+  brightGreen: "\x1b[92m",
   gray: "\x1b[90m",
 };
 
@@ -30,17 +32,6 @@ const EMILY_WORDMARK = [
   "███████╗██║ ╚═╝ ██║██║███████╗   ██║   ",
   "╚══════╝╚═╝     ╚═╝╚═╝╚══════╝   ╚═╝   ",
   "              AGENTOS                  ",
-];
-
-const EMILY_3D_LOGO = [
-  "  ______ __  __  ____ __    __ __  ",
-  " / ____//  |/  |/  _// /   / // /  ",
-  "/ __/  / /|_/ / / / / /   / // /   ",
-  "/ /___ / /  / /_/ / / /___/ // /___ ",
-  "/_____//_/  /_//___//_____//_____/",
-  "  ╲_____╲╲_____╲╲____╲╲____╲╲____╲ ",
-  "   ╲_____╲╲_____╲╲____╲╲____╲╲____╲",
-  "        E M I L Y   A G E N T O S  ",
 ];
 
 const VALID_PERMISSION_MODES = new Set(["read_only", "workspace_write", "danger_full_access"]);
@@ -1404,51 +1395,46 @@ export function formatTuiHome({
   runLog?: string[];
 } = {}): string {
   const width = Math.max(88, terminalWidth());
-  const boxWidth = Math.min(width - 2, 160);
-  const wideLayout = boxWidth >= 116;
-  const leftWidth = wideLayout ? 36 : 38;
-  const middleWidth = wideLayout ? Math.max(34, Math.min(52, Math.floor((boxWidth - leftWidth - 10) * 0.52))) : Math.max(42, boxWidth - leftWidth - 7);
-  const logWidth = wideLayout ? Math.max(24, boxWidth - leftWidth - middleWidth - 10) : 0;
+  const boxWidth = Math.min(width - 2, 178);
+  const wideLayout = boxWidth >= 100;
+  const contentWidth = boxWidth - 4;
+  const leftWidth = wideLayout ? Math.max(48, Math.min(62, Math.floor((boxWidth - 7) * 0.38))) : contentWidth;
+  const logWidth = wideLayout ? Math.max(28, boxWidth - leftWidth - 7) : 0;
   const lines: string[] = [];
   lines.push("");
-  for (const line of EMILY_WORDMARK) lines.push(style(line, "yellow"));
+  for (const line of EMILY_WORDMARK) lines.push(style(line, "gray"));
   lines.push("");
-  lines.push(`${"─".repeat(Math.max(2, Math.floor((boxWidth - 36) / 2)))} ${style("Emily AgentOS terminal workspace", "yellow")} ${"─".repeat(12)}`);
+  lines.push(`${"─".repeat(Math.max(2, Math.floor((boxWidth - 36) / 2)))} ${style("Emily AgentOS terminal workspace", "gray")} ${"─".repeat(12)}`);
   lines.push(`┌${"─".repeat(boxWidth - 2)}┐`);
 
-  const left = [
-    ...EMILY_3D_LOGO.map((line) => style(line, "yellow")),
-    provider ? `${provider.model || "(model)"}  ·  ${provider.id || "(provider)"}` : "model unavailable",
-    `Session: ${state.sessionId}`,
-    health ? `Tasks: ${health.pendingTasks}/${health.runningTasks}  Graphs: ${health.openTaskGraphs}` : "Tasks: ?/?  Graphs: ?",
-  ];
-  const right = [
-    style("Available Tools", "yellow"),
+  const workspace = [
+    sectionTitle("Available Tools:"),
     ...formatToolGroups(tools).slice(0, 7),
     "",
-    style("Available Skills", "yellow"),
+    sectionTitle("Available Skills:"),
     ...formatSkillGroups(skills).slice(0, 13),
-    "",
-    `${tools.length} tools · ${skills.length} skills · /help for commands`,
   ];
-  const log = formatRunLogLines(runLog.length ? runLog : state.runLog || [], wideLayout ? logWidth : middleWidth).slice(0, 18);
-  const compactRight = wideLayout ? right : [
-    ...right,
-    "",
-    ...log,
-  ];
-  const rowCount = Math.max(left.length, compactRight.length, wideLayout ? log.length : 0, 18);
-  for (let index = 0; index < rowCount; index += 1) {
-    const leftCell = pad(truncate(left[index] || "", leftWidth), leftWidth);
-    const rightCell = pad(truncate(compactRight[index] || "", middleWidth), middleWidth);
-    if (wideLayout) {
+  const log = formatRunLogLines(runLog.length ? runLog : state.runLog || [], wideLayout ? logWidth : contentWidth).slice(0, 18);
+  const rowCount = Math.max(workspace.length + 3, log.length, 20);
+  const summary = `${tools.length} tools · ${skills.length} skills · /help for commands`;
+  const leftRows = [...workspace];
+  while (leftRows.length < rowCount - 1) leftRows.push("");
+  leftRows.push(summary);
+  if (wideLayout) {
+    for (let index = 0; index < rowCount; index += 1) {
+      const leftCell = pad(truncate(leftRows[index] || "", leftWidth), leftWidth);
       const logCell = pad(truncate(log[index] || "", logWidth), logWidth);
-      lines.push(`│ ${leftCell} │ ${rightCell} │ ${logCell} │`);
-    } else {
-      lines.push(`│ ${leftCell} │ ${rightCell} │`);
+      lines.push(`│ ${leftCell} │ ${logCell} │`);
+    }
+  } else {
+    const compactRows = [...leftRows, "", ...log];
+    for (let index = 0; index < compactRows.length; index += 1) {
+      const cell = pad(truncate(compactRows[index] || "", contentWidth), contentWidth);
+      lines.push(`│ ${cell} │`);
     }
   }
   lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
+  lines.push(formatTuiStatusLine({ state, health, provider, width: boxWidth }));
   lines.push("");
   lines.push(style("Welcome to Emily Agent! Type your message or /help for commands.", "gray"));
   lines.push("");
@@ -1505,11 +1491,11 @@ function formatSkillGroups(skills: Array<{ name?: string; title?: string; capabi
 }
 
 function formatRunLogLines(runLog: string[], width: number, maxLines = 18): string[] {
-  const lines = [style("Run Log", "yellow")];
+  const lines = [sectionTitle("Run Log:")];
   const entries = runLog.slice(-12);
   if (!entries.length) {
-    lines.push(style("waiting for activity", "gray"));
-    lines.push("subagent/task/tool events appear here");
+    lines.push(style("waiting for activity", "brightGreen"));
+    lines.push(style("subagent/task/tool events appear here", "brightGreen"));
     return lines;
   }
   const groups = entries.map((entry) => formatRunLogEntry(entry, Math.max(20, width)));
@@ -1521,6 +1507,26 @@ function formatRunLogLines(runLog: string[], width: number, maxLines = 18): stri
   }
   lines.push(...body);
   return lines;
+}
+
+function sectionTitle(label: string): string {
+  return style(style(label, "bold"), "brightCyan");
+}
+
+function formatTuiStatusLine({
+  state,
+  health,
+  provider,
+  width,
+}: {
+  state: { sessionId: string; lastRunId: string; permissionMode: string };
+  health: Record<string, number> | null;
+  provider: { id?: string; model?: string; type?: string } | null;
+  width: number;
+}): string {
+  const model = provider ? `${provider.model || "(model)"}  ·  ${provider.id || "(provider)"}` : "model unavailable";
+  const tasks = health ? `Tasks: ${health.pendingTasks}/${health.runningTasks}  Graphs: ${health.openTaskGraphs}` : "Tasks: ?/?  Graphs: ?";
+  return style(truncate(`${model}   |   Session: ${state.sessionId}   |   ${tasks}`, width), "gray");
 }
 
 function formatRunLogEntry(entry: string, width: number): string[] {
@@ -1602,8 +1608,8 @@ function requiredArg(value: string | undefined, label: string): string {
 }
 
 function truncate(value: string, maxLength: number): string {
-  value = stripAnsi(value);
   if (visibleLength(value) <= maxLength) return value;
+  value = stripAnsi(value);
   if (maxLength <= 3) return takeVisible(value, maxLength);
   return `${takeVisible(value, Math.max(0, maxLength - 3))}...`;
 }
