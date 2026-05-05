@@ -128,7 +128,8 @@ export class ToolExecutor {
     let definition: ToolDefinition | null = null;
     let startedEventId: number | null = null;
     try {
-      definition = gateway.assertAllowed(request.tool);
+      const allowedDefinition = gateway.assertAllowed(request.tool);
+      definition = allowedDefinition;
       const approvalRequirement = approvalRequirementFor(definition, request.args || {});
       startedEventId = this.addEvent("tool.execution.started", request, {
         tool: definition.name,
@@ -140,9 +141,9 @@ export class ToolExecutor {
       });
       this.assertApproved(approvalRequirement, request);
       const output = await withToolCallTimeout(
-        () => this.executeAllowed(definition.name, request.args || {}, request),
+        () => this.executeAllowed(allowedDefinition.name, request.args || {}, request),
         this.toolCallTimeoutMs,
-        definition.name,
+        allowedDefinition.name,
       );
       const result: ToolExecutionResult = {
         tool: definition.name,
@@ -630,7 +631,7 @@ export class ToolExecutor {
     const parentGraphKey = typeof args.parentKey === "string" && args.parentKey.trim()
       ? args.parentKey.trim()
       : typeof request.task?.metadata.graphKey === "string" ? request.task.metadata.graphKey : "";
-    const inheritedGraph = graphKey ? {
+    const inheritedGraph: Metadata = graphKey ? {
       graphKey,
       graphId: typeof request.task?.metadata.graphId === "string" ? request.task.metadata.graphId : "",
       parentKey: parentGraphKey,

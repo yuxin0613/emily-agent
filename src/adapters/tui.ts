@@ -79,6 +79,97 @@ type TuiState = {
   nextContextQueueId: number;
 };
 type PromptRenderState = { lineCount: number; cursorOffsetFromBottom: number };
+type TuiToolSummary = { name?: string; category?: string };
+type TuiSkillSummary = { name?: string; title?: string; capabilities?: string[]; source?: string };
+type TuiCommandSummary = { name?: string; aliases?: string[]; permission?: string; description?: string };
+type DagEditorNode = {
+  key: string;
+  taskId: string;
+  depth: number;
+  index: number;
+  role: string;
+  status: string;
+  title: string;
+  input: string;
+  editable: boolean;
+};
+type DagMap = {
+  runId?: string;
+  goal?: unknown;
+  roots?: string[];
+  nodes?: Array<{
+    key: string;
+    id: string;
+    role: string;
+    status: string;
+    title: string;
+    input: string;
+    editable?: boolean;
+    children?: string[];
+  }>;
+};
+type TuiTimeline = {
+  run?: unknown;
+  tasks: Array<{ id: string; role: string; status: string; title: string }>;
+  events: Array<{ id: string | number; type: string; taskId?: string | null; createdAt: string }>;
+};
+type TuiTaskLike = {
+  id?: string;
+  role?: string;
+  status?: string;
+  title?: string;
+  assignedAgentId?: string;
+  error?: string;
+  metadata?: {
+    sessionId?: string;
+    lastError?: string;
+    deadLetterReason?: string;
+    cancelReason?: string;
+    [key: string]: unknown;
+  };
+};
+type TuiEventLike = {
+  id?: string | number;
+  type?: string;
+  taskId?: string | null;
+  agentId?: string;
+  payload?: {
+    tool?: string;
+    durationMs?: number;
+    error?: string;
+    reason?: string;
+    message?: string;
+    code?: string;
+    [key: string]: unknown;
+  };
+  createdAt?: string;
+};
+type TuiEventEnvelope = { event?: TuiEventLike; task?: TuiTaskLike; type?: string; taskId?: string };
+type TuiRuntime = {
+  runCommand: (
+    name: string,
+    options?: { args?: string[]; input?: Record<string, unknown>; format?: "json" | "text" },
+  ) => Promise<any>;
+  handleUserMessage: (
+    message: string,
+    context: { sessionId?: string; source?: string; permissionMode?: unknown },
+  ) => Promise<{ runId?: string; delegatedTo?: string[]; content: string; needsUserInput?: { questions?: string[] } }>;
+  health: () => Record<string, unknown>;
+  listTools?: () => unknown[];
+  listSkills?: () => unknown[];
+  listCommands: () => TuiCommandSummary[];
+  listSubagents?: () => unknown[];
+  listProviders?: () => Array<{ id?: string; model?: string; type?: string }>;
+  providerRegistry?: {
+    defaultProviderId?: string;
+    getConfigIncludingDisabled?: (providerId: string) => { id?: string; model?: string; type?: string } | null;
+  };
+  addLifecycleHook?: (name: "beforeModelComplete" | "afterModelComplete", handler: (...args: any[]) => void) => () => void;
+  roleAgentManager?: {
+    on?: (event: "event", handler: (envelope: TuiEventEnvelope) => void) => void;
+    off?: (event: "event", handler: (envelope: TuiEventEnvelope) => void) => void;
+  };
+};
 
 const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ["Chat", [
@@ -159,9 +250,9 @@ const TUI_ADVANCED_HELP_SECTIONS: TuiHelpSection[] = [
   ]],
 ];
 
-export async function startTui({ runtime }) {
+export async function startTui({ runtime }: { runtime: TuiRuntime }): Promise<void> {
   const rl = readline.createInterface({ input, output, terminal: false });
-  const state = {
+  const state: TuiState = {
     sessionId: "tui",
     lastRunId: "",
     permissionMode: "workspace_write",
@@ -169,7 +260,7 @@ export async function startTui({ runtime }) {
     transcript: [],
     contextQueue: [],
     nextContextQueueId: 1,
-  } satisfies TuiState;
+  };
 
   await printBanner(runtime, state);
 
@@ -263,25 +354,25 @@ export function isTuiAbortError(error: unknown): boolean {
   return candidate.name === "AbortError" || candidate.code === "ABORT_ERR";
 }
 
-async function printBanner(runtime, state): Promise<void> {
+async function printBanner(runtime: TuiRuntime, state: TuiState): Promise<void> {
   if (output.isTTY) output.write("\x1Bc");
   else output.write("\n");
   output.write(formatCurrentTuiHome(runtime, state));
 }
 
-function redrawTuiHome(runtime, state: TuiState): void {
+function redrawTuiHome(runtime: TuiRuntime, state: TuiState): void {
   if (!output.isTTY) return;
   output.write("\x1b[2J\x1b[H");
   output.write(formatCurrentTuiHome(runtime, state));
 }
 
-function formatCurrentTuiHome(runtime, state: TuiState): string {
+function formatCurrentTuiHome(runtime: TuiRuntime, state: TuiState): string {
   return formatTuiHome({
     state,
     health: safeHealthSync(runtime),
     provider: currentProvider(runtime),
-    tools: safeList(runtime, "listTools"),
-    skills: safeList(runtime, "listSkills"),
+    tools: safeList(runtime, "listTools") as TuiToolSummary[],
+    skills: safeList(runtime, "listSkills") as TuiSkillSummary[],
     runLog: state.runLog,
     transcript: state.transcript,
     contextQueue: state.contextQueue,
@@ -451,7 +542,7 @@ function isCommand(message: string): boolean {
   return message.startsWith(":") || message.startsWith("：") || message.startsWith("/");
 }
 
-async function handleCommand(runtime, state, message: string, rl?: readline.Interface): Promise<void> {
+async function handleCommand(runtime: TuiRuntime, state: TuiState, message: string, rl?: readline.Interface): Promise<void> {
   const prefix = message[0] === "：" ? ":" : message[0];
   const [command, ...args] = splitArgs(message.replace(/^[:：/]/, ""));
   if (!command) {
@@ -642,8 +733,8 @@ async function handleCommand(runtime, state, message: string, rl?: readline.Inte
 }
 
 async function sendChat(
-  runtime,
-  state,
+  runtime: TuiRuntime,
+  state: TuiState,
   message: string,
   rl?: readline.Interface,
   options: { recordUser?: boolean } = {},
@@ -694,15 +785,15 @@ async function sendChat(
     printMeta(meta);
   }
   if (response.needsUserInput?.questions?.length) {
-    printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
+    printPanel("Needs Input", response.needsUserInput.questions.map((question: string) => `- ${question}`).join("\n"), "yellow");
   }
   if (!output.isTTY) output.write("\n");
   return queuedMessages;
 }
 
 function attachBusyInputReader(
-  runtime,
-  state,
+  runtime: TuiRuntime,
+  state: TuiState,
   rl: readline.Interface,
   thinking: ReturnType<typeof createThinkingIndicator>,
 ): { detach: () => Promise<QueuedTuiMessage[]>; writeReadyPrompt: () => void; clearReadyPrompt: () => void } {
@@ -800,8 +891,8 @@ function attachBusyInputReader(
 }
 
 async function runBusyCommand(
-  runtime,
-  state,
+  runtime: TuiRuntime,
+  state: TuiState,
   message: string,
   thinking: ReturnType<typeof createThinkingIndicator>,
 ): Promise<void> {
@@ -908,7 +999,7 @@ function isBusySafeCommand(message: string): boolean {
   return true;
 }
 
-async function printStatus(runtime, state): Promise<void> {
+async function printStatus(runtime: TuiRuntime, state: TuiState): Promise<void> {
   const health = await safeHealth(runtime);
   const session = await runtime.runCommand("session.messages", {
     input: { sessionId: state.sessionId, limit: 1 },
@@ -925,7 +1016,7 @@ async function printStatus(runtime, state): Promise<void> {
   printPanel("Status", lines.join("\n"), "cyan");
 }
 
-async function printSubagents(runtime, args: string[] = []): Promise<void> {
+async function printSubagents(runtime: TuiRuntime, args: string[] = []): Promise<void> {
   printText(await runtime.runCommand("subagents.list", {
     args,
     format: "text",
@@ -942,7 +1033,7 @@ function formatActiveSubagents(subagents: unknown): string {
   }).join("; ");
 }
 
-function setPermissionMode(state, value?: string): void {
+function setPermissionMode(state: TuiState, value?: string): void {
   if (!value) {
     printPanel("Permission Mode", [
       `current: ${state.permissionMode}`,
@@ -957,12 +1048,12 @@ function setPermissionMode(state, value?: string): void {
   printPanel("Permission Mode", `current: ${state.permissionMode}`, value === "danger_full_access" ? "yellow" : "cyan");
 }
 
-function printCommands(commands): void {
+function printCommands(commands: TuiCommandSummary[]): void {
   output.write("\nCommands\n");
   printTable([
     ["Name", "Aliases", "Perm", "Description"],
-    ...commands.map((command) => [
-      command.name,
+    ...commands.map((command: TuiCommandSummary) => [
+      command.name || "",
       (command.aliases || []).join(","),
       command.permission || "",
       truncate(command.description || "", 62),
@@ -971,7 +1062,7 @@ function printCommands(commands): void {
   output.write("\n");
 }
 
-async function startNewSession(runtime, state, args: string[] = []): Promise<void> {
+async function startNewSession(runtime: TuiRuntime, state: TuiState, args: string[] = []): Promise<void> {
   const session = await runtime.runCommand("session.create", {
     input: {
       title: args.join(" ") || "New session",
@@ -984,7 +1075,7 @@ async function startNewSession(runtime, state, args: string[] = []): Promise<voi
   printPanel("New Session", session.id, "cyan");
 }
 
-async function addCron(runtime, state, args: string[]): Promise<void> {
+async function addCron(runtime: TuiRuntime, state: TuiState, args: string[]): Promise<void> {
   const name = requiredArg(args[0], "cron name");
   const schedule = requiredArg(args[1], "cron schedule");
   const message = args.slice(2).join(" ").trim();
@@ -1001,7 +1092,7 @@ async function addCron(runtime, state, args: string[]): Promise<void> {
   }));
 }
 
-async function resumeLatest(runtime, state, args: string[]): Promise<void> {
+async function resumeLatest(runtime: TuiRuntime, state: TuiState, args: string[]): Promise<void> {
   if (args[0] && args[0] !== "latest") throw new Error("usage: :resume latest [hidden]");
   const session = await runtime.runCommand("session.resume_latest", {
     input: { includeHidden: args.includes("hidden") || args.includes("--hidden") },
@@ -1014,7 +1105,7 @@ async function resumeLatest(runtime, state, args: string[]): Promise<void> {
   printPanel("Resumed Session", session.id, "cyan");
 }
 
-async function exportSession(runtime, args: string[]): Promise<void> {
+async function exportSession(runtime: TuiRuntime, args: string[]): Promise<void> {
   const sessionId = requiredArg(args[0], "session id");
   const format = args.includes("md") || args.includes("markdown") || args.includes("--markdown") ? "markdown" : "json";
   const exported = await runtime.runCommand("session.export", {
@@ -1028,7 +1119,7 @@ async function exportSession(runtime, args: string[]): Promise<void> {
   printJson(exported);
 }
 
-async function selectSession(runtime, state, sessionId: string): Promise<void> {
+async function selectSession(runtime: TuiRuntime, state: TuiState, sessionId: string): Promise<void> {
   state.sessionId = sessionId;
   const messages = await runtime.runCommand("session.messages", {
     input: { sessionId, limit: 40 },
@@ -1037,7 +1128,7 @@ async function selectSession(runtime, state, sessionId: string): Promise<void> {
   state.lastRunId = latest?.runId || "";
 }
 
-async function clearCurrentSession(runtime, state): Promise<void> {
+async function clearCurrentSession(runtime: TuiRuntime, state: TuiState): Promise<void> {
   const result = await runtime.runCommand("session.clear", {
     input: {
       sessionId: state.sessionId,
@@ -1054,7 +1145,7 @@ async function clearCurrentSession(runtime, state): Promise<void> {
   ].join("\n"), "cyan");
 }
 
-async function restoreSession(runtime, state, args: string[]): Promise<void> {
+async function restoreSession(runtime: TuiRuntime, state: TuiState, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("session id is required");
   const session = await runtime.runCommand("session.restore", {
     input: { sessionId: args[0] },
@@ -1063,7 +1154,7 @@ async function restoreSession(runtime, state, args: string[]): Promise<void> {
   printPanel("Restored Session", session.id, "cyan");
 }
 
-async function trashSession(runtime, args: string[]): Promise<void> {
+async function trashSession(runtime: TuiRuntime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("session id is required");
   const session = await runtime.runCommand("session.trash", {
     input: {
@@ -1077,7 +1168,7 @@ async function trashSession(runtime, args: string[]): Promise<void> {
   ].join("\n"), "yellow");
 }
 
-async function approveSkill(runtime, args: string[]): Promise<void> {
+async function approveSkill(runtime: TuiRuntime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("candidate id is required");
   const reason = args.slice(1).join(" ") || "approved from TUI";
   printText(await runtime.runCommand("skills.candidates.approve", {
@@ -1086,7 +1177,7 @@ async function approveSkill(runtime, args: string[]): Promise<void> {
   }));
 }
 
-async function rejectSkill(runtime, args: string[]): Promise<void> {
+async function rejectSkill(runtime: TuiRuntime, args: string[]): Promise<void> {
   if (!args[0]) throw new Error("candidate id is required");
   const reason = args.slice(1).join(" ") || "rejected from TUI";
   printText(await runtime.runCommand("skills.candidates.reject", {
@@ -1095,7 +1186,7 @@ async function rejectSkill(runtime, args: string[]): Promise<void> {
   }));
 }
 
-async function handleDagCommand(runtime, state, args: string[], rl?: readline.Interface): Promise<void> {
+async function handleDagCommand(runtime: TuiRuntime, state: TuiState, args: string[], rl?: readline.Interface): Promise<void> {
   if (!args[0] || args[0] === "list") {
     printText(await runtime.runCommand("dag.list", { args: args.slice(args[0] === "list" ? 1 : 0), format: "text" }));
     return;
@@ -1109,7 +1200,7 @@ async function handleDagCommand(runtime, state, args: string[], rl?: readline.In
   await startDagEditor(runtime, state, runId, rl);
 }
 
-async function resolveDagRunId(runtime, rootId: string): Promise<string> {
+async function resolveDagRunId(runtime: TuiRuntime, rootId: string): Promise<string> {
   try {
     await runtime.runCommand("graph.view", { input: { runId: rootId } });
     return rootId;
@@ -1125,7 +1216,7 @@ async function resolveDagRunId(runtime, rootId: string): Promise<string> {
   }
 }
 
-async function startDagEditor(runtime, state, runId: string, rl: readline.Interface): Promise<void> {
+async function startDagEditor(runtime: TuiRuntime, state: TuiState, runId: string, rl: readline.Interface): Promise<void> {
   let selectedIndex = 0;
   let selectedKey = "";
   let message = "";
@@ -1197,8 +1288,8 @@ async function startDagEditor(runtime, state, runId: string, rl: readline.Interf
   }
 }
 
-async function loadDagMap(runtime, runId: string) {
-  return await runtime.runCommand("graph.view", { input: { runId } });
+async function loadDagMap(runtime: TuiRuntime, runId: string): Promise<DagMap> {
+  return await runtime.runCommand("graph.view", { input: { runId } }) as DagMap;
 }
 
 function readDagEditorAction(): Promise<
@@ -1251,7 +1342,7 @@ function readDagEditorAction(): Promise<
   });
 }
 
-async function runDagEditorCommand(runtime, runId: string, selected, rawCommand: string): Promise<{ selectedKey?: string; message: string }> {
+async function runDagEditorCommand(runtime: TuiRuntime, runId: string, selected: DagEditorNode, rawCommand: string): Promise<{ selectedKey?: string; message: string }> {
   const [command, ...rest] = splitArgs(rawCommand);
   const text = rest.join(" ").trim();
   if (!command || command === "help") {
@@ -1298,7 +1389,7 @@ async function runDagEditorCommand(runtime, runId: string, selected, rawCommand:
   throw new Error(`Unknown DAG command: ${command}`);
 }
 
-function dagSiblingCommandInput(runId: string, selected, text: string): Record<string, unknown> {
+function dagSiblingCommandInput(runId: string, selected: DagEditorNode, text: string): Record<string, unknown> {
   return {
     runId,
     selector: selected.key,
@@ -1309,19 +1400,9 @@ function dagSiblingCommandInput(runId: string, selected, text: string): Record<s
   };
 }
 
-export function flattenDagEditorNodes(map): Array<{
-  key: string;
-  taskId: string;
-  depth: number;
-  index: number;
-  role: string;
-  status: string;
-  title: string;
-  input: string;
-  editable: boolean;
-}> {
+export function flattenDagEditorNodes(map: DagMap): DagEditorNode[] {
   const byKey = new Map((map.nodes || []).map((node) => [node.key, node]));
-  const rows: Array<{ key: string; taskId: string; depth: number; index: number; role: string; status: string; title: string; input: string; editable: boolean }> = [];
+  const rows: DagEditorNode[] = [];
   const visit = (key: string, depth: number) => {
     const node = byKey.get(key) as {
       key: string;
@@ -1351,7 +1432,7 @@ export function flattenDagEditorNodes(map): Array<{
   return rows;
 }
 
-export function formatDagEditorView(map, selectedIndex = 0, message = "", width = terminalWidth()): string {
+export function formatDagEditorView(map: DagMap, selectedIndex = 0, message = "", width = terminalWidth()): string {
   const rows = flattenDagEditorNodes(map);
   const lines = [
     `DAG ${map.runId}`,
@@ -1381,28 +1462,28 @@ export function formatDagEditorView(map, selectedIndex = 0, message = "", width 
   return `${lines.join("\n")}\n`;
 }
 
-async function printTimeline(runtime, state, runId?: string): Promise<void> {
+async function printTimeline(runtime: TuiRuntime, state: TuiState, runId?: string): Promise<void> {
   const targetRunId = runId || state.lastRunId;
   if (!targetRunId) throw new Error("run id is required");
   state.lastRunId = targetRunId;
   const timeline = await runtime.runCommand("timeline.get", {
     input: { runId: targetRunId },
-  });
+  }) as TuiTimeline;
   output.write(`\nTimeline ${targetRunId}\n`);
   if (timeline.run) printJson(timeline.run);
   printTable([
     ["Task", "Role", "Status", "Title"],
-    ...timeline.tasks.map((task) => [task.id.slice(0, 8), task.role, task.status, truncate(task.title, 64)]),
+    ...timeline.tasks.map((task: TuiTimeline["tasks"][number]) => [task.id.slice(0, 8), task.role, task.status, truncate(task.title, 64)]),
   ]);
   output.write("\nEvents\n");
   printTable([
     ["ID", "Type", "Task", "Created"],
-    ...timeline.events.slice(-20).map((event) => [String(event.id), event.type, event.taskId ? event.taskId.slice(0, 8) : "", event.createdAt]),
+    ...timeline.events.slice(-20).map((event: TuiTimeline["events"][number]) => [String(event.id), event.type, event.taskId ? event.taskId.slice(0, 8) : "", event.createdAt]),
   ]);
   output.write("\n");
 }
 
-async function printGraph(runtime, state, runId?: string): Promise<void> {
+async function printGraph(runtime: TuiRuntime, state: TuiState, runId?: string): Promise<void> {
   const targetRunId = runId || state.lastRunId;
   if (!targetRunId) throw new Error("run id is required");
   state.lastRunId = targetRunId;
@@ -1412,7 +1493,7 @@ async function printGraph(runtime, state, runId?: string): Promise<void> {
   }));
 }
 
-async function printNode(runtime, state, args: string[]): Promise<void> {
+async function printNode(runtime: TuiRuntime, state: TuiState, args: string[]): Promise<void> {
   const selector = requiredArg(args[0], "node key or task id");
   const runId = args[1] || state.lastRunId;
   if (!runId) throw new Error("run id is required");
@@ -1423,7 +1504,7 @@ async function printNode(runtime, state, args: string[]): Promise<void> {
   }));
 }
 
-async function graphAdd(runtime, state, args: string[]): Promise<void> {
+async function graphAdd(runtime: TuiRuntime, state: TuiState, args: string[]): Promise<void> {
   const runId = state.lastRunId;
   if (!runId) throw new Error("run id is required");
   const parent = requiredArg(args[0], "parent key");
@@ -1444,7 +1525,7 @@ async function graphAdd(runtime, state, args: string[]): Promise<void> {
   }));
 }
 
-async function graphUpdate(runtime, state, args: string[]): Promise<void> {
+async function graphUpdate(runtime: TuiRuntime, state: TuiState, args: string[]): Promise<void> {
   const runId = state.lastRunId;
   if (!runId) throw new Error("run id is required");
   const selector = requiredArg(args[0], "node key or task id");
@@ -1465,7 +1546,7 @@ async function graphUpdate(runtime, state, args: string[]): Promise<void> {
   }));
 }
 
-async function printTrace(runtime, taskId?: string): Promise<void> {
+async function printTrace(runtime: TuiRuntime, taskId?: string): Promise<void> {
   if (!taskId) throw new Error("task id is required");
   const trace = await runtime.runCommand("task.trace", {
     input: { taskId },
@@ -1474,14 +1555,14 @@ async function printTrace(runtime, taskId?: string): Promise<void> {
   printJson(trace);
 }
 
-function attachModelThinkingReporter(runtime, state, thinking: ReturnType<typeof createThinkingIndicator>): () => void {
+function attachModelThinkingReporter(runtime: TuiRuntime, state: TuiState, thinking: ReturnType<typeof createThinkingIndicator>): () => void {
   if (!runtime.addLifecycleHook) return () => undefined;
-  const detachBefore = runtime.addLifecycleHook("beforeModelComplete", (event) => {
+  const detachBefore = runtime.addLifecycleHook("beforeModelComplete", (event: { payload?: Record<string, unknown> }) => {
     const source = String(event.payload?.source || "");
     if (source && source !== `session:${state.sessionId}`) return;
     thinking.start();
   });
-  const detachAfter = runtime.addLifecycleHook("afterModelComplete", (event) => {
+  const detachAfter = runtime.addLifecycleHook("afterModelComplete", (event: { payload?: Record<string, unknown> }) => {
     const source = String(event.payload?.source || "");
     if (source && source !== `session:${state.sessionId}`) return;
     thinking.stop();
@@ -1536,15 +1617,15 @@ export function formatThinkingFrame(frame: number): string {
 }
 
 function attachProgressReporter(
-  runtime,
-  state,
+  runtime: TuiRuntime,
+  state: TuiState,
   beforePrint: () => void = () => undefined,
   afterPrint: () => void = () => undefined,
 ): () => void {
   const manager = runtime.roleAgentManager;
   if (!manager?.on || !manager?.off) return () => undefined;
   const seen = new Set<string>();
-  const handler = (envelope) => {
+  const handler = (envelope: TuiEventEnvelope) => {
     const event = envelope?.event || null;
     const task = envelope?.task || null;
     const type = event?.type || envelope?.type || "";
@@ -1562,7 +1643,7 @@ function attachProgressReporter(
     }
   };
   manager.on("event", handler);
-  return () => manager.off("event", handler);
+  return () => manager.off?.("event", handler);
 }
 
 function shouldShowProgressEvent(type: string): boolean {
@@ -1574,7 +1655,7 @@ function shouldShowProgressEvent(type: string): boolean {
     || type === "runtime.anomaly";
 }
 
-export function formatProgressEvent(type: string, task, event): string {
+export function formatProgressEvent(type: string, task?: TuiTaskLike | null, event?: TuiEventLike | null): string {
   if (type.startsWith("task.")) {
     const status = type.replace(/^task\./, "");
     const role = task?.role ? `${task.role} ` : "";
@@ -1605,7 +1686,7 @@ export function formatProgressEvent(type: string, task, event): string {
   return type;
 }
 
-function taskFailureReason(status: string, task, event): string {
+function taskFailureReason(status: string, task?: TuiTaskLike | null, event?: TuiEventLike | null): string {
   if (!["failed", "dead_letter", "blocked", "cancelled"].includes(status)) return "";
   const payloadReason = event?.payload?.reason || event?.payload?.error || event?.payload?.message;
   const candidates = [
@@ -1652,15 +1733,15 @@ function printMeta(items: string[]): void {
   output.write(`${style(`${TUI_GLYPHS.system} ${items.join(" · ")}`, "gray")}\n`);
 }
 
-function printJson(value): void {
+function printJson(value: unknown): void {
   output.write(`\n${JSON.stringify(value, null, 2)}\n\n`);
 }
 
-function printText(value): void {
+function printText(value: unknown): void {
   output.write(`\n${String(value).trimEnd()}\n\n`);
 }
 
-function printError(error): void {
+function printError(error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
   printPanel("Error", message, "red");
 }
@@ -1758,7 +1839,7 @@ export function formatTuiHome({
     transcript?: TuiTranscriptEntry[];
     contextQueue?: QueuedTuiMessage[];
   };
-  health?: Record<string, number> | null;
+  health?: Record<string, unknown> | null;
   provider?: { id?: string; model?: string; type?: string } | null;
   tools?: Array<{ name?: string; category?: string }>;
   skills?: Array<{ name?: string; title?: string; capabilities?: string[]; source?: string }>;
@@ -1967,7 +2048,7 @@ function formatTuiStatusLine({
   width,
 }: {
   state: { sessionId: string; lastRunId: string; permissionMode: string };
-  health: Record<string, number> | null;
+  health: Record<string, unknown> | null;
   provider: { id?: string; model?: string; type?: string } | null;
   width: number;
 }): string {
@@ -1992,7 +2073,7 @@ function formatRunLogEntry(entry: string, width: number): string[] {
   return lines;
 }
 
-function currentProvider(runtime): { id?: string; model?: string; type?: string } | null {
+function currentProvider(runtime: TuiRuntime): { id?: string; model?: string; type?: string } | null {
   try {
     const providerId = runtime.providerRegistry?.defaultProviderId;
     if (providerId && runtime.providerRegistry?.getConfigIncludingDisabled) {
@@ -2005,7 +2086,7 @@ function currentProvider(runtime): { id?: string; model?: string; type?: string 
   }
 }
 
-function safeList(runtime, method: "listTools" | "listSkills"): unknown[] {
+function safeList(runtime: TuiRuntime, method: "listTools" | "listSkills"): unknown[] {
   try {
     const value = runtime[method]?.();
     return Array.isArray(value) ? value : [];
@@ -2074,7 +2155,7 @@ function pad(value: string, width: number): string {
   return value + " ".repeat(Math.max(0, width - visibleLength(value)));
 }
 
-async function safeHealth(runtime): Promise<Record<string, number> | null> {
+async function safeHealth(runtime: TuiRuntime): Promise<Record<string, unknown> | null> {
   try {
     return runtime.health();
   } catch {
@@ -2082,7 +2163,7 @@ async function safeHealth(runtime): Promise<Record<string, number> | null> {
   }
 }
 
-function safeHealthSync(runtime): Record<string, number> | null {
+function safeHealthSync(runtime: TuiRuntime): Record<string, unknown> | null {
   try {
     return runtime.health();
   } catch {

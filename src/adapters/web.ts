@@ -18,7 +18,7 @@ export async function startWebServer({
   runtime,
   port,
   host = "127.0.0.1",
-  authToken = process.env.EMILY_WEB_TOKEN || randomUUID(),
+  authToken,
   readAuthToken = process.env.EMILY_WEB_READ_TOKEN || "",
   writeAuthToken = process.env.EMILY_WEB_WRITE_TOKEN || "",
 }: {
@@ -26,7 +26,7 @@ export async function startWebServer({
     handleUserMessage: (message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown }) => Promise<unknown>;
     taskStore: {
       getLatestEvents: (options?: { afterId?: number; limit?: number }) => unknown[];
-      addEvent?: (input: { type: string; payload?: Record<string, unknown> }) => number;
+      addEvent?: (input: { type: string; payload?: Metadata }) => number;
     };
     experienceStore: {
       listActive: () => unknown[];
@@ -110,6 +110,8 @@ export async function startWebServer({
   readAuthToken?: string;
   writeAuthToken?: string;
 }): Promise<WebServerHandle> {
+  const resolvedAuthToken = authToken || process.env.EMILY_WEB_TOKEN || randomUUID();
+  const generatedAuthToken = !authToken && !process.env.EMILY_WEB_TOKEN;
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
@@ -122,7 +124,7 @@ export async function startWebServer({
         return sendJson(response, 200, { ok: true, runtime: runtime.health(), gateway: gatewayProtocolSpec() });
       }
 
-      const auth = authenticate(request, url, { authToken, readAuthToken, writeAuthToken });
+      const auth = authenticate(request, url, { authToken: resolvedAuthToken, readAuthToken, writeAuthToken });
       if (!auth) {
         return sendJson(response, 401, { error: "Unauthorized" });
       }
@@ -635,7 +637,7 @@ export async function startWebServer({
       rejectUpgrade(netSocket, 404, "Not Found");
       return;
     }
-    const auth = authenticate(request, url, { authToken, readAuthToken, writeAuthToken });
+    const auth = authenticate(request, url, { authToken: resolvedAuthToken, readAuthToken, writeAuthToken });
     if (!auth) {
       rejectUpgrade(netSocket, 401, "Unauthorized");
       return;
@@ -655,10 +657,10 @@ export async function startWebServer({
   const resolvedPort = typeof address === "object" && address ? address.port : port;
   const url = `http://${host}:${resolvedPort}`;
   console.log(`Emily Agent web adapter listening on ${url}`);
-  console.log(`Emily Agent web token: ${authToken}`);
+  console.log(`Emily Agent web token: ${generatedAuthToken ? resolvedAuthToken : redactToken(resolvedAuthToken)}`);
   return {
     server,
-    authToken,
+    authToken: resolvedAuthToken,
     url,
     close: () => new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
@@ -706,6 +708,12 @@ function safeTokenEquals(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function redactToken(token: string): string {
+  if (!token) return "(empty)";
+  if (token.length <= 8) return "(redacted)";
+  return `${token.slice(0, 4)}...${token.slice(-4)} (${token.length} chars)`;
 }
 
 function canUsePermission(actual: CommandPermission, required: CommandPermission): boolean {
@@ -781,7 +789,7 @@ function acceptGatewaySocket({
   maxPermission,
 }: {
   runtime: {
-    taskStore: { addEvent?: (input: { type: string; payload?: Record<string, unknown> }) => number };
+    taskStore: { addEvent?: (input: { type: string; payload?: Metadata }) => number };
     roleAgentManager: NodeJS.EventEmitter;
   } & Parameters<typeof dispatchGatewayRequest>[0];
   request: IncomingMessage;

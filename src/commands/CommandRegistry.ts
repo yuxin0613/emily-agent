@@ -1,6 +1,7 @@
 import type { CronJobInput } from "../cron/CronScheduler.ts";
 import type { ToolApproval } from "../tools/ToolExecutor.ts";
-import type { Metadata } from "../types.ts";
+import type { Metadata, ToolPermission } from "../types.ts";
+import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import {
   renderTaskMindMap,
   renderTaskMindMapNode,
@@ -12,6 +13,8 @@ import {
 } from "../tasks/TaskMindMap.ts";
 
 export type CommandPermission = "read" | "write" | "danger";
+
+const COMMAND_TOOL_REGISTRY = createDefaultToolRegistry();
 
 export class CommandPermissionError extends Error {
   constructor(message: string) {
@@ -88,7 +91,10 @@ export function createCommandRegistry(runtime: CommandRuntime): CommandRegistry 
       examples: ["doctor --deep", "doctor --repair"],
       properties: { deep: "boolean", repair: "boolean" },
     },
-    permissionForInput: ({ args, input }) => wantsRepair(input, args) ? "write" : "read",
+    permissionForInput: ({ args, input }) => {
+      if (wantsRepair(input, args)) return "write";
+      return wantsDeepProviderCheck(input, args) ? "danger" : "read";
+    },
     run: ({ args, input }) => runtime.doctor({
       deep: input.deep === true || args.includes("--deep") || args.includes("deep"),
       repair: wantsRepair(input, args),
@@ -141,7 +147,7 @@ interface CommandRuntime {
   securityAudit: () => Promise<unknown>;
   buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
   routeMessage: (input: string) => unknown;
-  createSession: (options?: { title?: string; source?: string; metadata?: Record<string, unknown> }) => unknown;
+  createSession: (options?: { title?: string; source?: string; metadata?: Metadata }) => unknown;
   clearSession: (sessionId: string, options?: { source?: string; reason?: string; nextTitle?: string }) => unknown;
   restoreSession: (sessionId: string) => unknown;
   trashSession: (sessionId: string, options?: { deleteAfterDays?: number; reason?: string }) => unknown;
@@ -155,8 +161,8 @@ interface CommandRuntime {
     provider?: string;
     model?: string;
     temperature?: number;
-    allowedTools?: string[];
-    forbiddenTools?: string[];
+    allowedTools?: ToolPermission[];
+    forbiddenTools?: ToolPermission[];
     capabilities?: string[];
     skills?: string[];
     skillAllowlist?: string[];
@@ -379,6 +385,7 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         examples: ["provider.health --deep"],
         properties: { deep: "boolean" },
       },
+      permissionForInput: ({ args, input }) => wantsDeepProviderCheck(input, args) ? "danger" : "read",
       run: ({ args, input }) => runtime.checkProviders({ deep: input.deep === true || args.includes("--deep") || args.includes("deep") }),
       renderText: (result) => renderTable("Provider Health", result, [
         ["ID", "id"],
@@ -992,14 +999,15 @@ function roleCommands(runtime: CommandRuntime): RuntimeCommand[] {
           instructions: "string",
         },
       },
+      permissionForInput: ({ input }) => roleDefinitionPermission(input),
       run: ({ input }) => runtime.addRole({
         name: requiredString(input.name, "name"),
         role: requiredString(input.role, "role"),
         provider: stringOptional(input.provider),
         model: stringOptional(input.model),
         temperature: typeof input.temperature === "number" ? input.temperature : undefined,
-        allowedTools: stringArray(input.allowedTools),
-        forbiddenTools: stringArray(input.forbiddenTools),
+        allowedTools: toolPermissionArray(input.allowedTools),
+        forbiddenTools: toolPermissionArray(input.forbiddenTools),
         capabilities: stringArray(input.capabilities),
         skills: stringArray(input.skills),
         skillAllowlist: stringArray(input.skillAllowlist),
@@ -1203,6 +1211,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
         required: ["tool"],
         properties: { tool: "string", args: "object", approval: "object", role: "string", permissionMode: "string", taskId: "string", runId: "string", sessionId: "string" },
       },
+      permissionForInput: ({ args, input }) => toolExecutionPermission(input, args),
       run: ({ args, input }) => runtime.executeTool({
         tool: stringInput(input.tool, args[0], "tool"),
         args: objectInput(input.args),
@@ -1302,6 +1311,39 @@ function permissionRank(permission: CommandPermission): number {
   if (permission === "danger") return 2;
   if (permission === "write") return 1;
   return 0;
+}
+
+function wantsDeepProviderCheck(input: Record<string, unknown>, args: string[]): boolean {
+  return input.deep === true || args.includes("--deep") || args.includes("deep");
+}
+
+function roleDefinitionPermission(input: Record<string, unknown>): CommandPermission {
+  return toolsNeedDanger(stringArrayInput(input.allowedTools) || []) ? "danger" : "write";
+}
+
+function toolExecutionPermission(input: Record<string, unknown>, args: string[] = []): CommandPermission {
+  const toolName = typeof input.tool === "string" ? input.tool : args[0] || "";
+  const definition = toolName ? COMMAND_TOOL_REGISTRY.resolve(toolName) : null;
+  if (input.permissionMode === "danger_full_access") return "danger";
+  if (hasClientSuppliedApproval(input.approval)) return "danger";
+  if (!definition) return "write";
+  return toolNeedsDanger(definition.name) ? "danger" : "write";
+}
+
+function toolsNeedDanger(tools: string[]): boolean {
+  return tools.some((tool) => {
+    const definition = COMMAND_TOOL_REGISTRY.resolve(tool);
+    return Boolean(definition && toolNeedsDanger(definition.name));
+  });
+}
+
+function toolNeedsDanger(toolName: string): boolean {
+  const definition = COMMAND_TOOL_REGISTRY.resolve(toolName);
+  return Boolean(definition && (definition.requiresApproval || definition.sideEffects === "destructive"));
+}
+
+function hasClientSuppliedApproval(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length > 0);
 }
 
 function requiredPositionalArgs(args: string[]): string[] {
@@ -1664,6 +1706,16 @@ function normalizeDatedOptions(input: Record<string, unknown>): Record<string, u
 
 function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) ? value.map(String) : undefined;
+}
+
+function toolPermissionArray(value: unknown): ToolPermission[] | undefined {
+  const tools = stringArray(value);
+  if (!tools) return undefined;
+  return tools.map((tool) => {
+    const definition = COMMAND_TOOL_REGISTRY.resolve(tool);
+    if (!definition) throw new Error(`Unknown tool: ${tool}`);
+    return definition.name;
+  });
 }
 
 function stringArrayInput(value: unknown): string[] | undefined {

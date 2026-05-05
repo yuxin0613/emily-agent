@@ -448,7 +448,7 @@ async function readTextIfExists(filePath: string): Promise<string> {
   try {
     return await readFile(filePath, "utf8");
   } catch (error) {
-    if (error.code === "ENOENT") return "";
+    if (typeof error === "object" && error && "code" in error && error.code === "ENOENT") return "";
     throw error;
   }
 }

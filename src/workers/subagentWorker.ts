@@ -152,12 +152,13 @@ async function runRoleTask({
       effectiveAllowedTools: profile.toolPolicy.effectiveAllowedTools,
     },
   });
-  let providerFallback: { requestedProviderId: string; fallbackProviderId: string; reason: string } | null = null;
+  const providerFallbacks: Array<{ requestedProviderId: string; fallbackProviderId: string; reason: string }> = [];
   const model: ModelProvider = providerRegistry.createForRole(definition, {
     onFallback: (fallback) => {
-      providerFallback = fallback;
+      providerFallbacks.push(fallback);
     },
   });
+  const providerFallback = providerFallbacks[0];
   if (providerFallback) {
     taskStore.addEvent({
       type: "runtime.anomaly",

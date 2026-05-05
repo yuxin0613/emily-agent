@@ -41,8 +41,8 @@ function buildDeveloperWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
-  workspaceDir,
-  canReadFiles,
+  workspaceDir = process.cwd(),
+  canReadFiles = true,
 }: Omit<RoleWorkProductInput, "role">): string {
   const acceptanceCriteria = readStringArray(task.metadata.acceptanceCriteria);
   const fileRefs = canReadFiles ? discoverRelevantFiles(task.input, workspaceDir, 8) : [];
@@ -89,8 +89,8 @@ function buildResearcherWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
-  workspaceDir,
-  canReadFiles,
+  workspaceDir = process.cwd(),
+  canReadFiles = true,
 }: Omit<RoleWorkProductInput, "role">): string {
   const fileRefs = canReadFiles ? discoverRelevantFiles(task.input, workspaceDir, 6) : [];
   const memoryHighlights = summarizeMemory(relevantMemory, 8);
