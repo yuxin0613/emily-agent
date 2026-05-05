@@ -217,6 +217,23 @@ Runtime state lives under `.emily/` by default:
     vector-index.json
 ```
 
+Runtime settings in `.emily/config.json`:
+
+| Key | Purpose |
+| --- | --- |
+| `toolCallTimeoutSeconds` | Maximum time to wait for any single tool execution before returning a failed tool result. Default: `3600`. |
+
+Example:
+
+```json
+{
+  "defaultProviderId": "main-deepseek",
+  "fallbackMode": "strict",
+  "toolCallTimeoutSeconds": 3600,
+  "providers": []
+}
+```
+
 Useful environment variables:
 
 | Variable | Purpose |

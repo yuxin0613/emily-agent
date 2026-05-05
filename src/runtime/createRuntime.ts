@@ -92,6 +92,7 @@ export async function createRuntime(options: {
     workspaceDir: process.cwd(),
     taskStore,
     registry: toolRegistry,
+    toolCallTimeoutMs: providerRegistry.toolCallTimeoutSeconds * 1000,
   });
   const skillRegistry = await SkillRegistry.create({ skillDirs });
   const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });

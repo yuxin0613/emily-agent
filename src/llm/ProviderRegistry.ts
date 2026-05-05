@@ -11,13 +11,17 @@ import type { RoleDefinition } from "../types.ts";
 interface ProviderFile {
   defaultProviderId: string;
   fallbackMode?: ProviderFallbackMode;
+  toolCallTimeoutSeconds: number;
   providers: ProviderConfig[];
 }
+
+export const DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 3600;
 
 export class ProviderRegistry {
   providers: Map<string, ProviderConfig>;
   defaultProviderId: string;
   fallbackMode: ProviderFallbackMode;
+  toolCallTimeoutSeconds: number;
   usageStore?: ProviderUsageStore;
   private persistedSnapshot: ProviderFile;
 
@@ -38,7 +42,7 @@ export class ProviderRegistry {
   }): Promise<ProviderRegistry> {
     const persistedSnapshot = await readProviderConfig(dataDir, defaultProviderId);
     const loaded = providers
-      ? { defaultProviderId, fallbackMode, providers }
+      ? { defaultProviderId, fallbackMode, toolCallTimeoutSeconds: persistedSnapshot.toolCallTimeoutSeconds, providers }
       : persistedSnapshot;
     const registry = new ProviderRegistry({
       providers: loaded.providers,
@@ -74,10 +78,12 @@ export class ProviderRegistry {
     }));
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
+    this.toolCallTimeoutSeconds = persistedSnapshot?.toolCallTimeoutSeconds || DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
     this.usageStore = usageStore;
     this.persistedSnapshot = cloneProviderFile(persistedSnapshot || {
       defaultProviderId,
       fallbackMode,
+      toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
       providers,
     });
   }
@@ -214,6 +220,7 @@ export class ProviderRegistry {
     return {
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
+      toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
       providers: this.list(),
     };
   }
@@ -221,6 +228,7 @@ export class ProviderRegistry {
   private applyProviderFile(file: ProviderFile): void {
     this.defaultProviderId = file.defaultProviderId;
     this.fallbackMode = file.fallbackMode || "strict";
+    this.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds);
     this.providers = new Map(file.providers.map((provider) => {
       validateProviderConfig(provider);
       return [provider.id, cloneProviderConfig(provider)];
@@ -381,6 +389,7 @@ async function readProviderFile(filePath: string): Promise<ProviderFile | null> 
     return {
       defaultProviderId: parsed.defaultProviderId || "echo",
       fallbackMode: parsed.fallbackMode === "fallback" ? "fallback" : "strict",
+      toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(parsed.toolCallTimeoutSeconds),
       providers: parsed.providers,
     };
   } catch (error) {
@@ -425,6 +434,9 @@ function mergeProviderFiles({
   if ((desired.fallbackMode || "strict") !== (base.fallbackMode || "strict")) {
     disk.fallbackMode = desired.fallbackMode || "strict";
   }
+  if (desired.toolCallTimeoutSeconds !== base.toolCallTimeoutSeconds) {
+    disk.toolCallTimeoutSeconds = desired.toolCallTimeoutSeconds;
+  }
 
   for (const [id, provider] of desiredProviders) {
     const previous = baseProviders.get(id);
@@ -463,6 +475,7 @@ function mergeProviderFiles({
   const merged: ProviderFile = {
     defaultProviderId,
     fallbackMode: disk.fallbackMode === "fallback" ? "fallback" : "strict",
+    toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(disk.toolCallTimeoutSeconds ?? desired.toolCallTimeoutSeconds),
     providers: [...mergedProviders.values()].map(cloneProviderConfig),
   };
   for (const provider of merged.providers) validateProviderConfig(provider);
@@ -490,6 +503,7 @@ function cloneProviderFile(file: ProviderFile): ProviderFile {
   return {
     defaultProviderId: file.defaultProviderId || "echo",
     fallbackMode: file.fallbackMode === "fallback" ? "fallback" : "strict",
+    toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds),
     providers: file.providers.map(cloneProviderConfig),
   };
 }
@@ -547,6 +561,7 @@ function defaultProviderFile(defaultProviderId: string): ProviderFile {
   return {
     defaultProviderId,
     fallbackMode: "strict",
+    toolCallTimeoutSeconds: DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
     providers: [{
       id: defaultProviderId,
       type: "echo",
@@ -554,6 +569,14 @@ function defaultProviderFile(defaultProviderId: string): ProviderFile {
       enabled: true,
     }],
   };
+}
+
+function normalizeToolCallTimeoutSeconds(value: unknown): number {
+  if (value === undefined || value === null) return DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 24 * 60 * 60) {
+    throw new Error("Config toolCallTimeoutSeconds must be an integer between 1 and 86400.");
+  }
+  return value;
 }
 
 export function validateProviderConfig(config: ProviderConfig): void {
