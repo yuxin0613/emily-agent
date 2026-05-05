@@ -86,6 +86,19 @@ const idleTuiHome = formatTuiHome();
 assert.match(idleTuiHome, /Run Log:/);
 assert.match(idleTuiHome, /waiting for activity/);
 assert.match(idleTuiHome, /subagent\/task\/tool events appear here/);
+process.stdout.columns = 180;
+const dynamicStatusHome = formatTuiHome({
+  state: { sessionId: "review-session", lastRunId: "run_dynamic", permissionMode: "read_only" },
+  provider: { id: "main-qwen", model: "qwen3-coder", type: "openai" },
+  health: { pendingTasks: 3, runningTasks: 2, openTaskGraphs: 5 },
+});
+process.stdout.columns = originalColumns;
+assert.match(dynamicStatusHome, /qwen3-coder/);
+assert.match(dynamicStatusHome, /main-qwen/);
+assert.match(dynamicStatusHome, /Session: review-session/);
+assert.match(dynamicStatusHome, /Tasks: 3\/2  Graphs: 5/);
+assert.doesNotMatch(dynamicStatusHome, /deepseek-v4-flash/);
+assert.doesNotMatch(dynamicStatusHome, /Session: tui   \|   Tasks: 0\/0  Graphs: 0/);
 const submitted = formatTuiSubmittedInput("what can you do for me?", 80);
 assert.match(submitted, /❯ what can you do for me\?/);
 assert.doesNotMatch(submitted, /─/);
