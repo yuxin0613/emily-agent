@@ -9,7 +9,7 @@ import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
 import { GATEWAY_METHODS } from "../gateway/GatewayProtocol.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
-import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
+import { normalizeAgentRuntimeConfig, ProviderRegistry, type AgentRuntimeConfig } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import type { VectorStoreConfig } from "../memory/VectorStoreAdapter.ts";
@@ -62,6 +62,7 @@ export async function createRuntime(options: {
   skillDirs?: string[];
   vectorStore?: VectorStoreConfig;
   enableCron?: boolean;
+  agents?: Partial<AgentRuntimeConfig>;
 } = {}) {
   const dataDir = options.dataDir || process.env.EMILY_DATA_DIR || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
@@ -81,6 +82,10 @@ export async function createRuntime(options: {
     defaultProviderId: requestedMainProviderId || "echo",
     fallbackMode: options.providerFallbackMode || "strict",
     usageStore: providerUsageStore,
+  });
+  const agentRuntimeConfig = normalizeAgentRuntimeConfig({
+    ...providerRegistry.agents,
+    ...(options.agents || {}),
   });
   const mainProviderId = requestedMainProviderId || providerRegistry.defaultProviderId;
   if (options.model && options.model.id !== mainProviderId) {
@@ -137,6 +142,10 @@ export async function createRuntime(options: {
     skillDir,
     skillDirs,
     hooks,
+    maxSubagentsPerRole: agentRuntimeConfig.maxSubagentsPerRole,
+    maxConcurrentSubagents: agentRuntimeConfig.maxConcurrentSubagents,
+    releaseSubagentsAfterTask: agentRuntimeConfig.releaseSubagentsAfterTask,
+    subagentIdleTtlMs: agentRuntimeConfig.subagentIdleTtlSeconds * 1000,
   });
   await roleAgentManager.start();
 

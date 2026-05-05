@@ -76,6 +76,8 @@ Providers are stored in `.emily/config.json`. Existing `.emily/providers.json` f
 
 Use `echo` for local architecture tests only. Use `openai` or `ollama` for real model work.
 
+Agent runtime limits live in the same file. Emily uses one ordered main-agent context and role-bound subagents: `agents.mainAgents` must stay `1`, and `agents.maxSubagentsPerRole` must stay `1` in the current stable runtime. Use `agents.maxConcurrentSubagents` to cap how many subagents can run at once, and `agents.subagentIdleTtlSeconds` plus `agents.releaseSubagentsAfterTask` to control when idle subagent processes are released.
+
 The easiest setup path is:
 
 ```bash
@@ -90,6 +92,13 @@ OpenAI-compatible example:
 {
   "defaultProviderId": "openai-main",
   "fallbackMode": "fallback",
+  "agents": {
+    "mainAgents": 1,
+    "maxSubagentsPerRole": 1,
+    "maxConcurrentSubagents": 4,
+    "releaseSubagentsAfterTask": true,
+    "subagentIdleTtlSeconds": 60
+  },
   "providers": [
     {
       "id": "openai-main",

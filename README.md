@@ -231,6 +231,11 @@ Runtime settings in `.emily/config.json`:
 | Key | Purpose |
 | --- | --- |
 | `toolCallTimeoutSeconds` | Maximum time to wait for any single tool execution before returning a failed tool result. Default: `3600`. |
+| `agents.mainAgents` | Number of main agents. Must be `1`; the main agent owns ordered user context and orchestration. |
+| `agents.maxSubagentsPerRole` | Subagent limit per role. Must be `1` in the current stable model. |
+| `agents.maxConcurrentSubagents` | Global cap for simultaneously running subagents. Default: based on local CPU, capped at `4`. |
+| `agents.releaseSubagentsAfterTask` | Whether idle subagent worker processes are released after they finish work. Default: `true`. |
+| `agents.subagentIdleTtlSeconds` | Idle time before releasing a finished subagent. Use `0` to release immediately. Default: `60`. |
 
 Example:
 
@@ -239,6 +244,13 @@ Example:
   "defaultProviderId": "main-deepseek",
   "fallbackMode": "strict",
   "toolCallTimeoutSeconds": 3600,
+  "agents": {
+    "mainAgents": 1,
+    "maxSubagentsPerRole": 1,
+    "maxConcurrentSubagents": 4,
+    "releaseSubagentsAfterTask": true,
+    "subagentIdleTtlSeconds": 60
+  },
   "providers": []
 }
 ```
@@ -330,7 +342,7 @@ Builtin role presets:
 | `inspector` | Inspect incomplete or suspicious tasks after failure. |
 | `memory-curator` | Promote valuable work into reusable experience. |
 
-Subagents are long-lived by role. If a role process already exists, new work is queued to that role instead of spawning duplicate role workers.
+The multi-agent model is intentionally conservative. There is exactly one main agent, and every agent is bound to one role. Each role has at most one active subagent; new work for that role is queued instead of spawning duplicate role workers. A global `agents.maxConcurrentSubagents` cap limits how many role workers can run at the same time, and idle subagents are released after `agents.subagentIdleTtlSeconds` when `agents.releaseSubagentsAfterTask` is enabled.
 
 ## Planning And Task Graphs
 
