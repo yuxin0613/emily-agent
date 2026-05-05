@@ -56,7 +56,7 @@ When started, the TUI opens on a home dashboard. The visible values are read fro
 - `Available Skills:` lists loaded skill groups.
 - `Run Log:` shows recent subagent, task, graph, anomaly, and tool execution events; when nothing has happened yet it shows an idle hint.
 - The status bar below the dashboard shows the current provider model/provider id, active session id, pending/running task counts, and open graph count. For example, `deepseek-v4-flash · main-deepseek | Session: tui | Tasks: 0/0 Graphs: 0` is only an example shape; the values change when you switch providers, sessions, or when tasks/graphs start and finish.
-- The prompt line at the bottom is the only input target. Long-running jobs can update `Run Log` while the prompt stays available for read-only commands and queued follow-up messages. In terminals that support bracketed paste, pasted text stays in the prompt buffer, pasted newlines are previewed as `\n`, and the TUI submits only when you press Enter.
+- The prompt area at the bottom is the only input target. Long-running jobs can update `Run Log` while the prompt stays available for read-only commands and queued follow-up messages. In terminals that support bracketed paste, pasted text stays in the prompt buffer, long pasted text wraps across prompt lines, pasted line breaks are preserved, and the TUI submits only when you press Enter.
 
 WebUI:
 

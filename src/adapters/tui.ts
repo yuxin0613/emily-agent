@@ -65,6 +65,7 @@ type TuiState = {
   permissionMode: string;
   runLog: string[];
 };
+type PromptRenderState = { lineCount: number };
 
 const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ["Chat", [
@@ -197,17 +198,18 @@ function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<str
   return new Promise((resolve) => {
     let closed = false;
     let buffer = "";
+    const promptRenderState = createPromptRenderState();
     const restoreInput = enterRawPromptMode(rl);
     const finish = (value: string | null) => {
       if (closed) return;
       closed = true;
       input.off("data", onData);
-      clearPromptLine();
+      clearPromptBlock(promptRenderState);
       restoreInput();
       resolve(value);
     };
     const render = () => {
-      if (!closed) renderPromptLine(state, buffer);
+      if (!closed) renderPromptBlock(state, buffer, promptRenderState);
     };
     const decoder = createPromptInputDecoder({
       appendText(text) {
@@ -222,8 +224,8 @@ function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<str
         finish(buffer);
       },
       abort() {
-        output.write("\n");
         finish(null);
+        output.write("\n");
       },
       isClosed() {
         return closed;
@@ -284,25 +286,37 @@ function focusInputLine(): void {
   clearLine(output, 0);
 }
 
-function clearPromptLine(): void {
+function createPromptRenderState(): PromptRenderState {
+  return { lineCount: 1 };
+}
+
+function clearPromptBlock(renderState: PromptRenderState): void {
   if (!output.isTTY) return;
-  cursorTo(output, 0);
-  clearLine(output, 0);
+  const lineCount = Math.max(1, renderState.lineCount || 1);
+  for (let index = 0; index < lineCount; index += 1) {
+    cursorTo(output, 0);
+    clearLine(output, 0);
+    if (index < lineCount - 1) output.write("\x1b[1A");
+  }
+  renderState.lineCount = 1;
 }
 
-function renderPromptLine(state: TuiState, buffer = ""): void {
-  focusInputLine();
+function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRenderState = createPromptRenderState()): void {
+  clearPromptBlock(renderState);
+  output.write("\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   const prompt = promptFor(state);
-  output.write(`${prompt}${formatPromptBufferPreview(buffer, promptPreviewWidth(prompt))}`);
+  const bodyLines = formatPromptBufferPreviewLines(buffer, promptPreviewWidth(prompt));
+  const indent = " ".repeat(visibleLength(prompt));
+  output.write(bodyLines.map((line, index) => `${index === 0 ? prompt : indent}${line}`).join("\n"));
+  renderState.lineCount = bodyLines.length;
 }
 
-export function formatPromptBufferPreview(buffer: string, width: number): string {
-  const normalized = normalizePastedText(buffer).replace(/\n/g, "\\n");
-  return truncate(normalized, Math.max(8, width));
+export function formatPromptBufferPreviewLines(buffer: string, width: number): string[] {
+  return wrapBlock(normalizePastedText(buffer), Math.max(8, width));
 }
 
 function promptPreviewWidth(prompt: string): number {
-  return Math.max(8, Math.min(120, terminalWidth() - visibleLength(prompt) - 8));
+  return Math.max(8, terminalWidth() - visibleLength(prompt) - 4);
 }
 
 function enterRawPromptMode(rl: readline.Interface): () => void {
@@ -644,17 +658,18 @@ function attachBusyInputReader(
   let closed = false;
   let promptVisible = false;
   let buffer = "";
+  const promptRenderState = createPromptRenderState();
   const queuedMessages: string[] = [];
   const pending = new Set<Promise<void>>();
   const restoreInput = enterRawPromptMode(rl);
   const writeReadyPrompt = () => {
     if (closed) return;
-    renderPromptLine(state, buffer);
+    renderPromptBlock(state, buffer, promptRenderState);
     promptVisible = true;
   };
   const clearReadyPrompt = () => {
     if (!promptVisible || !output.isTTY) return;
-    clearPromptLine();
+    clearPromptBlock(promptRenderState);
     promptVisible = false;
   };
   const submitBuffer = () => {
@@ -694,8 +709,9 @@ function attachBusyInputReader(
     },
     submit: submitBuffer,
     abort() {
-      output.write("\n");
+      clearReadyPrompt();
       closed = true;
+      output.write("\n");
     },
     isClosed() {
       return closed;
