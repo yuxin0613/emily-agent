@@ -70,6 +70,11 @@ const tuiHome = formatTuiHome({
     "[12:00:00] developer running · subagent dev-1 · task abc123 - build",
     "[12:00:01] developer tool completed · shell · subagent dev-1 · task abc123",
   ],
+  transcript: [
+    { role: "user", content: "测试消息" },
+    { role: "assistant", content: "收到，测试成功。" },
+    { role: "system", content: "run abc · elapsed 2s" },
+  ],
 });
 process.stdout.columns = originalColumns;
 assert.match(tuiHome, /Emily AgentOS/);
@@ -81,6 +86,11 @@ assert.match(tuiHome, /tool completed/);
 assert.match(tuiHome, /deepseek-chat/);
 assert.match(tuiHome, /Session: tui/);
 assert.match(tuiHome, /Welcome to Emily Agent! Type your message or \/help for commands\./);
+assert.match(tuiHome, /You/);
+assert.match(tuiHome, /测试消息/);
+assert.match(tuiHome, /Emily/);
+assert.match(tuiHome, /收到，测试成功。/);
+assert.match(tuiHome, /run abc/);
 assert.ok(!tuiHome.includes("undefined"));
 const idleTuiHome = formatTuiHome();
 assert.match(idleTuiHome, /Run Log:/);

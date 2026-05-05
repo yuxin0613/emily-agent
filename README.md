@@ -139,13 +139,15 @@ or, from a source checkout:
 npm run tui
 ```
 
-The TUI is designed around a compact transcript/composer loop:
+The TUI is designed around a compact dashboard plus transcript/composer loop:
 
 | Glyph | Meaning |
 | --- | --- |
 | `❯` | User input and the active prompt. |
-| `┊` | Assistant output, progress, and live thinking state. |
-| `·` | Run metadata such as run id, delegated agents, and elapsed time. |
+| `● You` | A message already submitted by the user. |
+| `Emily` | Assistant response card. |
+| `┊` | Live thinking or progress output while a call is active. |
+| `·` | Run metadata such as run id, delegated agents, elapsed time, and queued context notices. |
 | `⚡` | Tool output in views that expose tool events. |
 
 Typical flow:
@@ -162,10 +164,11 @@ The home screen is a live runtime dashboard, not a static banner:
 | --- | --- |
 | `Available Tools:` | Tool groups currently registered in the active runtime. |
 | `Available Skills:` | Skill groups currently loaded from builtin and configured skill roots. |
-| `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. When idle it shows a waiting hint. |
+| `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. Entries are split into event, subagent/task/tool metadata, and detail lines for scanning. When idle it shows a waiting hint. |
 | Status bar | Current provider model and provider id, current TUI session id, pending/running task counts, and open graph count. Values change as provider configuration, sessions, and runtime state change. |
+| Transcript | Recent `You` and `Emily` turns plus run metadata. The transcript remains visible after redraws so the dashboard does not erase the conversation. |
 
-The prompt area is the only input target. The TUI enables bracketed paste in capable terminals, keeps pasted content in the bottom prompt buffer, wraps long pasted text across prompt lines, preserves pasted line breaks, and submits the message only when Enter is pressed.
+The prompt area is the only input target and is framed with horizontal divider lines so it is visually separate from dashboard and transcript output. The TUI enables bracketed paste in capable terminals, keeps pasted content in the bottom prompt buffer, wraps long pasted text across prompt lines, preserves pasted line breaks, and submits the message only when Enter is pressed.
 
 Useful TUI commands:
 

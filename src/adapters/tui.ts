@@ -59,13 +59,22 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 
 type TuiHelpMode = "common" | "all";
 type TuiHelpSection = [string, string[][]];
+type TuiTranscriptEntry = {
+  role: "user" | "assistant" | "system";
+  content: string;
+};
+type QueuedTuiMessage = {
+  content: string;
+  recorded?: boolean;
+};
 type TuiState = {
   sessionId: string;
   lastRunId: string;
   permissionMode: string;
   runLog: string[];
+  transcript: TuiTranscriptEntry[];
 };
-type PromptRenderState = { lineCount: number };
+type PromptRenderState = { lineCount: number; cursorOffsetFromBottom: number };
 
 const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ["Chat", [
@@ -152,14 +161,16 @@ export async function startTui({ runtime }) {
     lastRunId: "",
     permissionMode: "workspace_write",
     runLog: [],
+    transcript: [],
   } satisfies TuiState;
 
   await printBanner(runtime, state);
 
   try {
-    const queuedMessages: string[] = [];
+    const queuedMessages: QueuedTuiMessage[] = [];
     while (true) {
-      const raw = queuedMessages.length ? queuedMessages.shift() || "" : await readPromptLine(rl, state);
+      const queued = queuedMessages.shift();
+      const raw = queued ? queued.content : await readPromptLine(rl, state);
       if (raw === null) break;
       const message = raw.trim();
       if (!message) continue;
@@ -169,7 +180,7 @@ export async function startTui({ runtime }) {
         if (isCommand(message)) {
           await handleCommand(runtime, state, message, rl);
         } else {
-          queuedMessages.push(...await sendChat(runtime, state, message, rl));
+          queuedMessages.push(...await sendChat(runtime, state, message, rl, { recordUser: !queued?.recorded }));
         }
       } catch (error) {
         printError(error);
@@ -263,6 +274,7 @@ function formatCurrentTuiHome(runtime, state: TuiState): string {
     tools: safeList(runtime, "listTools"),
     skills: safeList(runtime, "listSkills"),
     runLog: state.runLog,
+    transcript: state.transcript,
   });
 }
 
@@ -287,18 +299,21 @@ function focusInputLine(): void {
 }
 
 function createPromptRenderState(): PromptRenderState {
-  return { lineCount: 1 };
+  return { lineCount: 1, cursorOffsetFromBottom: 0 };
 }
 
 function clearPromptBlock(renderState: PromptRenderState): void {
   if (!output.isTTY) return;
   const lineCount = Math.max(1, renderState.lineCount || 1);
+  const offset = Math.max(0, renderState.cursorOffsetFromBottom || 0);
+  if (offset) output.write(`\x1b[${offset}B`);
   for (let index = 0; index < lineCount; index += 1) {
     cursorTo(output, 0);
     clearLine(output, 0);
     if (index < lineCount - 1) output.write("\x1b[1A");
   }
   renderState.lineCount = 1;
+  renderState.cursorOffsetFromBottom = 0;
 }
 
 function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRenderState = createPromptRenderState()): void {
@@ -307,8 +322,18 @@ function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRend
   const prompt = promptFor(state);
   const bodyLines = formatPromptBufferPreviewLines(buffer, promptPreviewWidth(prompt));
   const indent = " ".repeat(visibleLength(prompt));
-  output.write(bodyLines.map((line, index) => `${index === 0 ? prompt : indent}${line}`).join("\n"));
-  renderState.lineCount = bodyLines.length;
+  const divider = style("─".repeat(Math.max(20, terminalWidth() - 2)), "yellow");
+  const renderedLines = [
+    divider,
+    ...bodyLines.map((line, index) => `${index === 0 ? prompt : indent}${line}`),
+    divider,
+  ];
+  output.write(renderedLines.join("\n"));
+  output.write("\x1b[1A");
+  const lastInputLine = renderedLines[renderedLines.length - 2] || prompt;
+  cursorTo(output, visibleLength(lastInputLine));
+  renderState.lineCount = renderedLines.length;
+  renderState.cursorOffsetFromBottom = 1;
 }
 
 export function formatPromptBufferPreviewLines(buffer: string, width: number): string[] {
@@ -603,8 +628,16 @@ async function handleCommand(runtime, state, message: string, rl?: readline.Inte
   }
 }
 
-async function sendChat(runtime, state, message: string, rl?: readline.Interface): Promise<string[]> {
-  output.write(formatTuiSubmittedInput(message));
+async function sendChat(
+  runtime,
+  state,
+  message: string,
+  rl?: readline.Interface,
+  options: { recordUser?: boolean } = {},
+): Promise<QueuedTuiMessage[]> {
+  if (options.recordUser !== false) appendTranscript(state, "user", message);
+  if (output.isTTY) redrawTuiHome(runtime, state);
+  else output.write(formatTuiSubmittedInput(message));
   const thinking = createThinkingIndicator();
   const busyReader = rl ? attachBusyInputReader(runtime, state, rl, thinking) : null;
   const detachModelThinking = attachModelThinkingReporter(runtime, state, thinking);
@@ -622,7 +655,7 @@ async function sendChat(runtime, state, message: string, rl?: readline.Interface
   );
   const startedAt = Date.now();
   let response;
-  let queuedMessages: string[] = [];
+  let queuedMessages: QueuedTuiMessage[] = [];
   try {
     response = await runtime.handleUserMessage(message, {
       sessionId: state.sessionId,
@@ -636,16 +669,21 @@ async function sendChat(runtime, state, message: string, rl?: readline.Interface
     queuedMessages = busyReader ? await busyReader.detach() : [];
   }
   if (response.runId) state.lastRunId = response.runId;
-  printAssistantMessage(response.content);
   const meta = [];
   if (response.runId) meta.push(`run ${response.runId}`);
   if (response.delegatedTo?.length) meta.push(`agents ${response.delegatedTo.join(", ")}`);
   meta.push(`elapsed ${formatDuration(Date.now() - startedAt)}`);
-  printMeta(meta);
+  appendTranscript(state, "assistant", response.content);
+  appendTranscript(state, "system", meta.join(" · "));
+  if (output.isTTY) redrawTuiHome(runtime, state);
+  else {
+    printAssistantMessage(response.content);
+    printMeta(meta);
+  }
   if (response.needsUserInput?.questions?.length) {
     printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
   }
-  output.write("\n");
+  if (!output.isTTY) output.write("\n");
   return queuedMessages;
 }
 
@@ -654,12 +692,12 @@ function attachBusyInputReader(
   state,
   rl: readline.Interface,
   thinking: ReturnType<typeof createThinkingIndicator>,
-): { detach: () => Promise<string[]>; writeReadyPrompt: () => void; clearReadyPrompt: () => void } {
+): { detach: () => Promise<QueuedTuiMessage[]>; writeReadyPrompt: () => void; clearReadyPrompt: () => void } {
   let closed = false;
   let promptVisible = false;
   let buffer = "";
   const promptRenderState = createPromptRenderState();
-  const queuedMessages: string[] = [];
+  const queuedMessages: QueuedTuiMessage[] = [];
   const pending = new Set<Promise<void>>();
   const restoreInput = enterRawPromptMode(rl);
   const writeReadyPrompt = () => {
@@ -684,9 +722,10 @@ function attachBusyInputReader(
     }
     if (!isCommand(message)) {
       thinking.stop();
-      output.write(formatTuiSubmittedInput(message));
-      queuedMessages.push(message);
-      output.write(`${style("·", "gray")} queued context ${queuedMessages.length}\n\n`);
+      appendTranscript(state, "user", message);
+      appendTranscript(state, "system", `queued context ${queuedMessages.length + 1}`);
+      redrawTuiHome(runtime, state);
+      queuedMessages.push({ content: message, recorded: true });
       writeReadyPrompt();
       return;
     }
@@ -1583,13 +1622,15 @@ export function formatTuiHome({
   tools = [],
   skills = [],
   runLog = [],
+  transcript = [],
 }: {
-  state?: { sessionId: string; lastRunId: string; permissionMode: string; runLog?: string[] };
+  state?: { sessionId: string; lastRunId: string; permissionMode: string; runLog?: string[]; transcript?: TuiTranscriptEntry[] };
   health?: Record<string, number> | null;
   provider?: { id?: string; model?: string; type?: string } | null;
   tools?: Array<{ name?: string; category?: string }>;
   skills?: Array<{ name?: string; title?: string; capabilities?: string[]; source?: string }>;
   runLog?: string[];
+  transcript?: TuiTranscriptEntry[];
 } = {}): string {
   const width = Math.max(88, terminalWidth());
   const boxWidth = Math.min(width - 2, 178);
@@ -1634,6 +1675,10 @@ export function formatTuiHome({
   lines.push(formatTuiStatusLine({ state, health, provider, width: boxWidth }));
   lines.push("");
   lines.push(style("Welcome to Emily Agent! Type your message or /help for commands.", "gray"));
+  const transcriptLines = formatTuiTranscript(transcript.length ? transcript : state.transcript || [], boxWidth);
+  if (transcriptLines.length) {
+    lines.push(...transcriptLines);
+  }
   lines.push("");
   return `${lines.join("\n")}\n`;
 }
@@ -1659,6 +1704,55 @@ export function formatTranscriptMessage(
   });
   if (role === "user") lines.push("");
   return `${lines.join("\n")}\n`;
+}
+
+function appendTranscript(state: TuiState, role: TuiTranscriptEntry["role"], content: string): void {
+  const transcript = Array.isArray(state.transcript) ? state.transcript : [];
+  transcript.push({ role, content: String(content || "").trim() });
+  state.transcript = transcript.filter((entry) => entry.content).slice(-20);
+}
+
+function formatTuiTranscript(entries: TuiTranscriptEntry[], width: number, maxLines = 18): string[] {
+  if (!entries.length) return [];
+  const contentWidth = Math.max(32, width - 4);
+  const groups = entries.slice(-8).map((entry) => formatTuiTranscriptEntry(entry, contentWidth));
+  const kept: string[] = [];
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (kept.length + group.length > maxLines) {
+      if (!kept.length) kept.unshift(...group.slice(-maxLines));
+      break;
+    }
+    kept.unshift(...group);
+  }
+  return [
+    "",
+    style("─".repeat(Math.min(width, 96)), "yellow"),
+    ...kept,
+  ];
+}
+
+function formatTuiTranscriptEntry(entry: TuiTranscriptEntry, width: number): string[] {
+  if (entry.role === "system") {
+    return wrapBlock(entry.content, Math.max(24, width - 2)).map((line, index) => (
+      `${index === 0 ? style(TUI_GLYPHS.system, "gray") : " "} ${style(line, "gray")}`
+    ));
+  }
+  if (entry.role === "user") {
+    const label = `${style("●", "cyan")} ${style("You", "brightCyan")}`;
+    return [
+      label,
+      ...wrapBlock(entry.content, Math.max(24, width - 2)).map((line) => `  ${line}`),
+    ];
+  }
+  const label = ` ${style("Emily", "yellow")} `;
+  const top = `┌─${label}${"─".repeat(Math.max(4, width - visibleLength(label) - 3))}`;
+  const bottom = `└${"─".repeat(Math.max(4, width - 1))}`;
+  return [
+    top,
+    ...wrapBlock(entry.content, Math.max(24, width - 4)).map((line) => `│ ${line}`),
+    bottom,
+  ];
 }
 
 function formatToolGroups(tools: Array<{ name?: string; category?: string }>): string[] {
@@ -1733,9 +1827,12 @@ function formatRunLogEntry(entry: string, width: number): string[] {
   const splitAt = body.indexOf(" - ");
   const summary = splitAt >= 0 ? body.slice(0, splitAt) : body;
   const detail = splitAt >= 0 ? body.slice(splitAt + 3) : "";
-  const prefix = time ? `${time} ` : "";
-  const lines = [truncate(`${prefix}${summary}`, width)];
-  if (detail) lines.push(truncate(`  ${detail}`, width));
+  const [event, ...meta] = summary.split(" · ").map((part) => part.trim()).filter(Boolean);
+  const lines = [truncate(`${time ? `${time}  ` : ""}${event || summary}`, width)];
+  if (meta.length) {
+    lines.push(...wrapBlock(meta.join(" · "), Math.max(18, width - 2)).map((line) => `  ${line}`));
+  }
+  if (detail) lines.push(...wrapBlock(detail, Math.max(18, width - 2)).map((line) => `  ${line}`));
   return lines;
 }
 
