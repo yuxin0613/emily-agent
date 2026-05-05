@@ -50,6 +50,14 @@ Terminal UI:
 npm run tui
 ```
 
+When started, the TUI opens on a home dashboard. The visible values are read from the current runtime:
+
+- `Available Tools:` lists the tool groups registered for this process.
+- `Available Skills:` lists loaded skill groups.
+- `Run Log:` shows recent subagent, task, graph, anomaly, and tool execution events; when nothing has happened yet it shows an idle hint.
+- The status bar below the dashboard shows the current provider model/provider id, active session id, pending/running task counts, and open graph count. For example, `deepseek-v4-flash · main-deepseek | Session: tui | Tasks: 0/0 Graphs: 0` is only an example shape; the values change when you switch providers, sessions, or when tasks/graphs start and finish.
+- The prompt line at the bottom is the only input target. Long-running jobs can update `Run Log` while the prompt stays available for read-only commands and queued follow-up messages.
+
 WebUI:
 
 ```bash
@@ -201,7 +209,7 @@ Inspect recent graphs from the TUI:
 /node architecture
 ```
 
-The TUI remains responsive while a long job is running. You can type read-only commands such as `/dag list`, `/sub`, `/status`, or `/timeline` immediately. A normal message enters the main-agent context queue and runs after the current main-agent turn finishes, so main-agent context is handled in order. The home panel has a Run Log area for recent subagent, task, graph, anomaly, and tool execution events. `/sub` shows which subagent is currently running, the configured role, the task name, and task id.
+The TUI remains responsive while a long job is running. You can type read-only commands such as `/dag list`, `/sub`, `/status`, or `/timeline` immediately. A normal message enters the main-agent context queue and runs after the current main-agent turn finishes, so main-agent context is handled in order. The home panel has a Run Log area for recent subagent, task, graph, anomaly, and tool execution events, and the dashboard status bar updates from runtime health rather than a fixed template. `/sub` shows which subagent is currently running, the configured role, the task name, and task id.
 
 `/dag <root_id>` opens the interactive DAG editor. Use up/down arrows to select a task node. Editor commands start with `:`:
 

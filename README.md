@@ -156,6 +156,15 @@ Typical flow:
 4. Plain chat stays conversational; task-like requests can still invoke planner/subagent execution.
 5. Use `/help` for common commands, `/help all` for advanced commands, and `exit` or `quit` to leave.
 
+The home screen is a live runtime dashboard, not a static banner:
+
+| Area | What It Shows |
+| --- | --- |
+| `Available Tools:` | Tool groups currently registered in the active runtime. |
+| `Available Skills:` | Skill groups currently loaded from builtin and configured skill roots. |
+| `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. When idle it shows a waiting hint. |
+| Status bar | Current provider model and provider id, current TUI session id, pending/running task counts, and open graph count. Values change as provider configuration, sessions, and runtime state change. |
+
 Useful TUI commands:
 
 | Command | Purpose |
