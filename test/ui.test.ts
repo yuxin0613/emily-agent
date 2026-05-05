@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
+import { flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError, mergeContextQueueToIndex } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +29,7 @@ assert.match(tuiHelp, /\/dag list/);
 assert.match(tuiHelp, /\/dag <root_id>/);
 assert.match(tuiHelp, /\/node <key> \[runId\]/);
 assert.match(tuiHelp, /\/help all/);
+assert.match(tuiHelp, /\/queue/);
 assert.doesNotMatch(tuiHelp, /:status/);
 assert.doesNotMatch(tuiHelp, /\/cron-pause/);
 assert.ok(!tuiHelp.includes("undefined"));
@@ -76,6 +77,11 @@ const tuiHome = formatTuiHome({
     { role: "assistant", content: "收到，测试成功。" },
     { role: "system", content: "run abc · elapsed 2s" },
   ],
+  contextQueue: [
+    { id: "ctx-1", content: "第一条新 context", recorded: true },
+    { id: "ctx-2", content: "第二条新 context", recorded: true },
+    { id: "ctx-3", content: "第三条新 context", recorded: true },
+  ],
 });
 process.stdout.columns = originalColumns;
 assert.match(tuiHome, /Emily AgentOS/);
@@ -94,7 +100,21 @@ assert.match(tuiHome, /测试消息/);
 assert.match(tuiHome, /Emily/);
 assert.match(tuiHome, /收到，测试成功。/);
 assert.match(tuiHome, /run abc/);
+assert.match(tuiHome, /Context Queue/);
+assert.match(tuiHome, /第一条新 context/);
+assert.match(tuiHome, /merge: \/queue merge 2/);
 assert.ok(!tuiHome.includes("undefined"));
+const mergedQueue = mergeContextQueueToIndex([
+  { id: "ctx-1", content: "第一条", recorded: true },
+  { id: "ctx-2", content: "第二条", recorded: true },
+  { id: "ctx-3", content: "第三条", recorded: true },
+], 2);
+assert.equal(mergedQueue.ok, true);
+assert.equal(mergedQueue.queue.length, 2);
+assert.match(mergedQueue.queue[0].content, /Context 1:\n第一条/);
+assert.match(mergedQueue.queue[0].content, /Context 2:\n第二条/);
+assert.equal(mergedQueue.queue[1].content, "第三条");
+assert.equal(mergeContextQueueToIndex([{ content: "one" }], 1).ok, false);
 const idleTuiHome = formatTuiHome();
 assert.match(idleTuiHome, /Run Log:/);
 assert.match(idleTuiHome, /waiting for activity/);

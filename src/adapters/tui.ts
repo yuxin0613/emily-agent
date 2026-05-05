@@ -53,6 +53,7 @@ const BUSY_SAFE_COMMANDS = new Set([
   "timeline",
   "messages",
   "commands",
+  "queue",
 ]);
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
@@ -64,6 +65,7 @@ type TuiTranscriptEntry = {
   content: string;
 };
 type QueuedTuiMessage = {
+  id?: string;
   content: string;
   recorded?: boolean;
 };
@@ -73,6 +75,8 @@ type TuiState = {
   permissionMode: string;
   runLog: string[];
   transcript: TuiTranscriptEntry[];
+  contextQueue: QueuedTuiMessage[];
+  nextContextQueueId: number;
 };
 type PromptRenderState = { lineCount: number; cursorOffsetFromBottom: number };
 
@@ -84,6 +88,7 @@ const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
     ["/new [title]", "create a new visible session"],
     ["/clear", "hide current session and create a new one"],
     ["/status", "show current TUI/runtime status"],
+    ["/queue", "show queued contexts; /queue merge <n> merges 1..n"],
     ["/mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
   ]],
   ["Sessions", [
@@ -162,6 +167,8 @@ export async function startTui({ runtime }) {
     permissionMode: "workspace_write",
     runLog: [],
     transcript: [],
+    contextQueue: [],
+    nextContextQueueId: 1,
   } satisfies TuiState;
 
   await printBanner(runtime, state);
@@ -170,6 +177,7 @@ export async function startTui({ runtime }) {
     const queuedMessages: QueuedTuiMessage[] = [];
     while (true) {
       const queued = queuedMessages.shift();
+      syncContextQueue(state, queuedMessages);
       const raw = queued ? queued.content : await readPromptLine(rl, state);
       if (raw === null) break;
       const message = raw.trim();
@@ -181,6 +189,7 @@ export async function startTui({ runtime }) {
           await handleCommand(runtime, state, message, rl);
         } else {
           queuedMessages.push(...await sendChat(runtime, state, message, rl, { recordUser: !queued?.recorded }));
+          syncContextQueue(state, queuedMessages);
         }
       } catch (error) {
         printError(error);
@@ -275,6 +284,7 @@ function formatCurrentTuiHome(runtime, state: TuiState): string {
     skills: safeList(runtime, "listSkills"),
     runLog: state.runLog,
     transcript: state.transcript,
+    contextQueue: state.contextQueue,
   });
 }
 
@@ -458,6 +468,9 @@ async function handleCommand(runtime, state, message: string, rl?: readline.Inte
       return;
     case "status":
       await printStatus(runtime, state);
+      return;
+    case "queue":
+      printText(handleQueueCommand(state, args));
       return;
     case "sub":
     case "subagents":
@@ -720,12 +733,25 @@ function attachBusyInputReader(
       writeReadyPrompt();
       return;
     }
+    if (isCommand(message) && busyCommandName(message) === "queue") {
+      thinking.stop();
+      const result = handleQueueCommand(state, busyCommandArgs(message), queuedMessages);
+      appendTranscript(state, "system", result);
+      syncContextQueue(state, queuedMessages);
+      redrawTuiHome(runtime, state);
+      writeReadyPrompt();
+      return;
+    }
     if (!isCommand(message)) {
       thinking.stop();
+      const entry = createQueuedContext(state, message);
+      queuedMessages.push(entry);
+      syncContextQueue(state, queuedMessages);
       appendTranscript(state, "user", message);
-      appendTranscript(state, "system", `queued context ${queuedMessages.length + 1}`);
+      appendTranscript(state, "system", queuedMessages.length > 1
+        ? `queued context ${queuedMessages.length}; merge 1..${queuedMessages.length} with /queue merge ${queuedMessages.length}`
+        : "queued context 1");
       redrawTuiHome(runtime, state);
-      queuedMessages.push({ content: message, recorded: true });
       writeReadyPrompt();
       return;
     }
@@ -785,6 +811,83 @@ async function runBusyCommand(
     return;
   }
   await handleCommand(runtime, state, message);
+}
+
+function createQueuedContext(state: TuiState, content: string): QueuedTuiMessage {
+  const id = `ctx-${state.nextContextQueueId}`;
+  state.nextContextQueueId += 1;
+  return { id, content, recorded: true };
+}
+
+function syncContextQueue(state: TuiState, queue: QueuedTuiMessage[]): void {
+  state.contextQueue = queue.map((item) => ({ ...item }));
+}
+
+function handleQueueCommand(
+  state: TuiState,
+  args: string[],
+  mutableQueue?: QueuedTuiMessage[],
+): string {
+  const queue = mutableQueue || state.contextQueue || [];
+  const action = (args[0] || "list").toLowerCase();
+  if (action === "list") return formatContextQueueDetail(queue);
+  if (action === "merge") {
+    const index = Number.parseInt(args[1] || "", 10);
+    if (!Number.isInteger(index)) return "Usage: /queue merge <n>";
+    const result = mergeContextQueueToIndex(queue, index);
+    if (!result.ok) return result.message;
+    if (mutableQueue) {
+      mutableQueue.splice(0, mutableQueue.length, ...result.queue);
+      syncContextQueue(state, mutableQueue);
+    } else {
+      syncContextQueue(state, result.queue);
+    }
+    return result.message;
+  }
+  return "Usage: /queue [list] | /queue merge <n>";
+}
+
+export function mergeContextQueueToIndex(
+  queue: Array<{ id?: string; content: string; recorded?: boolean }>,
+  index: number,
+): { ok: boolean; message: string; queue: QueuedTuiMessage[] } {
+  const normalized = queue.map((item, itemIndex) => ({
+    id: item.id || `ctx-${itemIndex + 1}`,
+    content: String(item.content || "").trim(),
+    recorded: item.recorded,
+  })).filter((item) => item.content);
+  if (index < 2) {
+    return { ok: false, message: "第 2 条开始才能合并：/queue merge 2", queue: normalized };
+  }
+  if (index > normalized.length) {
+    return { ok: false, message: `队列里只有 ${normalized.length} 条 context。`, queue: normalized };
+  }
+  const mergedItems = normalized.slice(0, index);
+  const remaining = normalized.slice(index);
+  const merged = {
+    id: mergedItems[0]?.id || "ctx-merged",
+    content: mergedItems.map((item, itemIndex) => `Context ${itemIndex + 1}:\n${item.content}`).join("\n\n"),
+    recorded: mergedItems.some((item) => item.recorded),
+  };
+  const nextQueue = [merged, ...remaining];
+  return {
+    ok: true,
+    message: `已合并 context 1..${index}，队列现在 ${nextQueue.length} 条。`,
+    queue: nextQueue,
+  };
+}
+
+function formatContextQueueDetail(queue: QueuedTuiMessage[]): string {
+  if (!queue.length) return "Context queue is empty.";
+  return [
+    "Context Queue",
+    "",
+    ...queue.flatMap((item, index) => {
+      const line = `${index + 1}. ${truncate(item.content.replace(/\s+/g, " "), 120)}`;
+      if (index === 0) return [line];
+      return [line, `   merge button: /queue merge ${index + 1}  (merge context 1..${index + 1})`];
+    }),
+  ].join("\n");
 }
 
 function busyCommandName(message: string): string {
@@ -1645,14 +1748,23 @@ export function formatTuiHome({
   skills = [],
   runLog = [],
   transcript = [],
+  contextQueue = [],
 }: {
-  state?: { sessionId: string; lastRunId: string; permissionMode: string; runLog?: string[]; transcript?: TuiTranscriptEntry[] };
+  state?: {
+    sessionId: string;
+    lastRunId: string;
+    permissionMode: string;
+    runLog?: string[];
+    transcript?: TuiTranscriptEntry[];
+    contextQueue?: QueuedTuiMessage[];
+  };
   health?: Record<string, number> | null;
   provider?: { id?: string; model?: string; type?: string } | null;
   tools?: Array<{ name?: string; category?: string }>;
   skills?: Array<{ name?: string; title?: string; capabilities?: string[]; source?: string }>;
   runLog?: string[];
   transcript?: TuiTranscriptEntry[];
+  contextQueue?: QueuedTuiMessage[];
 } = {}): string {
   const width = Math.max(88, terminalWidth());
   const boxWidth = Math.min(width - 2, 178);
@@ -1700,6 +1812,10 @@ export function formatTuiHome({
   const transcriptLines = formatTuiTranscript(transcript.length ? transcript : state.transcript || [], boxWidth);
   if (transcriptLines.length) {
     lines.push(...transcriptLines);
+  }
+  const contextQueueLines = formatTuiContextQueue(contextQueue.length ? contextQueue : state.contextQueue || [], boxWidth);
+  if (contextQueueLines.length) {
+    lines.push(...contextQueueLines);
   }
   lines.push("");
   return `${lines.join("\n")}\n`;
@@ -1775,6 +1891,24 @@ function formatTuiTranscriptEntry(entry: TuiTranscriptEntry, width: number): str
     ...wrapBlock(entry.content, Math.max(24, width - 4)).map((line) => `│ ${line}`),
     bottom,
   ];
+}
+
+function formatTuiContextQueue(queue: QueuedTuiMessage[], width: number, maxRows = 5): string[] {
+  if (!queue.length) return [];
+  const contentWidth = Math.max(32, width - 4);
+  const lines = [
+    "",
+    style("Context Queue", "brightCyan"),
+  ];
+  queue.slice(0, maxRows).forEach((item, index) => {
+    const action = index > 0 ? `  [merge: /queue merge ${index + 1}]` : "";
+    const prefix = `${index + 1}. `;
+    const bodyWidth = Math.max(16, contentWidth - visibleLength(prefix) - visibleLength(action));
+    const preview = truncate(item.content.replace(/\s+/g, " "), bodyWidth);
+    lines.push(`${prefix}${preview}${action}`);
+  });
+  if (queue.length > maxRows) lines.push(`... ${queue.length - maxRows} more queued contexts`);
+  return lines;
 }
 
 function formatToolGroups(tools: Array<{ name?: string; category?: string }>): string[] {
