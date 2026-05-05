@@ -98,6 +98,44 @@ export class EchoModelProvider implements ModelProvider {
     }
 
     if (agent === "planner") {
+      if (/NEEDS_WEB_PLAN_CLARIFICATION/.test(prompt)) {
+        return this.result(JSON.stringify({
+          goal: "Clarification requested for web research despite supplied sources.",
+          deliveryLevel: "poc",
+          exitCriteria: ["The web research sources are gathered before comparison."],
+          planningMode: "rolling",
+          maxWaves: 1,
+          failureStrategy: "block_dependents",
+          tasks: [{
+            key: "scope",
+            role: "researcher",
+            title: "web research clarification",
+            input: "Wait for the user to provide web source details.",
+            dependsOn: [],
+            dependencyType: "success",
+            acceptanceCriteria: ["The missing source information is available."],
+            toolHints: [],
+            skillHints: ["research"],
+            timeoutMs: 30000,
+            maxRetries: 1,
+            maxResultChars: 12000,
+            maxMemoryCandidates: 0,
+            wave: 1,
+            expandable: false,
+            expansionGoal: "",
+            maxExpansionDepth: 0,
+          }],
+          review: {
+            required: true,
+            criteria: ["The clarification answer is available."],
+          },
+          clarificationRequired: true,
+          clarificationQuestions: [
+            "无法直接访问 https://obsidian.md/，请提供 Obsidian 的功能列表或确认是否可以通过其他方式获取信息？",
+            "是否需要对 llm_wiki 的本地代码进行深入分析？请指定重点关注的功能或模块。",
+          ],
+        }));
+      }
       if (/NEEDS_PLAN_CLARIFICATION/.test(prompt)) {
         return this.result(JSON.stringify({
           goal: "Clarification required before execution.",

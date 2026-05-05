@@ -309,6 +309,7 @@ function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<str
   return new Promise((resolve) => {
     let closed = false;
     let buffer = "";
+    let cursorIndex = 0;
     const promptRenderState = createPromptRenderState();
     const restoreInput = enterRawPromptMode(rl);
     const finish = (value: string | null) => {
@@ -320,15 +321,38 @@ function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<str
       resolve(value);
     };
     const render = () => {
-      if (!closed) renderPromptBlock(state, buffer, promptRenderState);
+      if (!closed) renderPromptBlock(state, buffer, promptRenderState, cursorIndex);
     };
     const decoder = createPromptInputDecoder({
       appendText(text) {
-        buffer += normalizePastedText(text);
+        const normalized = normalizePastedText(text);
+        buffer = insertTextAtCharIndex(buffer, cursorIndex, normalized);
+        cursorIndex += charCount(normalized);
         render();
       },
       backspace() {
-        buffer = removeLastChar(buffer);
+        if (cursorIndex > 0) {
+          buffer = removeCharRange(buffer, cursorIndex - 1, cursorIndex);
+          cursorIndex -= 1;
+        }
+        render();
+      },
+      deleteForward() {
+        if (cursorIndex < charCount(buffer)) {
+          buffer = removeCharRange(buffer, cursorIndex, cursorIndex + 1);
+        }
+        render();
+      },
+      moveCursor(delta) {
+        cursorIndex = clamp(cursorIndex + delta, 0, charCount(buffer));
+        render();
+      },
+      moveToStart() {
+        cursorIndex = 0;
+        render();
+      },
+      moveToEnd() {
+        cursorIndex = charCount(buffer);
         render();
       },
       submit() {
@@ -417,11 +441,12 @@ function clearPromptBlock(renderState: PromptRenderState): void {
   renderState.cursorOffsetFromBottom = 0;
 }
 
-function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRenderState = createPromptRenderState()): void {
+function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRenderState = createPromptRenderState(), cursorIndex = charCount(buffer)): void {
   clearPromptBlock(renderState);
   output.write("\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   const prompt = promptFor(state);
-  const bodyLines = formatPromptBufferPreviewLines(buffer, promptPreviewWidth(prompt));
+  const bodyWidth = promptPreviewWidth(prompt);
+  const bodyLines = formatPromptBufferPreviewLines(buffer, bodyWidth);
   const indent = " ".repeat(visibleLength(prompt));
   const divider = style("─".repeat(Math.max(20, terminalWidth() - 2)), "yellow");
   const renderedLines = [
@@ -430,11 +455,13 @@ function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRend
     divider,
   ];
   output.write(renderedLines.join("\n"));
-  output.write("\x1b[1A");
-  const lastInputLine = renderedLines[renderedLines.length - 2] || prompt;
-  cursorTo(output, visibleLength(lastInputLine));
+  const cursor = promptCursorPosition(buffer, cursorIndex, bodyWidth);
+  const cursorOffsetFromBottom = Math.max(1, bodyLines.length - cursor.lineIndex);
+  output.write(`\x1b[${cursorOffsetFromBottom}A`);
+  const cursorPrefixWidth = cursor.lineIndex === 0 ? visibleLength(prompt) : visibleLength(indent);
+  cursorTo(output, cursorPrefixWidth + cursor.column);
   renderState.lineCount = renderedLines.length;
-  renderState.cursorOffsetFromBottom = 1;
+  renderState.cursorOffsetFromBottom = cursorOffsetFromBottom;
 }
 
 export function formatPromptBufferPreviewLines(buffer: string, width: number): string[] {
@@ -458,9 +485,13 @@ function enterRawPromptMode(rl: readline.Interface): () => void {
   };
 }
 
-function createPromptInputDecoder(handlers: {
+export function createPromptInputDecoder(handlers: {
   appendText: (text: string) => void;
   backspace: () => void;
+  deleteForward?: () => void;
+  moveCursor?: (delta: number) => void;
+  moveToStart?: () => void;
+  moveToEnd?: () => void;
   submit: () => void;
   abort: () => void;
   isClosed: () => boolean;
@@ -471,7 +502,10 @@ function createPromptInputDecoder(handlers: {
     let text = pending + chunk.toString();
     pending = "";
     while (text && !handlers.isClosed()) {
-      if (text === "\x1b" || BRACKETED_PASTE_START.startsWith(text) || BRACKETED_PASTE_END.startsWith(text)) {
+      if (text === "\x1b"
+        || /^\x1b\[[0-9;?]*$/.test(text)
+        || BRACKETED_PASTE_START.startsWith(text)
+        || BRACKETED_PASTE_END.startsWith(text)) {
         pending = text;
         return;
       }
@@ -494,6 +528,7 @@ function createPromptInputDecoder(handlers: {
       }
       if (text.startsWith("\x1b")) {
         const escapeSequence = text.match(/^\x1b\[[0-9;?]*[A-Za-z~]/)?.[0] || text.slice(0, 1);
+        handlePromptEscapeSequence(escapeSequence, handlers);
         text = text.slice(escapeSequence.length);
         continue;
       }
@@ -532,10 +567,63 @@ function normalizePastedText(value: string): string {
   return String(value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function removeLastChar(value: string): string {
+function handlePromptEscapeSequence(escapeSequence: string, handlers: {
+  deleteForward?: () => void;
+  moveCursor?: (delta: number) => void;
+  moveToStart?: () => void;
+  moveToEnd?: () => void;
+}): void {
+  if (/\x1b\[[0-9;?]*D$/.test(escapeSequence)) {
+    handlers.moveCursor?.(-1);
+    return;
+  }
+  if (/\x1b\[[0-9;?]*C$/.test(escapeSequence)) {
+    handlers.moveCursor?.(1);
+    return;
+  }
+  if (/\x1b\[(?:H|1~|7~)$/.test(escapeSequence)) {
+    handlers.moveToStart?.();
+    return;
+  }
+  if (/\x1b\[(?:F|4~|8~)$/.test(escapeSequence)) {
+    handlers.moveToEnd?.();
+    return;
+  }
+  if (/\x1b\[3~$/.test(escapeSequence)) {
+    handlers.deleteForward?.();
+  }
+}
+
+function promptCursorPosition(buffer: string, cursorIndex: number, width: number): { lineIndex: number; column: number } {
+  const marker = "\uE000";
+  const normalized = normalizePastedText(buffer);
+  const safeCursorIndex = clamp(cursorIndex, 0, charCount(normalized));
+  const marked = insertTextAtCharIndex(normalized, safeCursorIndex, marker);
+  const markerLines = formatPromptBufferPreviewLines(marked, width);
+  const foundLineIndex = markerLines.findIndex((line) => line.includes(marker));
+  if (foundLineIndex < 0) return { lineIndex: 0, column: 0 };
+  const line = markerLines[foundLineIndex] || "";
+  return {
+    lineIndex: foundLineIndex,
+    column: visibleLength(line.slice(0, line.indexOf(marker))),
+  };
+}
+
+function charCount(value: string): number {
+  return [...value].length;
+}
+
+function insertTextAtCharIndex(value: string, charIndex: number, text: string): string {
   const chars = [...value];
-  chars.pop();
-  return chars.join("");
+  const index = clamp(charIndex, 0, chars.length);
+  return [...chars.slice(0, index), text, ...chars.slice(index)].join("");
+}
+
+function removeCharRange(value: string, start: number, end: number): string {
+  const chars = [...value];
+  const safeStart = clamp(start, 0, chars.length);
+  const safeEnd = clamp(end, safeStart, chars.length);
+  return [...chars.slice(0, safeStart), ...chars.slice(safeEnd)].join("");
 }
 
 function isCommand(message: string): boolean {
@@ -800,13 +888,14 @@ function attachBusyInputReader(
   let closed = false;
   let promptVisible = false;
   let buffer = "";
+  let cursorIndex = 0;
   const promptRenderState = createPromptRenderState();
   const queuedMessages: QueuedTuiMessage[] = [];
   const pending = new Set<Promise<void>>();
   const restoreInput = enterRawPromptMode(rl);
   const writeReadyPrompt = () => {
     if (closed) return;
-    renderPromptBlock(state, buffer, promptRenderState);
+    renderPromptBlock(state, buffer, promptRenderState, cursorIndex);
     promptVisible = true;
   };
   const clearReadyPrompt = () => {
@@ -818,6 +907,7 @@ function attachBusyInputReader(
     if (closed) return;
     const message = buffer.trim();
     buffer = "";
+    cursorIndex = 0;
     clearReadyPrompt();
     promptVisible = false;
     if (!message) {
@@ -856,11 +946,34 @@ function attachBusyInputReader(
   };
   const decoder = createPromptInputDecoder({
     appendText(text) {
-      buffer += normalizePastedText(text);
+      const normalized = normalizePastedText(text);
+      buffer = insertTextAtCharIndex(buffer, cursorIndex, normalized);
+      cursorIndex += charCount(normalized);
       writeReadyPrompt();
     },
     backspace() {
-      buffer = removeLastChar(buffer);
+      if (cursorIndex > 0) {
+        buffer = removeCharRange(buffer, cursorIndex - 1, cursorIndex);
+        cursorIndex -= 1;
+      }
+      writeReadyPrompt();
+    },
+    deleteForward() {
+      if (cursorIndex < charCount(buffer)) {
+        buffer = removeCharRange(buffer, cursorIndex, cursorIndex + 1);
+      }
+      writeReadyPrompt();
+    },
+    moveCursor(delta) {
+      cursorIndex = clamp(cursorIndex + delta, 0, charCount(buffer));
+      writeReadyPrompt();
+    },
+    moveToStart() {
+      cursorIndex = 0;
+      writeReadyPrompt();
+    },
+    moveToEnd() {
+      cursorIndex = charCount(buffer);
       writeReadyPrompt();
     },
     submit: submitBuffer,

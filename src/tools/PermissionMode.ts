@@ -7,6 +7,9 @@ const WORKSPACE_WRITE_TOOLS = new Set<ToolPermission>([
   "run_tests",
   "create_task",
   "inspect_task",
+  "http_fetch",
+  "web_search",
+  "browser",
 ]);
 
 export function parsePermissionMode(value: unknown, fallback: PermissionMode = "workspace_write"): PermissionMode {

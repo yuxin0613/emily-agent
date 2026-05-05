@@ -840,20 +840,22 @@ function fixPlanningTemplates(): PlanningTemplate[] {
 }
 
 function comparisonPlanningTemplates(): PlanningTemplate[] {
+  const webResearchTools = ["read_file", "http_fetch", "web_search", "browser"];
   return [
     simpleTemplate("comparison_scope", "planner", "比对范围", "Define the subjects, comparison depth, output shape, and explicit non-goals.", ["Subjects and comparison dimensions are explicit."]),
-    simpleTemplate("source_inventory", "researcher", "资料盘点", "Identify primary repositories, docs, release notes, and freshness requirements before comparing claims.", ["Sources are listed with freshness and reliability notes."]),
-    simpleTemplate("subject_profiles", "researcher", "对象画像", "Extract factual capabilities, constraints, and product/project positioning for each subject.", ["Each subject has evidence-backed capability notes."]),
-    simpleTemplate("comparison_matrix", "researcher", "差异矩阵", "Compare the subjects across the requested functional dimensions and note uncertainty.", ["Differences are mapped dimension by dimension."]),
+    simpleTemplate("source_inventory", "researcher", "资料盘点", "Identify primary repositories, docs, release notes, and freshness requirements before comparing claims.", ["Sources are listed with freshness and reliability notes."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("subject_profiles", "researcher", "对象画像", "Extract factual capabilities, constraints, and product/project positioning for each subject.", ["Each subject has evidence-backed capability notes."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("comparison_matrix", "researcher", "差异矩阵", "Compare the subjects across the requested functional dimensions and note uncertainty.", ["Differences are mapped dimension by dimension."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
     simpleTemplate("synthesis_validation", "reviewer", "综合验证", "Cross-check important claims and summarize material differences, tradeoffs, and caveats.", ["The synthesis is auditable and directly answers the comparison request."]),
   ];
 }
 
 function researchPlanningTemplates(): PlanningTemplate[] {
+  const webResearchTools = ["read_file", "http_fetch", "web_search", "browser"];
   return [
     simpleTemplate("research_questions", "researcher", "研究问题", "Turn the goal into answerable questions and decision criteria.", ["Questions map to the desired deliverable."]),
-    simpleTemplate("source_strategy", "researcher", "资料路径", "Define primary sources, search strategy, and freshness requirements.", ["Source requirements are explicit."]),
-    simpleTemplate("synthesis", "researcher", "综合分析", "Define comparison dimensions and synthesis output.", ["The synthesis will support a decision or clear answer."]),
+    simpleTemplate("source_strategy", "researcher", "资料路径", "Define primary sources, search strategy, and freshness requirements.", ["Source requirements are explicit."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("synthesis", "researcher", "综合分析", "Define comparison dimensions and synthesis output.", ["The synthesis will support a decision or clear answer."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
     simpleTemplate("validation", "reviewer", "验证", "Define cross-checks, uncertainty notes, and citation expectations.", ["Findings can be audited." ]),
   ];
 }
@@ -868,15 +870,24 @@ function generalPlanningTemplates(selectedAgents: string[]): PlanningTemplate[] 
   ];
 }
 
-function simpleTemplate(key: string, role: string, title: string, moduleInstruction: string, acceptanceCriteria: string[]): PlanningTemplate {
+function simpleTemplate(
+  key: string,
+  role: string,
+  title: string,
+  moduleInstruction: string,
+  acceptanceCriteria: string[],
+  options: Partial<Pick<PlanningTemplate, "toolHints" | "skillHints">> = {},
+): PlanningTemplate {
+  const defaultToolHints = role === "developer" ? ["read_file"] : role === "researcher" ? ["read_file"] : [];
+  const defaultSkillHints = role === "reviewer" ? ["review"] : role === "developer" ? ["coding"] : role === "researcher" ? ["research"] : ["planning"];
   return {
     key,
     role,
     title,
     moduleInstruction,
     acceptanceCriteria,
-    toolHints: role === "developer" ? ["read_file"] : [],
-    skillHints: role === "reviewer" ? ["review"] : role === "developer" ? ["coding"] : ["planning"],
+    toolHints: options.toolHints || defaultToolHints,
+    skillHints: options.skillHints || defaultSkillHints,
     leaves: [
       {
         key: `${key}_define`,

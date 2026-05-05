@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { mkdtemp } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
@@ -11,6 +13,8 @@ import {
 } from "../src/planning/PlanSpec.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-graph-"));
+const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
+process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 const runtime = await createRuntime({ dataDir });
 
 const projectComparison = "查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同";
@@ -38,6 +42,30 @@ assert.equal(runtime.taskStore.getRun(comparisonResponse.runId!)?.status, "done"
 assert.ok(comparisonResponse.delegatedTo.includes("researcher"));
 assert.ok(!comparisonResponse.delegatedTo.includes("developer"));
 assert.doesNotMatch(comparisonResponse.content, /请确认目标等级/);
+
+const webServer = http.createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  response.end("<html><head><title>Obsidian Features</title></head><body><h1>Obsidian</h1><p>Markdown notes, backlinks, graph view, canvas, plugins, sync.</p></body></html>");
+});
+await new Promise<void>((resolve) => webServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = webServer.address() as AddressInfo;
+  const localUrl = `http://127.0.0.1:${address.port}/features`;
+  const webComparison = await runtime.handleUserMessage(`NEEDS_WEB_PLAN_CLARIFICATION 比较 ${localUrl} 和 /Users/yuxin/0_code/llm_wiki 的功能差异`, {
+    sessionId: "planner-web-comparison",
+    source: "test",
+  });
+  assert.equal(runtime.taskStore.getRun(webComparison.runId!)?.status, "done");
+  assert.ok(webComparison.delegatedTo.includes("researcher"));
+  assert.ok(!webComparison.needsUserInput);
+  const webTimeline = runtime.getTimeline({ runId: webComparison.runId! });
+  assert.ok(webTimeline.events.some((event) => event.type === "runtime.anomaly"
+    && event.payload.code === "planner_clarification_overridden"));
+  assert.ok(webTimeline.events.some((event) => event.type === "tool.execution.completed"
+    && event.payload.tool === "http_fetch"));
+} finally {
+  await new Promise<void>((resolve, reject) => webServer.close((error) => error ? reject(error) : resolve()));
+}
 
 const response = await runtime.handleUserMessage("我要做一个应用，支持用户注册登录，先达到 POC，跑通核心链路即可", {
   sessionId: "planner-graph",
@@ -185,5 +213,7 @@ assert.ok(failedExpansionPlanner);
 assert.notEqual(failedExpansionPlanner.metadata.graphId, fallbackExpanded.payload.graphId);
 
 await runtime.shutdown();
+if (previousPrivateEgress === undefined) delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
+else process.env.EMILY_HTTP_ALLOW_PRIVATE = previousPrivateEgress;
 
 console.log("planner graph test passed");

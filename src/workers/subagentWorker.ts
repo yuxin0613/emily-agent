@@ -12,7 +12,7 @@ import { IllegalTaskTransitionError, TaskTransitionConflictError } from "../task
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
 import { ToolGateway } from "../tools/ToolGateway.ts";
-import { ToolExecutor, type ToolExecutionResult } from "../tools/ToolExecutor.ts";
+import { ToolExecutor, type ToolApproval, type ToolExecutionResult } from "../tools/ToolExecutor.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import type { JsonValue, Metadata, SkillHintResolution, Task, TaskResult, ToolHintResolution } from "../types.ts";
 
@@ -207,10 +207,11 @@ async function runRoleTask({
     },
   });
   const toolExecutionResults: ToolExecutionResult[] = [];
-  for (const request of readToolRequests(task.metadata.toolRequests)) {
+  for (const request of plannedToolRequests(task, toolGateway)) {
     toolExecutionResults.push(await toolExecutor.execute({
       tool: request.tool,
       args: request.args,
+      approval: request.approval,
       roleDefinition: definition,
       permissionMode,
       task,
@@ -476,18 +477,82 @@ function readStringArray(value: unknown): string[] {
   return [];
 }
 
-function readToolRequests(value: unknown): Array<{
+interface PlannedToolRequest {
   tool: string;
   args: Record<string, unknown>;
-}> {
+  approval?: ToolApproval;
+}
+
+function plannedToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
+  return dedupeToolRequests([
+    ...readToolRequests(task.metadata.toolRequests),
+    ...automaticWebToolRequests(task, toolGateway),
+  ]);
+}
+
+function readToolRequests(value: unknown): PlannedToolRequest[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
     .map((item) => ({
       tool: String(item.tool || ""),
       args: item.args && typeof item.args === "object" && !Array.isArray(item.args) ? item.args as Record<string, unknown> : {},
+      approval: normalizeToolApproval(item.approval),
     }))
     .filter((item) => item.tool.trim());
+}
+
+function automaticWebToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
+  if (!toolGateway.canUse("http_fetch")) return [];
+  const urls = extractHttpUrls([
+    task.input,
+    typeof task.metadata.planGoal === "string" ? task.metadata.planGoal : "",
+    Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
+  ].join("\n"));
+  return urls.slice(0, 3).map((url) => ({
+    tool: "http_fetch",
+    args: {
+      url,
+      method: "GET",
+      maxBytes: 120000,
+      timeoutMs: 15000,
+    },
+    approval: {
+      approved: true,
+      template: "network_read",
+      reason: "explicit URL provided in assigned research task",
+    },
+  }));
+}
+
+function normalizeToolApproval(value: unknown): ToolApproval | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  return {
+    approved: input.approved === true,
+    template: typeof input.template === "string" ? input.template as ToolApproval["template"] : undefined,
+    reason: typeof input.reason === "string" ? input.reason : undefined,
+    approvedBy: typeof input.approvedBy === "string" ? input.approvedBy : undefined,
+    expiresAt: typeof input.expiresAt === "string" ? input.expiresAt : undefined,
+    scope: typeof input.scope === "string" ? input.scope : undefined,
+  };
+}
+
+function extractHttpUrls(value: string): string[] {
+  return unique([...String(value || "").matchAll(/https?:\/\/[^\s`"'<>]+/gi)]
+    .map((match) => match[0].replace(/[),.;，。；、]+$/g, "")));
+}
+
+function dedupeToolRequests(requests: PlannedToolRequest[]): PlannedToolRequest[] {
+  const seen = new Set<string>();
+  const result: PlannedToolRequest[] = [];
+  for (const request of requests) {
+    const key = `${request.tool}:${JSON.stringify(request.args)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(request);
+  }
+  return result;
 }
 
 function toMetadata(input: Record<string, unknown>): Metadata {

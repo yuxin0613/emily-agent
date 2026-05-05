@@ -574,6 +574,22 @@ export class MainAgent {
       plan = createFallbackPlanSpec(input, selectedAgents);
     }
 
+    if (plan.clarificationRequired && shouldOverridePlannerClarification(input, plan)) {
+      this.taskStore.addEvent({
+        type: "runtime.anomaly",
+        taskId: finishedPlanner.id,
+        payload: {
+          severity: "warning",
+          code: "planner_clarification_overridden",
+          message: "Planner asked the user to provide source data even though the request already included actionable research sources; fallback execution plan was used.",
+          questions: plan.clarificationQuestions,
+          runId,
+          repaired: true,
+        },
+      });
+      plan = createFallbackPlanSpec(input, selectedAgents);
+    }
+
     if (plan.clarificationRequired) {
       return {
         subResults: results,
@@ -937,6 +953,21 @@ export function isPlanningOnlyRequest(input: string): boolean {
   return /(?:不要|不用|先别|暂不|别|无需).{0,16}(?:实现|执行|开发|写代码|动手|开工|run|execute|implement|code)|(?:只|仅).{0,8}(?:规划|计划|拆解|列出)|(?:先|先帮我).{0,8}(?:规划|计划|拆解)(?!.*(?:实现|执行|开发|写代码|implement|execute))/i.test(normalized);
 }
 
+function shouldOverridePlannerClarification(input: string, plan: PlanSpec): boolean {
+  if (!plan.clarificationRequired) return false;
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind !== "research_comparison" && assessment.kind !== "research") return false;
+  if (!hasActionableResearchSource(input)) return false;
+  const questions = plan.clarificationQuestions.join("\n");
+  return /无法直接访问|提供.*功能列表|通过其他方式获取信息|本地代码|深入分析|feature list|cannot access|provide.*features/i.test(questions);
+}
+
+function hasActionableResearchSource(input: string): boolean {
+  return /https?:\/\/[^\s`"'<>]+/i.test(input)
+    || /(?:^|[\s`'"])(?:\/[A-Za-z0-9._-][^\s`'"]+|~\/[^\s`'"]+)/.test(input)
+    || /(?:^|[\s`'"])\.{1,2}\/[^\s`'"]+/.test(input);
+}
+
 function isModelIdentityQuestion(input: string): boolean {
   return /(?:现在|当前|正在|用的|使用的)?.{0,8}(?:哪个|那个|什么|啥)?.{0,6}(?:模型|model|provider)|(?:模型|model|provider).{0,8}(?:哪个|那个|什么|啥)/i.test(input);
 }
@@ -1014,6 +1045,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "- Use deliveryLevel to decide exit criteria: poc, uat, production.",
     "- Use the task assessment before choosing a decomposition. Long tasks are not only software builds; research comparisons can also be long when they require multiple evidence-gathering and synthesis nodes.",
     "- For research_comparison, do not ask for POC/UAT/production as user-facing standards. Decompose into comparison scope, source inventory, per-subject facts, comparison matrix, synthesis, and validation.",
+    "- If the user provides a URL or local source path for research_comparison/research work, do not ask the user to paste feature lists just because a website must be fetched. Create researcher tasks with http_fetch/web_search/browser hints and let execution gather evidence.",
     "- For single_long_operation, separate preparation, execution/monitoring, timeout handling, and verification only when those are real work products; do not pretend one blocking wait is many implementation nodes.",
     "- task.permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when a task needs a narrower or explicit guardrail.",
     "",

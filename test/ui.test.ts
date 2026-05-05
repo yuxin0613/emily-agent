@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError, mergeContextQueueToIndex } from "../src/adapters/tui.ts";
+import { createPromptInputDecoder, flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError, mergeContextQueueToIndex } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -152,6 +152,64 @@ const promptPreview = formatPromptBufferPreviewLines("帮我规划一个 Todo �
 assert.ok(promptPreview.length > 1);
 assert.equal(promptPreview.at(-1), "/dag list");
 assert.ok(promptPreview.every((line) => !line.includes("...")));
+
+let promptBuffer = "";
+let promptCursor = 0;
+let submittedPrompt = "";
+const promptDecoder = createPromptInputDecoder({
+  appendText(text) {
+    const chars = [...promptBuffer];
+    promptBuffer = [...chars.slice(0, promptCursor), text, ...chars.slice(promptCursor)].join("");
+    promptCursor += [...text].length;
+  },
+  backspace() {
+    if (promptCursor <= 0) return;
+    const chars = [...promptBuffer];
+    promptBuffer = [...chars.slice(0, promptCursor - 1), ...chars.slice(promptCursor)].join("");
+    promptCursor -= 1;
+  },
+  deleteForward() {
+    const chars = [...promptBuffer];
+    promptBuffer = [...chars.slice(0, promptCursor), ...chars.slice(promptCursor + 1)].join("");
+  },
+  moveCursor(delta) {
+    promptCursor = Math.max(0, Math.min([...promptBuffer].length, promptCursor + delta));
+  },
+  moveToStart() {
+    promptCursor = 0;
+  },
+  moveToEnd() {
+    promptCursor = [...promptBuffer].length;
+  },
+  submit() {
+    submittedPrompt = promptBuffer;
+  },
+  abort() {
+    submittedPrompt = "(aborted)";
+  },
+  isClosed() {
+    return false;
+  },
+});
+promptDecoder(Buffer.from("abc"));
+promptDecoder(Buffer.from("\x1b[D"));
+promptDecoder(Buffer.from("X"));
+assert.equal(promptBuffer, "abXc");
+assert.equal(promptCursor, 3);
+promptDecoder(Buffer.from("\x1b[D"));
+promptDecoder(Buffer.from("\x7f"));
+assert.equal(promptBuffer, "aXc");
+assert.equal(promptCursor, 1);
+promptDecoder(Buffer.from("\x1b[C"));
+promptDecoder(Buffer.from("\x1b[3~"));
+assert.equal(promptBuffer, "aX");
+promptDecoder(Buffer.from("\x1b[H"));
+promptDecoder(Buffer.from("!"));
+promptDecoder(Buffer.from("\x1b[F"));
+promptDecoder(Buffer.from("?"));
+promptDecoder(Buffer.from("\r"));
+assert.equal(submittedPrompt, "!aX?");
+
 const assistant = formatTranscriptMessage("assistant", "hello from emily", 80);
 assert.match(assistant, /┊ hello from emily/);
 assert.match(formatThinkingFrame(3), /thinking\.\.\./);

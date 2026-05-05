@@ -56,11 +56,21 @@ const timedOut = await timeoutExecutor.execute({
 assert.equal(timedOut.ok, false);
 assert.match(String(timedOut.error || ""), /timed out after 10ms/);
 
-const deniedByMode = await executor.execute({
+const approvalRequiredInWorkspaceMode = await executor.execute({
   tool: "http_fetch",
   args: { url: "https://example.com" },
   roleDefinition: role,
   permissionMode: "workspace_write",
+  sessionId: "tool-executor",
+});
+assert.equal(approvalRequiredInWorkspaceMode.ok, false);
+assert.match(String(approvalRequiredInWorkspaceMode.error || ""), /network_read/);
+
+const deniedByMode = await executor.execute({
+  tool: "http_fetch",
+  args: { url: "https://example.com" },
+  roleDefinition: role,
+  permissionMode: "read_only",
   sessionId: "tool-executor",
 });
 assert.equal(deniedByMode.ok, false);
