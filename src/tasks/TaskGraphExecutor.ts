@@ -1,5 +1,6 @@
 import {
   createFallbackGraphPatch,
+  assessTaskComplexity,
   parseGraphPatchSpec,
   sanitizePlannerMetadata,
   validateGraphPatchSpec,
@@ -669,6 +670,8 @@ export class TaskGraphExecutor {
     maxNewTasks: number;
   }): string {
     const parentKey = String(parentTask.metadata.graphKey || "");
+    const assessment = assessTaskComplexity(this.plan?.goal || parentTask.input);
+    const defaultRole = assessment.kind === "research_comparison" || assessment.kind === "research" ? "researcher" : "developer";
     return [
       "Create a GraphPatchSpec JSON object to expand the current rolling DAG one level finer.",
       "Return only JSON. Do not wrap it in markdown.",
@@ -688,7 +691,7 @@ export class TaskGraphExecutor {
         questions: [],
         tasks: [{
           key: "unique_task_key",
-          role: "developer",
+          role: defaultRole,
           title: "short task title",
           input: "full task instructions with enough context",
           parentKey,
@@ -720,6 +723,17 @@ export class TaskGraphExecutor {
       "- Keep the patch focused on the next decomposition layer, not the entire project.",
       "- Mark a new task expandable=true when it is a non-leaf node that should be decomposed again after completion.",
       "- permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when appropriate.",
+      "- For research_comparison, create researcher leaves for source discovery, per-subject evidence, comparison dimensions, synthesis, and reviewer validation. Do not turn comparison work into developer implementation slices.",
+      "- For software_delivery, create developer leaves only when the parent is ready for implementation or executable design.",
+      "",
+      "Task assessment:",
+      `kind: ${assessment.kind}`,
+      `complexityClass: ${assessment.complexityClass}`,
+      `longTask: ${assessment.longTask}`,
+      `splittable: ${assessment.splittable}`,
+      `estimatedNodes: ${assessment.estimatedNodes}`,
+      "reasons:",
+      ...assessment.reasons.map((reason) => `- ${reason}`),
       "",
       "Current plan:",
       `goal: ${this.plan?.goal || ""}`,

@@ -25,6 +25,24 @@ export class EchoModelProvider implements ModelProvider {
           tasks: [],
         }));
       }
+      const researchPatch = /kind:\s*research_comparison|kind:\s*research/i.test(prompt);
+      const leafKey = researchPatch ? "research_slice" : "implementation";
+      const leafRole = researchPatch ? "researcher" : "developer";
+      const leafTitle = researchPatch ? "research slice" : "implementation slice";
+      const leafInput = researchPatch
+        ? "Research the first concrete evidence-gathering or synthesis slice needed to satisfy the comparison exit criteria. Return remaining research slices as next actions."
+        : "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.";
+      const leafAcceptance = researchPatch
+        ? [
+            "A concrete research slice or evidence plan is produced.",
+            "The result states what remains for later rolling waves.",
+          ]
+        : [
+            "A concrete implementation slice or precise executable design is produced.",
+            "The result states what remains for later rolling waves.",
+          ];
+      const leafTools = researchPatch ? ["read_file"] : ["read_file", "write_file", "run_tests"];
+      const leafSkills = researchPatch ? ["research", "synthesis"] : ["coding", "implementation"];
       return this.result(JSON.stringify({
         reason: "Echo adaptive graph patch from the completed parent task.",
         parentKey,
@@ -36,12 +54,12 @@ export class EchoModelProvider implements ModelProvider {
             key: "verification",
             role: "reviewer",
             title: "verification slice",
-            input: "Verify the implementation slice against the delivery exit criteria and return pass/fail/needs_user_input.",
-            parentKey: "implementation",
-            dependsOn: ["implementation"],
+            input: "Verify the leaf slice against the delivery exit criteria and return pass/fail/needs_user_input.",
+            parentKey: leafKey,
+            dependsOn: [leafKey],
             dependencyType: "finished",
             acceptanceCriteria: [
-              "The implementation result is checked against the current exit criteria.",
+              "The leaf result is checked against the current exit criteria.",
               "The verdict is explicit and actionable.",
             ],
             toolHints: [],
@@ -56,19 +74,16 @@ export class EchoModelProvider implements ModelProvider {
             maxExpansionDepth: 0,
           },
           {
-            key: "implementation",
-            role: "developer",
-            title: "implementation slice",
-            input: "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.",
+            key: leafKey,
+            role: leafRole,
+            title: leafTitle,
+            input: leafInput,
             parentKey,
             dependsOn: [parentKey],
             dependencyType: "success",
-            acceptanceCriteria: [
-              "A concrete implementation slice or precise executable design is produced.",
-              "The result states what remains for later rolling waves.",
-            ],
-            toolHints: ["read_file", "write_file", "run_tests"],
-            skillHints: ["coding", "implementation"],
+            acceptanceCriteria: leafAcceptance,
+            toolHints: leafTools,
+            skillHints: leafSkills,
             timeoutMs: 30000,
             maxRetries: 1,
             maxResultChars: 12000,

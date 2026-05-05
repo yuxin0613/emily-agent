@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { classifyUserMessageIntent, isPlanningOnlyRequest } from "../src/agents/MainAgent.ts";
+import { assessTaskComplexity, requiresDeliveryLevelClarification } from "../src/planning/PlanSpec.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-chat-routing-"));
 const runtime = await createRuntime({ dataDir });
@@ -15,6 +16,9 @@ try {
   assert.equal(classifyUserMessageIntent("帮我规划一个 Todo 应用，不要立即实现"), "task");
   assert.equal(isPlanningOnlyRequest("帮我规划一个 Todo 应用 POC，不要立即实现"), true);
   assert.equal(isPlanningOnlyRequest("帮我做一个 Todo 应用 POC"), false);
+  assert.equal(classifyUserMessageIntent("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同"), "task");
+  assert.equal(assessTaskComplexity("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同").kind, "research_comparison");
+  assert.equal(requiresDeliveryLevelClarification("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同"), false);
 
   const response = await runtime.handleUserMessage("测试消息", {
     sessionId: "chat-routing",

@@ -18,6 +18,7 @@ import { taskResultSummary } from "../tasks/TaskResult.ts";
 import {
   createFallbackPlanSpec,
   createPlanningOnlyPlanSpec,
+  assessTaskComplexity,
   deliveryLevelQuestion,
   inferDeliveryLevel,
   parsePlanSpec,
@@ -948,6 +949,7 @@ function formatCurrentModelAnswer(model: ModelProvider): string {
 }
 
 function plannerPrompt(input: string, deliveryLevel: string): string {
+  const assessment = assessTaskComplexity(input);
   return [
     "Create a PlanSpec JSON object for an outcome-oriented DAG.",
     "Return only JSON. Do not wrap it in markdown.",
@@ -1010,7 +1012,19 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "- Use dependencies instead of prose ordering.",
     "- Keep the first wave small enough to execute now; use planningMode=rolling for larger goals.",
     "- Use deliveryLevel to decide exit criteria: poc, uat, production.",
+    "- Use the task assessment before choosing a decomposition. Long tasks are not only software builds; research comparisons can also be long when they require multiple evidence-gathering and synthesis nodes.",
+    "- For research_comparison, do not ask for POC/UAT/production as user-facing standards. Decompose into comparison scope, source inventory, per-subject facts, comparison matrix, synthesis, and validation.",
+    "- For single_long_operation, separate preparation, execution/monitoring, timeout handling, and verification only when those are real work products; do not pretend one blocking wait is many implementation nodes.",
     "- task.permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when a task needs a narrower or explicit guardrail.",
+    "",
+    "Task assessment:",
+    `- kind: ${assessment.kind}`,
+    `- complexityClass: ${assessment.complexityClass}`,
+    `- longTask: ${assessment.longTask}`,
+    `- splittable: ${assessment.splittable}`,
+    `- estimatedNodes: ${assessment.estimatedNodes}`,
+    "- reasons:",
+    ...assessment.reasons.map((reason) => `  - ${reason}`),
     "",
     `User request: ${input}`,
   ].join("\n");
@@ -1041,6 +1055,10 @@ function formatPlan(plan: PlanSpec): string[] {
 }
 
 function formatPlanOnlyResponse(plan: PlanSpec, { runId, graphId }: { runId: string; graphId: string }): string {
+  const assessment = assessTaskComplexity(plan.goal);
+  const standardLabel = assessment.kind === "research_comparison" || assessment.kind === "research"
+    ? "内部深度档"
+    : "准出等级";
   const childrenByParent = new Map<string, PlanSpec["tasks"]>();
   for (const task of plan.tasks) {
     const parent = task.parentKey || "";
@@ -1057,7 +1075,7 @@ function formatPlanOnlyResponse(plan: PlanSpec, { runId, graphId }: { runId: str
     `Run: ${runId}`,
     graphId ? `Graph: ${graphId}` : "",
     `目标：${plan.goal}`,
-    `准出等级：${plan.deliveryLevel.toUpperCase()}`,
+    `${standardLabel}：${plan.deliveryLevel.toUpperCase()}`,
     `节点：${plan.tasks.length} 个，叶子任务：${leaves.length} 个`,
     "",
     "反推逻辑：先定义目标和验收结果，再拆模块，最后落到可执行叶子任务和验证节点。",
@@ -1078,6 +1096,11 @@ function unique(values: string[]): string[] {
 function legacySelectSubAgents(input: string): string[] {
   const lower = input.toLowerCase();
   const agents = ["planner"];
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind === "research_comparison" || assessment.kind === "research") {
+    agents.push("researcher");
+    return agents;
+  }
   if (/(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口)/i.test(lower)) {
     agents.push("developer");
   } else {

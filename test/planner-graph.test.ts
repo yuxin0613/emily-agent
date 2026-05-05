@@ -3,10 +3,23 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
-import { parseGraphPatchSpec, validateGraphPatchSpec } from "../src/planning/PlanSpec.ts";
+import {
+  assessTaskComplexity,
+  parseGraphPatchSpec,
+  requiresDeliveryLevelClarification,
+  validateGraphPatchSpec,
+} from "../src/planning/PlanSpec.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-graph-"));
 const runtime = await createRuntime({ dataDir });
+
+const projectComparison = "查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同";
+const comparisonAssessment = assessTaskComplexity(projectComparison);
+assert.equal(comparisonAssessment.kind, "research_comparison");
+assert.equal(comparisonAssessment.longTask, true);
+assert.equal(comparisonAssessment.splittable, true);
+assert.equal(requiresDeliveryLevelClarification(projectComparison), false);
+assert.equal(requiresDeliveryLevelClarification("我要做一个应用，支持用户注册登录"), true);
 
 const clarification = await runtime.handleUserMessage("我要做一个应用，支持用户注册登录", {
   sessionId: "planner-graph",
@@ -15,6 +28,16 @@ const clarification = await runtime.handleUserMessage("我要做一个应用，�
 assert.match(clarification.content, /准出标准/);
 assert.deepEqual(clarification.delegatedTo, []);
 assert.equal(runtime.taskStore.getRun(clarification.runId!)?.status, "waiting_user");
+
+const comparisonResponse = await runtime.handleUserMessage(projectComparison, {
+  sessionId: "planner-comparison",
+  source: "test",
+});
+assert.ok(comparisonResponse.plan);
+assert.equal(runtime.taskStore.getRun(comparisonResponse.runId!)?.status, "done");
+assert.ok(comparisonResponse.delegatedTo.includes("researcher"));
+assert.ok(!comparisonResponse.delegatedTo.includes("developer"));
+assert.doesNotMatch(comparisonResponse.content, /请确认目标等级/);
 
 const response = await runtime.handleUserMessage("我要做一个应用，支持用户注册登录，先达到 POC，跑通核心链路即可", {
   sessionId: "planner-graph",

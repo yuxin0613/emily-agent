@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { MemoryRecallResult, Metadata, SkillHintResolution, Task, ToolHintResolution } from "../types.ts";
+import { assessTaskComplexity, inferDeliveryLevel } from "../planning/PlanSpec.ts";
 
 export interface RoleWorkProductInput {
   role: string;
@@ -414,7 +415,8 @@ function researchAssumptions(input: string): string[] {
 
 function openQuestions(input: string): string[] {
   const questions = [];
-  if (!/poc|uat|production|生产|验收|准出/.test(input.toLowerCase())) {
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind === "software_delivery" && !inferDeliveryLevel(input)) {
     questions.push("- What delivery level or exit standard should be used?");
   }
   if (/选择|比较|方案|tradeoff/i.test(input)) {

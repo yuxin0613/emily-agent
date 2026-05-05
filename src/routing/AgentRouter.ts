@@ -1,3 +1,5 @@
+import { assessTaskComplexity } from "../planning/PlanSpec.ts";
+
 export interface RouteMatch {
   role: string;
   reason: string;
@@ -54,8 +56,11 @@ const ROUTE_RULES: RouteRule[] = [
 export class AgentRouter {
   route(input: string, options: { availableRoles?: string[]; includeReviewer?: boolean } = {}): AgentRouteDecision {
     const available = new Set(options.availableRoles || []);
+    const assessment = assessTaskComplexity(input);
+    const researchOnly = assessment.kind === "research_comparison" || assessment.kind === "research";
     const matches = ROUTE_RULES
       .filter((rule) => !available.size || available.has(rule.role))
+      .filter((rule) => !(researchOnly && rule.role === "developer"))
       .filter((rule) => rule.pattern.test(input))
       .map((rule) => ({
         role: rule.role,
