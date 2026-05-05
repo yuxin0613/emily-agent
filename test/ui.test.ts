@@ -23,17 +23,30 @@ const tuiHelp = formatTuiHelp();
 assert.match(tuiHelp, /:mode \[mode\]/);
 assert.match(tuiHelp, /:status/);
 assert.match(tuiHelp, /:timeline \[runId\]/);
+assert.match(tuiHelp, /:help all/);
+assert.doesNotMatch(tuiHelp, /:cron-pause/);
 assert.ok(!tuiHelp.includes("undefined"));
+const allTuiHelp = formatTuiHelp("all");
+assert.match(allTuiHelp, /Most commands require/);
+assert.match(allTuiHelp, /:cron-pause <id>/);
+assert.match(allTuiHelp, /:cron-resume <id>/);
+assert.match(allTuiHelp, /:cron-run <id>/);
+assert.match(allTuiHelp, /:cron-delete <id>/);
+assert.doesNotMatch(allTuiHelp, /cron-pause\|resume/);
 const slashHints = formatTuiCommandHints("/");
 assert.match(slashHints, /Command hints/);
 assert.match(slashHints, /\/help/);
 assert.match(slashHints, /\/new \[title\]/);
 assert.match(slashHints, /\/status/);
+assert.doesNotMatch(slashHints, /\/cron-pause/);
 assert.ok(!slashHints.includes("undefined"));
 const filteredHints = formatTuiCommandHints("/", "sta");
 assert.match(filteredHints, /Command hints for \/sta/);
 assert.match(filteredHints, /\/status/);
 assert.doesNotMatch(filteredHints, /\/new \[title\]/);
+const filteredAdvancedHints = formatTuiCommandHints(":", "cron-r");
+assert.match(filteredAdvancedHints, /:cron-resume <id>/);
+assert.match(filteredAdvancedHints, /:cron-run <id>/);
 const tuiHome = formatTuiHome({
   provider: { id: "deepseek", model: "deepseek-chat", type: "openai" },
   tools: [{ name: "read_file", category: "filesystem" }, { name: "shell", category: "process" }],

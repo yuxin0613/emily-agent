@@ -43,15 +43,40 @@ const EMILY_3D_LOGO = [
 
 const VALID_PERMISSION_MODES = new Set(["read_only", "workspace_write", "danger_full_access"]);
 
-const TUI_HELP_SECTIONS: Array<[string, string[][]]> = [
+type TuiHelpMode = "common" | "all";
+type TuiHelpSection = [string, string[][]];
+
+const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ["Chat", [
     ["type anything", "send a message to the current session"],
-    [":help", "show full TUI help"],
+    [":help", "show common commands"],
+    [":help all", "show every advanced command"],
     ["/new [title]", "create a new visible session"],
     ["/clear", "hide current session and create a new one"],
-    [":mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
     [":status", "show current TUI/runtime status"],
+    [":mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
   ]],
+  ["Sessions", [
+    [":sessions [all|hidden|trash]", "list sessions"],
+    [":messages [limit]", "show current session messages"],
+    [":resume latest [hidden]", "resume latest session"],
+    [":export-session <id> [md]", "export session"],
+  ]],
+  ["Inspect", [
+    [":providers", "list providers"],
+    [":roles", "list roles"],
+    [":tools", "list tools"],
+    [":skills", "list skills"],
+    [":timeline [runId]", "show the latest or selected run timeline"],
+  ]],
+  ["Shell", [
+    [":clear-screen", "redraw the TUI"],
+    ["exit", "quit"],
+  ]],
+];
+
+const TUI_ADVANCED_HELP_SECTIONS: TuiHelpSection[] = [
+  ...TUI_COMMON_HELP_SECTIONS.filter(([section]) => section !== "Shell"),
   ["Runtime", [
     [":health", "runtime health"],
     [":doctor [deep|repair]", "aggregated runtime doctor"],
@@ -59,24 +84,15 @@ const TUI_HELP_SECTIONS: Array<[string, string[][]]> = [
     [":maintenance", "run maintenance"],
     [":commands", "list command registry entries"],
   ]],
-  ["Sessions", [
-    [":sessions [all|hidden|trash]", "list sessions"],
+  ["Sessions Advanced", [
     [":session <id>", "switch session"],
-    [":messages [limit]", "show current session messages"],
-    [":resume latest [hidden]", "resume latest session"],
-    [":export-session <id> [md]", "export session"],
     [":compact-preview <id> [n]", "preview session compaction"],
     [":session-usage <id>", "provider usage for a session"],
     [":restore-session <id>", "restore hidden or trashed session"],
     [":trash-session <id>", "move session to trash"],
   ]],
-  ["Work", [
-    [":timeline [runId]", "show run timeline"],
+  ["Work Advanced", [
     [":trace <taskId>", "show task trace"],
-    [":providers", "list providers"],
-    [":roles", "list roles"],
-    [":tools", "list tools"],
-    [":skills", "list skills"],
     [":experiences [query]", "list or search experiences"],
   ]],
   ["Skills And Cron", [
@@ -86,7 +102,10 @@ const TUI_HELP_SECTIONS: Array<[string, string[][]]> = [
     [":reject-skill <id> [reason]", "reject proposed skill"],
     [":cron", "list cron jobs"],
     [":cron-add <name> <cron> <msg>", "schedule a chat cron job"],
-    [":cron-pause|resume|run|delete <id>", "control cron jobs"],
+    [":cron-pause <id>", "pause a cron job"],
+    [":cron-resume <id>", "resume a cron job"],
+    [":cron-run <id>", "run a cron job now"],
+    [":cron-delete <id>", "delete a cron job"],
   ]],
   ["Shell", [
     [":clear-screen", "redraw the TUI"],
@@ -161,8 +180,8 @@ async function printBanner(runtime, state): Promise<void> {
   }));
 }
 
-function printHelp(): void {
-  output.write(formatTuiHelp());
+function printHelp(modeArg?: string): void {
+  output.write(formatTuiHelp(parseHelpMode(modeArg)));
 }
 
 function promptFor(_state: { sessionId: string; lastRunId: string; permissionMode: string }): string {
@@ -188,7 +207,7 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
   switch (command) {
     case "help":
     case "h":
-      printHelp();
+      printHelp(args[0]);
       return;
     case "health":
       printText(await runtime.runCommand("health", { format: "text" }));
@@ -748,9 +767,13 @@ function sessionListOptions(value?: string): {
   throw new Error(`invalid session list mode: ${value}`);
 }
 
-export function formatTuiHelp(): string {
-  const lines = ["Commands"];
-  for (const [section, rows] of TUI_HELP_SECTIONS) {
+export function formatTuiHelp(mode: TuiHelpMode = "common"): string {
+  const sections = mode === "all" ? TUI_ADVANCED_HELP_SECTIONS : TUI_COMMON_HELP_SECTIONS;
+  const lines = [
+    mode === "all" ? "Commands" : "Common Commands",
+    mode === "all" ? "Most commands require an existing session, run id, task id, or cron id." : "Use :help all to show advanced runtime, task, skill, and cron commands.",
+  ];
+  for (const [section, rows] of sections) {
     lines.push("", `  ${section}`);
     const width = Math.max(...rows.map(([command]) => command.length));
     for (const [command, description] of rows) {
@@ -764,7 +787,7 @@ export function formatTuiHelp(): string {
 export function formatTuiCommandHints(prefix = "/", query = ""): string {
   const normalizedPrefix = prefix === ":" ? ":" : "/";
   const normalizedQuery = query.replace(/^[:/]/, "").trim().toLowerCase();
-  const rows = tuiCommandRows(normalizedPrefix)
+  const rows = tuiCommandRows(normalizedPrefix, normalizedQuery ? "all" : "common")
     .filter(([command]) => {
       if (!normalizedQuery) return true;
       return commandToken(command).includes(normalizedQuery);
@@ -775,7 +798,7 @@ export function formatTuiCommandHints(prefix = "/", query = ""): string {
   const width = Math.max(...visibleRows.map(([command]) => command.length));
   const lines = [
     normalizedQuery ? `Command hints for ${normalizedPrefix}${normalizedQuery}` : "Command hints",
-    "Type :help for the full list.",
+    normalizedQuery ? "Type :help all for every command." : "Type :help all for advanced commands.",
     "",
   ];
   for (const [command, description] of visibleRows) {
@@ -910,10 +933,11 @@ function safeList(runtime, method: "listTools" | "listSkills"): unknown[] {
   }
 }
 
-function tuiCommandRows(prefix: string): string[][] {
+function tuiCommandRows(prefix: string, mode: TuiHelpMode = "common"): string[][] {
+  const sections = mode === "all" ? TUI_ADVANCED_HELP_SECTIONS : TUI_COMMON_HELP_SECTIONS;
   const rows: string[][] = [];
   const seen = new Set<string>();
-  for (const [, sectionRows] of TUI_HELP_SECTIONS) {
+  for (const [, sectionRows] of sections) {
     for (const [command, description] of sectionRows) {
       const normalized = normalizeTuiCommand(command, prefix);
       if (!normalized || seen.has(normalized)) continue;
@@ -922,6 +946,10 @@ function tuiCommandRows(prefix: string): string[][] {
     }
   }
   return rows;
+}
+
+function parseHelpMode(value?: string): TuiHelpMode {
+  return value === "all" || value === "--all" ? "all" : "common";
 }
 
 function normalizeTuiCommand(command: string, prefix: string): string | null {
