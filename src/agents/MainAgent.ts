@@ -25,6 +25,8 @@ import {
   type PlanSpec,
 } from "../planning/PlanSpec.ts";
 
+const PLANNER_TASK_TIMEOUT_MS = 120000;
+
 interface MainAgentResult {
   agent: string;
   runId?: string;
@@ -459,7 +461,7 @@ export class MainAgent {
         source,
         runId,
         createdBy: this.name,
-        timeoutMs: 30000,
+        timeoutMs: PLANNER_TASK_TIMEOUT_MS,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
         permissionMode: permissionMode || "workspace_write",
@@ -482,7 +484,9 @@ export class MainAgent {
     });
     const plannerTask = planningGraph.planner;
 
-    const finishedPlanner = await this.roleAgentManager.runTask(plannerTask);
+    const finishedPlanner = await this.roleAgentManager.runTask(plannerTask, {
+      timeoutMs: PLANNER_TASK_TIMEOUT_MS + 5000,
+    });
     results.push(this.formatTaskResult("planner", finishedPlanner));
     if (finishedPlanner.status !== "done") {
       this.taskStore.refreshTaskGraphStatuses();

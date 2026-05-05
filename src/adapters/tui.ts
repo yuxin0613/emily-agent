@@ -44,6 +44,23 @@ const EMILY_3D_LOGO = [
 ];
 
 const VALID_PERMISSION_MODES = new Set(["read_only", "workspace_write", "danger_full_access"]);
+const BUSY_SAFE_COMMANDS = new Set([
+  "help",
+  "h",
+  "health",
+  "status",
+  "providers",
+  "roles",
+  "tools",
+  "skills",
+  "dag",
+  "graph",
+  "mindmap",
+  "node",
+  "timeline",
+  "messages",
+  "commands",
+]);
 
 type TuiHelpMode = "common" | "all";
 type TuiHelpSection = [string, string[][]];
@@ -147,7 +164,7 @@ export async function startTui({ runtime }) {
         if (isCommand(message)) {
           await handleCommand(runtime, state, message, rl);
         } else {
-          await sendChat(runtime, state, message);
+          await sendChat(runtime, state, message, rl);
         }
       } catch (error) {
         printError(error);
@@ -392,11 +409,12 @@ async function handleCommand(runtime, state, message: string, rl?: readline.Inte
   }
 }
 
-async function sendChat(runtime, state, message: string): Promise<void> {
+async function sendChat(runtime, state, message: string, rl?: readline.Interface): Promise<void> {
   output.write(formatTuiSubmittedInput(message));
   const thinking = createThinkingIndicator();
   const detachModelThinking = attachModelThinkingReporter(runtime, state, thinking);
   const detachProgress = attachProgressReporter(runtime, state, () => thinking.stop());
+  const detachBusyCommands = rl ? attachBusyCommandReader(runtime, state, rl, thinking) : async () => undefined;
   const startedAt = Date.now();
   let response;
   try {
@@ -409,6 +427,7 @@ async function sendChat(runtime, state, message: string): Promise<void> {
     thinking.stop();
     detachModelThinking();
     detachProgress();
+    await detachBusyCommands();
   }
   if (response.runId) state.lastRunId = response.runId;
   printAssistantMessage(response.content);
@@ -421,6 +440,108 @@ async function sendChat(runtime, state, message: string): Promise<void> {
     printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
   }
   output.write("\n");
+}
+
+function attachBusyCommandReader(
+  runtime,
+  state,
+  rl: readline.Interface,
+  thinking: ReturnType<typeof createThinkingIndicator>,
+): () => Promise<void> {
+  let closed = false;
+  const pending = new Set<Promise<void>>();
+  const backgroundJobs = new Set<Promise<void>>();
+  const onLine = (line: string) => {
+    if (closed) return;
+    const message = line.trim();
+    if (!message) return;
+    const task = (isCommand(message)
+      ? runBusyCommand(runtime, state, message, thinking)
+      : runBusyChat(runtime, state, message, thinking))
+      .catch((error) => printError(error))
+      .finally(() => {
+        pending.delete(task);
+        backgroundJobs.delete(task);
+      });
+    if (isCommand(message)) pending.add(task);
+    else backgroundJobs.add(task);
+  };
+  rl.on("line", onLine);
+  return async () => {
+    closed = true;
+    rl.off("line", onLine);
+    await Promise.allSettled([...pending]);
+  };
+}
+
+async function runBusyCommand(
+  runtime,
+  state,
+  message: string,
+  thinking: ReturnType<typeof createThinkingIndicator>,
+): Promise<void> {
+  const command = busyCommandName(message);
+  const wasThinking = thinking.isActive();
+  thinking.stop();
+  try {
+    if (!isBusySafeCommand(message)) {
+      printPanel("Busy", `当前任务还在运行中。现在支持只读命令，例如 /dag list、/status、/timeline；普通文本会作为新的后台作业启动。`, "yellow");
+      return;
+    }
+    await handleCommand(runtime, state, message);
+  } finally {
+    if (wasThinking) thinking.start();
+  }
+}
+
+function busyCommandName(message: string): string {
+  return (splitArgs(message.replace(/^[:：/]/, ""))[0] || "").toLowerCase();
+}
+
+function busyCommandArgs(message: string): string[] {
+  return splitArgs(message.replace(/^[:：/]/, "")).slice(1);
+}
+
+function isBusySafeCommand(message: string): boolean {
+  const command = busyCommandName(message);
+  if (!BUSY_SAFE_COMMANDS.has(command)) return false;
+  if (command === "dag") {
+    const args = busyCommandArgs(message);
+    return !args[0] || args[0] === "list";
+  }
+  return true;
+}
+
+async function runBusyChat(
+  runtime,
+  state,
+  message: string,
+  thinking: ReturnType<typeof createThinkingIndicator>,
+): Promise<void> {
+  const wasThinking = thinking.isActive();
+  thinking.stop();
+  output.write(formatTuiSubmittedInput(message));
+  const startedAt = Date.now();
+  try {
+    const response = await runtime.handleUserMessage(message, {
+      sessionId: state.sessionId,
+      source: "tui",
+      permissionMode: state.permissionMode,
+    });
+    if (response.runId) state.lastRunId = response.runId;
+    printAssistantMessage(response.content);
+    const meta = [];
+    if (response.runId) meta.push(`run ${response.runId}`);
+    if (response.delegatedTo?.length) meta.push(`agents ${response.delegatedTo.join(", ")}`);
+    meta.push(`elapsed ${formatDuration(Date.now() - startedAt)}`);
+    printMeta(meta);
+    if (response.needsUserInput?.questions?.length) {
+      printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
+    }
+    output.write("\n");
+  } finally {
+    if (wasThinking) thinking.start();
+  }
 }
 
 async function printStatus(runtime, state): Promise<void> {
@@ -989,7 +1110,7 @@ function attachModelThinkingReporter(runtime, state, thinking: ReturnType<typeof
   };
 }
 
-function createThinkingIndicator(): { start: () => void; stop: () => void } {
+function createThinkingIndicator(): { start: () => void; stop: () => void; isActive: () => boolean } {
   let timer: NodeJS.Timeout | null = null;
   let frame = 0;
   let active = false;
@@ -1015,6 +1136,9 @@ function createThinkingIndicator(): { start: () => void; stop: () => void } {
       timer = null;
       if (output.isTTY && lineVisible) output.write("\r\x1b[2K");
       lineVisible = false;
+    },
+    isActive() {
+      return active;
     },
   };
 }

@@ -176,6 +176,8 @@ Useful TUI commands:
 | `/graph-update <key> <field> <value>` | Edit an unexecuted node field such as `title`, `input`, `role`, or `dependsOn`. |
 | `/mode [mode]` | Show or set permission mode. |
 
+While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/status`, and `/timeline` run immediately, and a normal chat/task message starts as a separate background job.
+
 ## Model Setup
 
 Run:
