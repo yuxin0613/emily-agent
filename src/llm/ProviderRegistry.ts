@@ -1,4 +1,5 @@
 import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { availableParallelism } from "node:os";
 import path from "node:path";
 import { EchoModelProvider } from "./EchoModelProvider.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealth } from "./ModelProvider.ts";
@@ -11,13 +12,27 @@ import type { RoleDefinition } from "../types.ts";
 interface ProviderFile {
   defaultProviderId: string;
   fallbackMode?: ProviderFallbackMode;
+  toolCallTimeoutSeconds: number;
+  agents: AgentRuntimeConfig;
   providers: ProviderConfig[];
+}
+
+export const DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 3600;
+
+export interface AgentRuntimeConfig {
+  mainAgents: number;
+  maxSubagentsPerRole: number;
+  maxConcurrentSubagents: number;
+  releaseSubagentsAfterTask: boolean;
+  subagentIdleTtlSeconds: number;
 }
 
 export class ProviderRegistry {
   providers: Map<string, ProviderConfig>;
   defaultProviderId: string;
   fallbackMode: ProviderFallbackMode;
+  toolCallTimeoutSeconds: number;
+  agents: AgentRuntimeConfig;
   usageStore?: ProviderUsageStore;
   private persistedSnapshot: ProviderFile;
 
@@ -38,7 +53,7 @@ export class ProviderRegistry {
   }): Promise<ProviderRegistry> {
     const persistedSnapshot = await readProviderConfig(dataDir, defaultProviderId);
     const loaded = providers
-      ? { defaultProviderId, fallbackMode, providers }
+      ? { defaultProviderId, fallbackMode, toolCallTimeoutSeconds: persistedSnapshot.toolCallTimeoutSeconds, agents: persistedSnapshot.agents, providers }
       : persistedSnapshot;
     const registry = new ProviderRegistry({
       providers: loaded.providers,
@@ -74,10 +89,14 @@ export class ProviderRegistry {
     }));
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
+    this.toolCallTimeoutSeconds = persistedSnapshot?.toolCallTimeoutSeconds || DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
+    this.agents = normalizeAgentRuntimeConfig(persistedSnapshot?.agents);
     this.usageStore = usageStore;
     this.persistedSnapshot = cloneProviderFile(persistedSnapshot || {
       defaultProviderId,
       fallbackMode,
+      toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
+      agents: this.agents,
       providers,
     });
   }
@@ -214,6 +233,8 @@ export class ProviderRegistry {
     return {
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
+      toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
+      agents: this.agents,
       providers: this.list(),
     };
   }
@@ -221,6 +242,8 @@ export class ProviderRegistry {
   private applyProviderFile(file: ProviderFile): void {
     this.defaultProviderId = file.defaultProviderId;
     this.fallbackMode = file.fallbackMode || "strict";
+    this.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds);
+    this.agents = normalizeAgentRuntimeConfig(file.agents);
     this.providers = new Map(file.providers.map((provider) => {
       validateProviderConfig(provider);
       return [provider.id, cloneProviderConfig(provider)];
@@ -381,6 +404,8 @@ async function readProviderFile(filePath: string): Promise<ProviderFile | null> 
     return {
       defaultProviderId: parsed.defaultProviderId || "echo",
       fallbackMode: parsed.fallbackMode === "fallback" ? "fallback" : "strict",
+      toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(parsed.toolCallTimeoutSeconds),
+      agents: normalizeAgentRuntimeConfig(parsed.agents),
       providers: parsed.providers,
     };
   } catch (error) {
@@ -425,6 +450,12 @@ function mergeProviderFiles({
   if ((desired.fallbackMode || "strict") !== (base.fallbackMode || "strict")) {
     disk.fallbackMode = desired.fallbackMode || "strict";
   }
+  if (desired.toolCallTimeoutSeconds !== base.toolCallTimeoutSeconds) {
+    disk.toolCallTimeoutSeconds = desired.toolCallTimeoutSeconds;
+  }
+  if (!sameAgentRuntimeConfig(desired.agents, base.agents)) {
+    disk.agents = desired.agents;
+  }
 
   for (const [id, provider] of desiredProviders) {
     const previous = baseProviders.get(id);
@@ -463,6 +494,8 @@ function mergeProviderFiles({
   const merged: ProviderFile = {
     defaultProviderId,
     fallbackMode: disk.fallbackMode === "fallback" ? "fallback" : "strict",
+    toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(disk.toolCallTimeoutSeconds ?? desired.toolCallTimeoutSeconds),
+    agents: normalizeAgentRuntimeConfig(disk.agents ?? desired.agents),
     providers: [...mergedProviders.values()].map(cloneProviderConfig),
   };
   for (const provider of merged.providers) validateProviderConfig(provider);
@@ -486,10 +519,16 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function sameAgentRuntimeConfig(left: AgentRuntimeConfig, right: AgentRuntimeConfig): boolean {
+  return stableJson(normalizeAgentRuntimeConfig(left)) === stableJson(normalizeAgentRuntimeConfig(right));
+}
+
 function cloneProviderFile(file: ProviderFile): ProviderFile {
   return {
     defaultProviderId: file.defaultProviderId || "echo",
     fallbackMode: file.fallbackMode === "fallback" ? "fallback" : "strict",
+    toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds),
+    agents: normalizeAgentRuntimeConfig(file.agents),
     providers: file.providers.map(cloneProviderConfig),
   };
 }
@@ -547,6 +586,8 @@ function defaultProviderFile(defaultProviderId: string): ProviderFile {
   return {
     defaultProviderId,
     fallbackMode: "strict",
+    toolCallTimeoutSeconds: DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
+    agents: defaultAgentRuntimeConfig(),
     providers: [{
       id: defaultProviderId,
       type: "echo",
@@ -554,6 +595,46 @@ function defaultProviderFile(defaultProviderId: string): ProviderFile {
       enabled: true,
     }],
   };
+}
+
+function defaultAgentRuntimeConfig(): AgentRuntimeConfig {
+  const available = Math.max(1, availableParallelism());
+  return {
+    mainAgents: 1,
+    maxSubagentsPerRole: 1,
+    maxConcurrentSubagents: Math.max(1, Math.min(4, available - 1 || 1)),
+    releaseSubagentsAfterTask: true,
+    subagentIdleTtlSeconds: 60,
+  };
+}
+
+function normalizeToolCallTimeoutSeconds(value: unknown): number {
+  if (value === undefined || value === null) return DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 24 * 60 * 60) {
+    throw new Error("Config toolCallTimeoutSeconds must be an integer between 1 and 86400.");
+  }
+  return value;
+}
+
+export function normalizeAgentRuntimeConfig(value: unknown): AgentRuntimeConfig {
+  const defaults = defaultAgentRuntimeConfig();
+  const input = value && typeof value === "object" ? value as Partial<AgentRuntimeConfig> : {};
+  const config = {
+    mainAgents: numberConfig(input.mainAgents, defaults.mainAgents, "agents.mainAgents", 1, 1),
+    maxSubagentsPerRole: numberConfig(input.maxSubagentsPerRole, defaults.maxSubagentsPerRole, "agents.maxSubagentsPerRole", 1, 1),
+    maxConcurrentSubagents: numberConfig(input.maxConcurrentSubagents, defaults.maxConcurrentSubagents, "agents.maxConcurrentSubagents", 1, 64),
+    releaseSubagentsAfterTask: typeof input.releaseSubagentsAfterTask === "boolean" ? input.releaseSubagentsAfterTask : defaults.releaseSubagentsAfterTask,
+    subagentIdleTtlSeconds: numberConfig(input.subagentIdleTtlSeconds, defaults.subagentIdleTtlSeconds, "agents.subagentIdleTtlSeconds", 0, 24 * 60 * 60),
+  };
+  return config;
+}
+
+function numberConfig(value: unknown, fallback: number, name: string, min: number, max: number): number {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`Config ${name} must be an integer between ${min} and ${max}.`);
+  }
+  return value;
 }
 
 export function validateProviderConfig(config: ProviderConfig): void {

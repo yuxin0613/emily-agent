@@ -168,8 +168,8 @@ const DEFAULT_TOOL_DEFINITIONS: ToolDefinition[] = [
     sideEffects: "read",
     requiresApproval: false,
     aliases: ["task_trace", "task_status"],
-    description: "Inspect task state, result, errors, and trace.",
-    instructions: "Use for recovery, review, or dependency diagnosis.",
+    description: "Inspect task state, graph node details, result, errors, and trace.",
+    instructions: "Use taskId for a trace, or runId + selector to inspect a mind-map node by graph key.",
   },
   {
     name: "git_reset",

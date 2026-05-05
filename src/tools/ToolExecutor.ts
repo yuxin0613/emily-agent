@@ -10,12 +10,14 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { Metadata, PermissionMode, RoleDefinition, Task, ToolPermission } from "../types.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
+import { getTaskMindMapNode } from "../tasks/TaskMindMap.ts";
 import { parsePermissionMode } from "./PermissionMode.ts";
 import { ToolGateway } from "./ToolGateway.ts";
 import { createDefaultToolRegistry, type ToolRegistry } from "./ToolRegistry.ts";
 import type { ToolDefinition } from "../types.ts";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 3600 * 1000;
 
 export interface ToolExecutionRequest {
   tool: string;
@@ -81,23 +83,38 @@ export interface ToolExecutionResult {
   error?: string;
 }
 
+export interface ToolExecutionEvent {
+  eventId: number;
+  type: string;
+  request: ToolExecutionRequest;
+  payload: Record<string, unknown>;
+}
+
 export class ToolExecutor {
   workspaceDir: string;
   taskStore: TaskStore | null;
   registry: ToolRegistry;
+  toolCallTimeoutMs: number;
+  onEvent: ((event: ToolExecutionEvent) => void) | null;
 
   constructor({
     workspaceDir = process.cwd(),
     taskStore = null,
     registry = createDefaultToolRegistry(),
+    toolCallTimeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS,
+    onEvent = null,
   }: {
     workspaceDir?: string;
     taskStore?: TaskStore | null;
     registry?: ToolRegistry;
+    toolCallTimeoutMs?: number;
+    onEvent?: ((event: ToolExecutionEvent) => void) | null;
   } = {}) {
     this.workspaceDir = path.resolve(workspaceDir);
     this.taskStore = taskStore;
     this.registry = registry;
+    this.toolCallTimeoutMs = normalizeToolCallTimeoutMs(toolCallTimeoutMs);
+    this.onEvent = onEvent;
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -116,12 +133,17 @@ export class ToolExecutor {
       startedEventId = this.addEvent("tool.execution.started", request, {
         tool: definition.name,
         permissionMode,
+        timeoutMs: this.toolCallTimeoutMs,
         requiresApproval: definition.requiresApproval,
         approvalTemplate: approvalRequirement.template || "",
         args: summarizeArgs(request.args || {}),
       });
       this.assertApproved(approvalRequirement, request);
-      const output = await this.executeAllowed(definition.name, request.args || {}, request);
+      const output = await withToolCallTimeout(
+        () => this.executeAllowed(definition.name, request.args || {}, request),
+        this.toolCallTimeoutMs,
+        definition.name,
+      );
       const result: ToolExecutionResult = {
         tool: definition.name,
         ok: true,
@@ -135,6 +157,7 @@ export class ToolExecutor {
         tool: definition.name,
         ok: true,
         durationMs: result.durationMs,
+        timeoutMs: this.toolCallTimeoutMs,
         startedEventId,
         output: summarizeOutput(output),
       });
@@ -163,6 +186,8 @@ export class ToolExecutor {
         tool: failedDefinition?.name || String(request.tool),
         ok: false,
         durationMs: result.durationMs,
+        timeoutMs: this.toolCallTimeoutMs,
+        timedOut: error instanceof ToolCallTimeoutError,
         startedEventId,
         error: result.error,
       });
@@ -592,12 +617,37 @@ export class ToolExecutor {
 
   private inspectTask(args: Record<string, unknown>): unknown {
     if (!this.taskStore) throw new Error("inspect_task requires a TaskStore.");
+    if (typeof args.runId === "string" && typeof args.selector === "string") {
+      return getTaskMindMapNode(this.taskStore, args.runId, args.selector);
+    }
     const taskId = requiredString(args.taskId, "taskId");
     return this.taskStore.getTaskTrace(taskId);
   }
 
   private createTask(args: Record<string, unknown>, request: ToolExecutionRequest): unknown {
     if (!this.taskStore) throw new Error("create_task requires a TaskStore.");
+    const graphKey = typeof args.graphKey === "string" && args.graphKey.trim() ? args.graphKey.trim() : "";
+    const parentGraphKey = typeof args.parentKey === "string" && args.parentKey.trim()
+      ? args.parentKey.trim()
+      : typeof request.task?.metadata.graphKey === "string" ? request.task.metadata.graphKey : "";
+    const inheritedGraph = graphKey ? {
+      graphKey,
+      graphId: typeof request.task?.metadata.graphId === "string" ? request.task.metadata.graphId : "",
+      parentKey: parentGraphKey,
+      graphRole: requiredString(args.role, "role"),
+      acceptanceCriteria: stringArray(args.acceptanceCriteria, "acceptanceCriteria").length
+        ? stringArray(args.acceptanceCriteria, "acceptanceCriteria")
+        : ["Task produces a useful result for the graph."],
+      toolHints: stringArray(args.toolHints, "toolHints"),
+      skillHints: stringArray(args.skillHints, "skillHints"),
+      timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : 30000,
+      maxResultChars: typeof args.maxResultChars === "number" ? args.maxResultChars : 12000,
+      maxMemoryCandidates: typeof args.maxMemoryCandidates === "number" ? args.maxMemoryCandidates : 1,
+      wave: typeof request.task?.metadata.wave === "number" ? request.task.metadata.wave + 1 : 1,
+      expandable: args.expandable === true,
+      expansionGoal: typeof args.expansionGoal === "string" ? args.expansionGoal : "",
+      maxExpansionDepth: typeof args.maxExpansionDepth === "number" ? args.maxExpansionDepth : 0,
+    } : {};
     const task = this.taskStore.createTask({
       role: requiredString(args.role, "role"),
       title: requiredString(args.title, "title"),
@@ -609,8 +659,23 @@ export class ToolExecutor {
         sessionId: request.sessionId || request.task?.metadata.sessionId || "",
         runId: request.runId || request.task?.metadata.runId || "",
         createdByTool: request.tool,
+        ...inheritedGraph,
       },
     });
+    if (graphKey && request.task) {
+      this.taskStore.addTaskDependency(task.id, request.task.id, args.dependencyType === "finished" ? "finished" : "success");
+      this.taskStore.addEvent({
+        type: "task_graph.node_added",
+        taskId: task.id,
+        payload: {
+          runId: request.runId || request.task.metadata.runId || "",
+          graphId: request.task.metadata.graphId || "",
+          key: graphKey,
+          parentKey: parentGraphKey,
+          createdByTool: true,
+        },
+      });
+    }
     return task;
   }
 
@@ -664,7 +729,7 @@ export class ToolExecutor {
   }
 
   private addEvent(type: string, request: ToolExecutionRequest, payload: Record<string, unknown>): number | null {
-    return this.taskStore?.addEvent({
+    const eventId = this.taskStore?.addEvent({
       type,
       taskId: request.task?.id || null,
       payload: {
@@ -673,6 +738,8 @@ export class ToolExecutor {
         sessionId: request.sessionId || request.task?.metadata.sessionId || "",
       },
     }) ?? null;
+    if (eventId) this.onEvent?.({ eventId, type, request, payload });
+    return eventId;
   }
 }
 
@@ -682,6 +749,34 @@ function parseSafeTestCommand(input: unknown): string[] {
   if (command[0] === "npm" && command[1] === "run" && (command[2] === "check" || command[2] === "test") && command.length === 3) return command;
   if (command[0] === "node" && /^test\/[A-Za-z0-9._/-]+\.test\.ts$/.test(command[1] || "") && command.length === 2) return command;
   throw new Error(`run_tests only allows npm test, npm run check/test, or node test/*.test.ts. Received: ${command.join(" ")}`);
+}
+
+class ToolCallTimeoutError extends Error {
+  constructor(tool: string, timeoutMs: number) {
+    super(`Tool ${tool} timed out after ${timeoutMs}ms.`);
+    this.name = "ToolCallTimeoutError";
+  }
+}
+
+async function withToolCallTimeout<T>(operation: () => Promise<T>, timeoutMs: number, tool: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new ToolCallTimeoutError(tool, timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function normalizeToolCallTimeoutMs(value: number): number {
+  if (!Number.isFinite(value) || value < 1 || value > 24 * 60 * 60 * 1000) {
+    throw new Error("toolCallTimeoutMs must be between 1 and 86400000.");
+  }
+  return Math.round(value);
 }
 
 function parseHttpUrl(input: string): URL {

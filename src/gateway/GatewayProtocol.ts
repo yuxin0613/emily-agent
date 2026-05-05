@@ -57,6 +57,14 @@ export type GatewayMethod =
   | "experiences.build_daily"
   | "experiences.feedback"
   | "timeline.get"
+  | "dag.list"
+  | "graph.view"
+  | "graph.node"
+  | "graph.add"
+  | "graph.add_before"
+  | "graph.add_after"
+  | "graph.update"
+  | "graph.delete"
   | "diagnostics.run"
   | "diagnostics.repair"
   | "doctor.run"
@@ -109,6 +117,14 @@ export const GATEWAY_METHODS: GatewayMethod[] = [
   "experiences.build_daily",
   "experiences.feedback",
   "timeline.get",
+  "dag.list",
+  "graph.view",
+  "graph.node",
+  "graph.add",
+  "graph.add_before",
+  "graph.add_after",
+  "graph.update",
+  "graph.delete",
   "diagnostics.run",
   "diagnostics.repair",
   "doctor.run",
@@ -243,6 +259,9 @@ const READ_GATEWAY_METHODS = new Set<GatewayMethod>([
   "skills.candidates.list",
   "experiences.recall",
   "timeline.get",
+  "dag.list",
+  "graph.view",
+  "graph.node",
   "diagnostics.run",
   "doctor.run",
   "security.audit",
@@ -423,6 +442,37 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         input: { runId: String(params.runId || "") },
         format: params.format === "text" ? "text" : "json",
       });
+    case "dag.list":
+      return runtime.runCommand("dag.list", {
+        input: {
+          activeOnly: params.activeOnly === true,
+          limit: params.limit,
+        },
+        format: params.format === "text" ? "text" : "json",
+      });
+    case "graph.view":
+      return runtime.runCommand("graph.view", {
+        input: { runId: String(params.runId || "") },
+        format: params.format === "text" ? "text" : "json",
+      });
+    case "graph.node":
+      return runtime.runCommand("graph.node", {
+        input: {
+          runId: String(params.runId || ""),
+          selector: String(params.selector || params.key || params.taskId || ""),
+        },
+        format: params.format === "text" ? "text" : "json",
+      });
+    case "graph.add":
+      return runtime.runCommand("graph.add", { input: params });
+    case "graph.add_before":
+      return runtime.runCommand("graph.add_before", { input: params });
+    case "graph.add_after":
+      return runtime.runCommand("graph.add_after", { input: params });
+    case "graph.update":
+      return runtime.runCommand("graph.update", { input: params });
+    case "graph.delete":
+      return runtime.runCommand("graph.delete", { input: params });
     case "diagnostics.run":
       return params.repair === true ? runtime.runCommand("diagnostics.repair") : runtime.runCommand("diagnostics.run");
     case "diagnostics.repair":

@@ -37,7 +37,7 @@ export class EchoModelProvider implements ModelProvider {
             role: "reviewer",
             title: "verification slice",
             input: "Verify the implementation slice against the delivery exit criteria and return pass/fail/needs_user_input.",
-            parentKey,
+            parentKey: "implementation",
             dependsOn: ["implementation"],
             dependencyType: "finished",
             acceptanceCriteria: [
@@ -146,6 +146,13 @@ export class EchoModelProvider implements ModelProvider {
       }));
     }
 
+    if (/Conversation mode:\s*direct_chat/i.test(prompt)) {
+      return this.result([
+        `收到：${extractUserInput(prompt) || "我在。"}`,
+        "这是普通对话消息，我不会把它拆成任务。需要我执行具体工作时，直接说“帮我……”或描述目标就行。",
+      ].join("\n"));
+    }
+
     return this.result([
       "收到。当前运行的是本地 EchoModelProvider，所以我会展示编排结果而不是调用真实 LLM。",
       `Provider: ${this.id}`,
@@ -167,6 +174,11 @@ export class EchoModelProvider implements ModelProvider {
       model: this.model,
     };
   }
+}
+
+function extractUserInput(prompt: string): string {
+  const match = prompt.match(/^User input:\s*(.+)$/m);
+  return match?.[1]?.trim() || "";
 }
 
 function compactPrompt(prompt: string): string {

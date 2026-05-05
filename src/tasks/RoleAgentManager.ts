@@ -15,6 +15,22 @@ interface RoleState {
   activeTaskId: string | null;
   activeLeaseToken: string | null;
   agentId: string;
+  idleReleaseTimer: NodeJS.Timeout | null;
+  releasingIdle: boolean;
+}
+
+export interface SubagentSnapshot {
+  agentId: string;
+  configuredRole: string;
+  status: "idle" | "running" | "missing_task";
+  currentTaskId: string;
+  taskId: string;
+  taskTitle: string;
+  taskRole: string;
+  taskStatus: string;
+  runId: string;
+  sessionId: string;
+  graphKey: string;
 }
 
 interface RuntimeEvent {
@@ -33,6 +49,10 @@ export class RoleAgentManager extends EventEmitter {
   skillDirs: string[];
   staleTaskMs: number;
   leaseMs: number;
+  maxSubagentsPerRole: number;
+  maxConcurrentSubagents: number;
+  releaseSubagentsAfterTask: boolean;
+  subagentIdleTtlMs: number;
   recoveryPolicy: RecoveryPolicy;
   hooks: LifecycleHooks | null;
   roles: Map<string, RoleState>;
@@ -50,6 +70,10 @@ export class RoleAgentManager extends EventEmitter {
     skillDirs,
     staleTaskMs = 30000,
     leaseMs = 30000,
+    maxSubagentsPerRole = 1,
+    maxConcurrentSubagents = 4,
+    releaseSubagentsAfterTask = true,
+    subagentIdleTtlMs = 60000,
     hooks = null,
   }: {
     dataDir: string;
@@ -60,9 +84,19 @@ export class RoleAgentManager extends EventEmitter {
     skillDirs?: string[];
     staleTaskMs?: number;
     leaseMs?: number;
+    maxSubagentsPerRole?: number;
+    maxConcurrentSubagents?: number;
+    releaseSubagentsAfterTask?: boolean;
+    subagentIdleTtlMs?: number;
     hooks?: LifecycleHooks | null;
   }) {
     super();
+    if (maxSubagentsPerRole !== 1) {
+      throw new Error("RoleAgentManager currently supports exactly one subagent per role.");
+    }
+    if (!Number.isInteger(maxConcurrentSubagents) || maxConcurrentSubagents < 1) {
+      throw new Error("maxConcurrentSubagents must be a positive integer.");
+    }
     this.dataDir = dataDir;
     this.taskStore = taskStore;
     this.workerPath = workerPath;
@@ -71,6 +105,10 @@ export class RoleAgentManager extends EventEmitter {
     this.skillDirs = skillDirs || defaultSkillDirs(skillDir);
     this.staleTaskMs = staleTaskMs;
     this.leaseMs = leaseMs;
+    this.maxSubagentsPerRole = maxSubagentsPerRole;
+    this.maxConcurrentSubagents = maxConcurrentSubagents;
+    this.releaseSubagentsAfterTask = releaseSubagentsAfterTask;
+    this.subagentIdleTtlMs = Math.max(0, Math.floor(subagentIdleTtlMs));
     this.recoveryPolicy = new RecoveryPolicy();
     this.hooks = hooks;
     this.roles = new Map();
@@ -252,18 +290,49 @@ export class RoleAgentManager extends EventEmitter {
         activeTaskId: null,
         activeLeaseToken: null,
         agentId: `${role}-${process.pid}`,
+        idleReleaseTimer: null,
+        releasingIdle: false,
       });
     }
     return this.roles.get(role)!;
   }
 
+  listSubagents({ includeIdle = false }: { includeIdle?: boolean } = {}): SubagentSnapshot[] {
+    const roles = new Set([...DEFAULT_ROLES, ...this.roles.keys(), ...this.taskStore.getQueuedRoles()]);
+    const snapshots: SubagentSnapshot[] = [];
+    for (const role of roles) {
+      const roleState = this.getRoleState(role);
+      const task = roleState.activeTaskId ? this.taskStore.getTask(roleState.activeTaskId) : null;
+      if (!task && !includeIdle) continue;
+      snapshots.push({
+        agentId: roleState.agentId,
+        configuredRole: roleState.role,
+        status: task ? "running" : roleState.activeTaskId ? "missing_task" : "idle",
+        currentTaskId: roleState.activeTaskId || "",
+        taskId: task?.id || roleState.activeTaskId || "",
+        taskTitle: task?.title || "",
+        taskRole: task?.role || "",
+        taskStatus: task?.status || "",
+        runId: typeof task?.metadata.runId === "string" ? task.metadata.runId : "",
+        sessionId: typeof task?.metadata.sessionId === "string" ? task.metadata.sessionId : "",
+        graphKey: typeof task?.metadata.graphKey === "string" ? task.metadata.graphKey : "",
+      });
+    }
+    return snapshots.sort((left, right) => {
+      if (left.status !== right.status) return left.status === "running" ? -1 : 1;
+      return left.configuredRole.localeCompare(right.configuredRole);
+    });
+  }
+
   drainRole(role: string): void {
     const roleState = this.getRoleState(role);
     if (roleState.activeTaskId) return;
+    if (this.runningSubagentCount() >= this.maxConcurrentSubagents) return;
 
     const task = this.taskStore.claimNextQueuedTask(role, roleState.agentId, this.leaseMs);
     if (!task) return;
 
+    this.clearIdleRelease(roleState);
     const child = this.ensureWorker(roleState);
     roleState.activeTaskId = task.id;
     roleState.activeLeaseToken = task.leaseToken;
@@ -310,6 +379,7 @@ export class RoleAgentManager extends EventEmitter {
   }
 
   ensureWorker(roleState: RoleState): ChildProcess {
+    this.clearIdleRelease(roleState);
     if (roleState.child && !roleState.child.killed && roleState.child.connected) {
       return roleState.child;
     }
@@ -369,6 +439,7 @@ export class RoleAgentManager extends EventEmitter {
           role: roleState.role,
           status: "idle",
         });
+        this.scheduleIdleRelease(roleState);
       }
       await this.taskStore.writeTaskMarkdown(payload.taskId);
       this.emitTaskEvent("task.finished", payload.taskId, payload.eventId ?? null);
@@ -399,11 +470,23 @@ export class RoleAgentManager extends EventEmitter {
   async handleWorkerExit(roleState: RoleState, { code, signal }: { code: number | null; signal: NodeJS.Signals | null }): Promise<void> {
     if (this.shuttingDown) return;
 
+    this.clearIdleRelease(roleState);
     const activeTaskId = roleState.activeTaskId;
     const activeLeaseToken = roleState.activeLeaseToken;
     roleState.child = null;
     roleState.activeTaskId = null;
     roleState.activeLeaseToken = null;
+
+    if (roleState.releasingIdle) {
+      roleState.releasingIdle = false;
+      this.taskStore.upsertAgent({
+        id: roleState.agentId,
+        role: roleState.role,
+        status: "idle",
+      });
+      this.drainAllRoles();
+      return;
+    }
 
     this.taskStore.upsertAgent({
       id: roleState.agentId,
@@ -480,6 +563,32 @@ export class RoleAgentManager extends EventEmitter {
     });
   }
 
+  runningSubagentCount(): number {
+    return [...this.roles.values()].filter((roleState) => Boolean(roleState.activeTaskId)).length;
+  }
+
+  scheduleIdleRelease(roleState: RoleState): void {
+    this.clearIdleRelease(roleState);
+    if (!this.releaseSubagentsAfterTask || !roleState.child || roleState.activeTaskId) return;
+    roleState.idleReleaseTimer = setTimeout(() => {
+      roleState.idleReleaseTimer = null;
+      this.releaseIdleWorker(roleState);
+    }, this.subagentIdleTtlMs);
+  }
+
+  clearIdleRelease(roleState: RoleState): void {
+    if (!roleState.idleReleaseTimer) return;
+    clearTimeout(roleState.idleReleaseTimer);
+    roleState.idleReleaseTimer = null;
+  }
+
+  releaseIdleWorker(roleState: RoleState): void {
+    if (!roleState.child || roleState.child.killed || roleState.activeTaskId) return;
+    roleState.releasingIdle = true;
+    if (roleState.child.connected) roleState.child.disconnect();
+    roleState.child.kill();
+  }
+
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.started = false;
@@ -487,6 +596,7 @@ export class RoleAgentManager extends EventEmitter {
     const exits: Array<Promise<unknown>> = [];
 
     for (const roleState of this.roles.values()) {
+      this.clearIdleRelease(roleState);
       if (roleState.child && !roleState.child.killed) {
         roleState.child.removeAllListeners("message");
         roleState.child.removeAllListeners("exit");

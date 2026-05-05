@@ -6,7 +6,7 @@ import { EchoModelProvider } from "../src/llm/EchoModelProvider.ts";
 import { ProviderCallError, type ModelCompleteInput, type ModelCompleteResult, type ModelProvider } from "../src/llm/ModelProvider.ts";
 import { normalizeProviderJsonOutput } from "../src/llm/ProviderJson.ts";
 import { normalizeModelCompleteResult, resetProviderCircuit, ResilientModelProvider } from "../src/llm/ProviderRuntime.ts";
-import { legacyProviderConfigPath, ProviderRegistry, providerConfigPath } from "../src/llm/ProviderRegistry.ts";
+import { DEFAULT_TOOL_CALL_TIMEOUT_SECONDS, legacyProviderConfigPath, ProviderRegistry, providerConfigPath } from "../src/llm/ProviderRegistry.ts";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
@@ -88,8 +88,9 @@ const runtime = await createRuntime({
 });
 
 assert.deepEqual(runtime.listProviders().map((provider) => provider.id).sort(), ["main-echo", "qa-echo"]);
-const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string };
+const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number };
 assert.equal(providerFile.defaultProviderId, "main-echo");
+assert.equal(providerFile.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
 await assert.rejects(() => access(legacyProviderConfigPath(dataDir)), /ENOENT/);
 
 const legacyConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-legacy-provider-config-"));
@@ -104,8 +105,32 @@ await writeFile(legacyProviderConfigPath(legacyConfigDir), JSON.stringify({
 const migratedRegistry = await ProviderRegistry.create({ dataDir: legacyConfigDir });
 assert.equal(migratedRegistry.defaultProviderId, "legacy-main");
 assert.equal(migratedRegistry.getConfig("legacy-main").model, "legacy-model");
-assert.equal(JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")).defaultProviderId, "legacy-main");
+const migratedConfig = JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number };
+assert.equal(migratedConfig.defaultProviderId, "legacy-main");
+assert.equal(migratedConfig.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
 await assert.rejects(() => access(legacyProviderConfigPath(legacyConfigDir)), /ENOENT/);
+
+const timeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-timeout-config-"));
+await mkdir(timeoutConfigDir, { recursive: true });
+await writeFile(providerConfigPath(timeoutConfigDir), JSON.stringify({
+  defaultProviderId: "echo",
+  toolCallTimeoutSeconds: 42,
+  providers: [{ id: "echo", type: "echo", model: "echo-local" }],
+}, null, 2), "utf8");
+const timeoutRegistry = await ProviderRegistry.create({ dataDir: timeoutConfigDir });
+assert.equal(timeoutRegistry.toolCallTimeoutSeconds, 42);
+const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number };
+assert.equal(timeoutConfig.toolCallTimeoutSeconds, 42);
+
+const envConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-env-provider-config-"));
+const previousEnvFileKey = process.env.EMILY_TEST_ENV_FILE_KEY;
+delete process.env.EMILY_TEST_ENV_FILE_KEY;
+await writeFile(path.join(envConfigDir, ".env"), 'EMILY_TEST_ENV_FILE_KEY="loaded-from-env-file"\n', "utf8");
+const envRuntime = await createRuntime({ dataDir: envConfigDir, roleDir });
+assert.equal(process.env.EMILY_TEST_ENV_FILE_KEY, "loaded-from-env-file");
+await envRuntime.shutdown();
+if (previousEnvFileKey === undefined) delete process.env.EMILY_TEST_ENV_FILE_KEY;
+else process.env.EMILY_TEST_ENV_FILE_KEY = previousEnvFileKey;
 
 const concurrentConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-concurrent-"));
 const concurrentA = await ProviderRegistry.create({ dataDir: concurrentConfigDir });

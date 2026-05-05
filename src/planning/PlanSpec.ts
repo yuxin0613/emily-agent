@@ -95,9 +95,9 @@ export function createFallbackPlanSpec(input: string, selectedAgents: string[]):
     key: "scope",
     role: "researcher",
     title: `scope: ${goal.slice(0, 60)}`,
-    input: `${taskInputPrefix}Clarify scope, modules, assumptions, and open risks for this outcome-oriented request.`,
+    input: `${taskInputPrefix}Create the root mind-map node for this request: clarify scope, coarse modules, assumptions, and open risks before execution details are expanded.`,
     acceptanceCriteria: [
-      "Scope is stated in terms of concrete modules or workstreams.",
+      "Scope is stated as coarse modules or workstreams.",
       "Assumptions and unknowns are explicit.",
     ],
     wave: 1,
@@ -107,16 +107,17 @@ export function createFallbackPlanSpec(input: string, selectedAgents: string[]):
     key: "architecture",
     role: "planner",
     title: `architecture: ${goal.slice(0, 60)}`,
-    input: `${taskInputPrefix}Turn the scoped goal into an execution architecture: phases, module boundaries, dependencies, and validation plan. For rolling mode, return enough detail for the graph to expand into implementation slices.`,
+    input: `${taskInputPrefix}Expand the scoped root into a second-level decomposition map: modules, boundaries, dependencies, validation branches, and the next layer that should become executable leaves.`,
+    parentKey: "scope",
     dependsOn: ["scope"],
     acceptanceCriteria: [
-      "Modules and dependencies are clear.",
-      "The plan maps work to validation criteria.",
+      "The next decomposition layer is clear.",
+      "Execution dependencies are separated from decomposition hierarchy.",
     ],
     wave: 1,
     skillHints: ["planning", "architecture"],
     expandable: longGoal,
-    expansionGoal: "Expand architecture into concrete implementation and verification tasks.",
+    expansionGoal: "Expand architecture from coarse modules into concrete feature slices and verification leaves.",
     maxExpansionDepth: longGoal ? 3 : 0,
   });
 
@@ -130,7 +131,8 @@ export function createFallbackPlanSpec(input: string, selectedAgents: string[]):
       key: "implementation",
       role: targetRole,
       title: `implementation: ${goal.slice(0, 60)}`,
-      input: `${taskInputPrefix}Execute the first implementation slice that moves the system toward the exit criteria. Return artifacts, risks, and remaining tasks.`,
+      input: `${taskInputPrefix}Execute the first leaf implementation slice from the decomposition map. Return artifacts, risks, and remaining child slices.`,
+      parentKey: "architecture",
       dependsOn: ["architecture"],
       acceptanceCriteria: [
         "A concrete implementation or executable next action is produced.",
@@ -144,7 +146,8 @@ export function createFallbackPlanSpec(input: string, selectedAgents: string[]):
       key: "verification",
       role: "reviewer",
       title: `verification: ${goal.slice(0, 60)}`,
-      input: `${taskInputPrefix}Verify the implementation result against the delivery level and exit criteria. Return pass/fail/needs_user_input.`,
+      input: `${taskInputPrefix}Verify the implementation leaf against the delivery level and exit criteria. Return pass/fail/needs_user_input.`,
+      parentKey: "implementation",
       dependsOn: ["implementation"],
       dependencyType: "finished",
       acceptanceCriteria: exitCriteria,
@@ -204,7 +207,7 @@ export function createFallbackGraphPatch({
         parentKey,
         role: "developer",
         title: `implementation: ${plan.goal.slice(0, 60)}`,
-        input: `${taskInputPrefix}Implement or specify the first concrete slice needed to satisfy the current exit criteria. Keep scope narrow and return remaining work as next actions.`,
+        input: `${taskInputPrefix}Implement or specify the first concrete leaf slice under ${parentKey}. Keep scope narrow and return remaining sibling/child slices as next actions.`,
         dependsOn: [parentKey],
         acceptanceCriteria: [
           "A concrete implementation slice or precise executable design is produced.",
@@ -216,10 +219,10 @@ export function createFallbackGraphPatch({
       }),
       planTask({
         key: verificationKey,
-        parentKey,
+        parentKey: implementationKey,
         role: "reviewer",
         title: `verification: ${plan.goal.slice(0, 60)}`,
-        input: `${taskInputPrefix}Verify the implementation slice against the exit criteria and return pass/fail/needs_user_input.`,
+        input: `${taskInputPrefix}Verify the implementation leaf slice against the exit criteria and return pass/fail/needs_user_input.`,
         dependsOn: [implementationKey],
         dependencyType: "finished",
         acceptanceCriteria: plan.exitCriteria,
@@ -265,6 +268,7 @@ export function validatePlanSpec(spec: PlanSpec): PlanValidationResult {
     }
   }
   errors.push(...detectCycles(spec.tasks));
+  errors.push(...validateParentHierarchy(spec.tasks));
 
   return { ok: errors.length === 0, errors };
 }
@@ -317,6 +321,7 @@ export function validateGraphPatchSpec(
     }
   }
   errors.push(...detectCycles(patch.tasks));
+  errors.push(...validateParentHierarchy(patch.tasks, new Set([...existingKeys, parentKey])));
 
   return { ok: errors.length === 0, errors };
 }
@@ -643,6 +648,36 @@ function detectCycles(tasks: PlanTaskSpec[]): string[] {
     for (const dependency of byKey.get(key)?.dependsOn || []) {
       if (byKey.has(dependency)) visit(dependency, [...path, key]);
     }
+    visiting.delete(key);
+    visited.add(key);
+  };
+  for (const task of tasks) visit(task.key, []);
+  return errors;
+}
+
+function validateParentHierarchy(tasks: PlanTaskSpec[], allowedExternalParents = new Set<string>()): string[] {
+  const errors: string[] = [];
+  const byKey = new Map(tasks.map((task) => [task.key, task]));
+  for (const task of tasks) {
+    const parentKey = task.parentKey?.trim();
+    if (!parentKey) continue;
+    if (parentKey === task.key) errors.push(`task cannot be its own parent: ${task.key}`);
+    if (!byKey.has(parentKey) && !allowedExternalParents.has(parentKey)) {
+      errors.push(`unknown parentKey for ${task.key}: ${parentKey}`);
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (key: string, path: string[]) => {
+    if (visiting.has(key)) {
+      errors.push(`parent cycle detected: ${[...path, key].join(" -> ")}`);
+      return;
+    }
+    if (visited.has(key)) return;
+    visiting.add(key);
+    const parentKey = byKey.get(key)?.parentKey || "";
+    if (byKey.has(parentKey)) visit(parentKey, [...path, key]);
     visiting.delete(key);
     visited.add(key);
   };

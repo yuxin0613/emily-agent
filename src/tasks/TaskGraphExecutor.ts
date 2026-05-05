@@ -128,6 +128,7 @@ export class TaskGraphExecutor {
     };
 
     while (pending.size) {
+      this.syncExternalGraphNodes(tasksByKey, pending, recorded, graphId);
       for (const task of await this.blockUnreachable([...pending].map((key) => tasksByKey[key]).filter(Boolean))) {
         pending.delete(keyFor(tasksByKey, task.id));
         record(task);
@@ -253,6 +254,24 @@ export class TaskGraphExecutor {
       });
     } catch {
       return this.taskStore.getTask(task.id) || task;
+    }
+  }
+
+  private syncExternalGraphNodes(
+    tasksByKey: Record<string, Task>,
+    pending: Set<string>,
+    recorded: Set<string>,
+    graphId: string | null,
+  ): void {
+    if (!graphId) return;
+    for (const task of this.taskStore.getTasksForGraph(graphId)) {
+      if (task.metadata.internalGraph === true) continue;
+      const key = typeof task.metadata.graphKey === "string" ? task.metadata.graphKey : "";
+      if (!key) continue;
+      tasksByKey[key] = task;
+      if (!recorded.has(task.id) && !TERMINAL_STATUSES.has(task.status)) {
+        pending.add(key);
+      }
     }
   }
 
@@ -651,8 +670,14 @@ export class TaskGraphExecutor {
   }): string {
     const parentKey = String(parentTask.metadata.graphKey || "");
     return [
-      "Create a GraphPatchSpec JSON object to adaptively expand the current rolling task graph.",
+      "Create a GraphPatchSpec JSON object to expand the current rolling DAG one level finer.",
       "Return only JSON. Do not wrap it in markdown.",
+      "",
+      "DAG model:",
+      "- Treat the graph like a mind map: expand the completed parent into clearer child nodes.",
+      "- parentKey records decomposition hierarchy; dependsOn records execution gates.",
+      "- Prefer coarse child modules first, then mark any non-leaf child expandable=true for later refinement.",
+      "- Only create executable leaf tasks when the parent is already specific enough.",
       "",
       "Required shape:",
       JSON.stringify({
@@ -688,11 +713,12 @@ export class TaskGraphExecutor {
       `- parentKey must be exactly ${parentKey}.`,
       `- Add at most ${Math.max(0, maxNewTasks)} tasks.`,
       "- Task keys must be unique and may contain only letters, numbers, dot, underscore, or dash.",
+      `- Each new task parentKey must be ${parentKey} or a task key created in this patch.`,
       "- dependsOn may reference existing graph keys or keys created in this patch.",
       "- If no more work is useful, return stop=true and tasks=[].",
       "- If user input is required, return needsUserInput=true with questions and tasks=[].",
-      "- Keep the patch focused on the next executable layer, not the entire project.",
-      "- Mark a new task expandable=true only when it should be decomposed again after completion.",
+      "- Keep the patch focused on the next decomposition layer, not the entire project.",
+      "- Mark a new task expandable=true when it is a non-leaf node that should be decomposed again after completion.",
       "- permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when appropriate.",
       "",
       "Current plan:",

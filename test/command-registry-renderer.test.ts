@@ -25,6 +25,9 @@ try {
   assert.match(toolsText, /Tools/);
   assert.match(toolsText, /read_file/);
 
+  const subagentsText = String(await runtime.runCommand("sub", { format: "text" }));
+  assert.match(subagentsText, /Subagents/);
+
   const created = await runtime.runCommand("session.create", {
     input: { title: "Renderer test", source: "test" },
   }) as { id: string };

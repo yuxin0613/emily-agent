@@ -22,8 +22,10 @@ Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime
 ## Highlights
 
 - **Main agent + role subagents**: main agent handles the user, planning, delegation, recovery, and final summaries; subagents run as independent worker processes.
-- **Adaptive task graph**: `PlanSpec` creates the initial DAG, `GraphPatchSpec` adds dynamic tasks as work completes, and the executor tracks dependencies, waves, retries, and exit criteria.
+- **Adaptive task graph**: `PlanSpec` creates a mind-map-like DAG from coarse goals to executable leaves, `GraphPatchSpec` expands nodes as work completes, and the executor tracks dependencies, waves, retries, and exit criteria.
 - **Long task support**: result-oriented requests can require a delivery level such as `poc`, `uat`, or `production` before execution starts.
+- **Hermes-inspired TUI flow**: the terminal UI uses a transcript/composer layout with compact prompt glyphs, live thinking feedback, and command hints.
+- **Interactive model setup**: `emily model` supports keyboard navigation, provider templates, default base URLs, API-key environment storage, model discovery, custom models, and role-specific overrides.
 - **SQLite as source of truth**: tasks, runs, sessions, events, memory candidates, provider usage, skill candidates, and experience revisions are persisted.
 - **Lease token safety**: worker heartbeat, finish, fail, and cancel paths require the current lease token, so stale workers cannot overwrite a retried task.
 - **Provider registry**: main agent and each role can choose separate providers/models; subagents fall back to the main provider when role-specific provider selection cannot be used.
@@ -31,6 +33,12 @@ Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime
 - **Tools and skills**: declarative tools with hard permission filtering; builtin skills for planning, coding, research, web search, GitHub, review, recovery, and memory curation; external skill folders can be mounted without code changes.
 - **Control plane**: TUI, WebUI, REST endpoints, SSE events, and typed WebSocket gateway share the same runtime commands.
 - **Security defaults**: token-protected Web/API, origin checks for unsafe methods, bounded HTTP bodies, tool approvals, SSRF denylist, provider secret validation, and runtime security audit.
+
+## Project Status
+
+Emily AgentOS is approaching a 1.0 baseline. The runtime is useful today, but agent behavior, provider templates, and TUI details can still change while hardening continues.
+
+The default install branch is `master`. Active development and preview testing happen on `dev`.
 
 ## Quick Start
 
@@ -42,16 +50,24 @@ Requirements:
 - optional: `gh` for GitHub tool actions
 - optional: external model API key, Ollama, or OpenAI-compatible gateway
 
-One-command install:
+One-command install from the default branch:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
-The repository is currently private while 1.0 hardening is in progress, so the install command requires GitHub access to `yuxin0613/emily-agent`. If you host AgentOS in another Git repository, override the clone URL:
+Install or update from the development branch:
+
+```bash
+EMILY_BRANCH=dev \
+  curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
+```
+
+If you host AgentOS in another Git repository, override the clone URL and branch:
 
 ```bash
 EMILY_REPO_URL=https://github.com/your-org/emily-agent.git \
+EMILY_BRANCH=main \
   curl -fsSL https://raw.githubusercontent.com/yuxin0613/emily-agent/master/scripts/install.sh | bash
 ```
 
@@ -61,6 +77,7 @@ Update an existing install:
 
 ```bash
 emily update
+emily update --branch dev
 ```
 
 Run after install:
@@ -108,6 +125,103 @@ node src/index.ts --doctor --deep
 node src/index.ts --security-audit
 ```
 
+## Terminal UI
+
+Start the local TUI:
+
+```bash
+emily
+```
+
+or, from a source checkout:
+
+```bash
+npm run tui
+```
+
+The TUI is designed around a compact transcript/composer loop:
+
+| Glyph | Meaning |
+| --- | --- |
+| `❯` | User input and the active prompt. |
+| `┊` | Assistant output, progress, and live thinking state. |
+| `·` | Run metadata such as run id, delegated agents, and elapsed time. |
+| `⚡` | Tool output in views that expose tool events. |
+
+Typical flow:
+
+1. Type a message after `❯`.
+2. Press Enter to send.
+3. If the runtime is waiting on a model call, the TUI shows an animated `┊ thinking...` line.
+4. Plain chat stays conversational; task-like requests can still invoke planner/subagent execution.
+5. Use `/help` for common commands, `/help all` for advanced commands, and `exit` or `quit` to leave.
+
+The home screen is a live runtime dashboard, not a static banner:
+
+| Area | What It Shows |
+| --- | --- |
+| `Available Tools:` | Tool groups currently registered in the active runtime. |
+| `Available Skills:` | Skill groups currently loaded from builtin and configured skill roots. |
+| `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. When idle it shows a waiting hint. |
+| Status bar | Current provider model and provider id, current TUI session id, pending/running task counts, and open graph count. Values change as provider configuration, sessions, and runtime state change. |
+
+Useful TUI commands:
+
+| Command | Purpose |
+| --- | --- |
+| `/help all` | Show advanced runtime, task, skill, and cron commands. |
+| `/new [title]` | Start a new visible session. |
+| `/clear` | Hide the current session and create a fresh one. |
+| `/status` | Show current session/runtime status. |
+| `/sub` | Show running subagents, their configured roles, task names, and task ids. |
+| `/providers` | List configured providers. |
+| `/tools` | List available tools. |
+| `/skills` | List available skills. |
+| `/timeline [runId]` | Inspect the latest or selected run timeline. |
+| `/dag list` | List recent DAG roots, including queued/running ones. |
+| `/dag <root_id>` | Open the interactive DAG editor for one root. |
+| `/graph [runId]` | Render the task DAG as a mind-map tree. |
+| `/node <key> [runId]` | Inspect one task node by graph key or task id. |
+| `/graph-add <parent> <key> <role> <title>` | Add a child node under an unexecuted branch. |
+| `/graph-update <key> <field> <value>` | Edit an unexecuted node field such as `title`, `input`, `role`, or `dependsOn`. |
+| `/mode [mode]` | Show or set permission mode. |
+
+While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/sub`, `/status`, and `/timeline` run immediately. A normal chat/task message is added to the main-agent context queue and runs after the current main-agent turn finishes, so the main agent does not process multiple user contexts at the same time. The home panel includes a Run Log column showing recent subagent, task, graph, anomaly, and tool execution events.
+
+## Model Setup
+
+Run:
+
+```bash
+emily model
+```
+
+The model setup flow is interactive:
+
+1. Choose an existing provider or `Add a provider` with the arrow keys.
+2. Choose a provider template.
+3. Enter an API key when the selected provider needs one. Keys are written to the local environment file and provider config stores only `apiKeyEnv`.
+4. Confirm or edit the default base URL.
+5. Let Emily discover available models when the provider exposes a compatible model endpoint.
+6. Pick a default model, enter a custom model name, or skip and keep the current model.
+7. Optionally configure role-specific providers/models for subagents.
+
+Common provider templates:
+
+| Template | Default base URL |
+| --- | --- |
+| OpenAI | `https://api.openai.com/v1` |
+| DeepSeek | `https://api.deepseek.com/v1` |
+| Alibaba Cloud DashScope / Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| Moonshot / Kimi | `https://api.moonshot.cn/v1` |
+| Zhipu / GLM | `https://open.bigmodel.cn/api/paas/v4` |
+| Baidu Qianfan | `https://qianfan.baidubce.com/v2` |
+| Tencent Hunyuan | `https://api.hunyuan.cloud.tencent.com/v1` |
+| Volcengine Doubao / Ark | `https://ark.cn-beijing.volces.com/api/v3` |
+| MiniMax | `https://api.minimax.chat/v1` |
+| Ollama | `http://127.0.0.1:11434/v1` |
+| Custom provider | User-provided OpenAI-compatible URL |
+
 ## Configuration
 
 Runtime state lives under `.emily/` by default:
@@ -119,6 +233,35 @@ Runtime state lives under `.emily/` by default:
   memory/
     events.jsonl
     vector-index.json
+```
+
+Runtime settings in `.emily/config.json`:
+
+| Key | Purpose |
+| --- | --- |
+| `toolCallTimeoutSeconds` | Maximum time to wait for any single tool execution before returning a failed tool result. Default: `3600`. |
+| `agents.mainAgents` | Number of main agents. Must be `1`; the main agent owns ordered user context and orchestration. |
+| `agents.maxSubagentsPerRole` | Subagent limit per role. Must be `1` in the current stable model. |
+| `agents.maxConcurrentSubagents` | Global cap for simultaneously running subagents. Default: based on local CPU, capped at `4`. |
+| `agents.releaseSubagentsAfterTask` | Whether idle subagent worker processes are released after they finish work. Default: `true`. |
+| `agents.subagentIdleTtlSeconds` | Idle time before releasing a finished subagent. Use `0` to release immediately. Default: `60`. |
+
+Example:
+
+```json
+{
+  "defaultProviderId": "main-deepseek",
+  "fallbackMode": "strict",
+  "toolCallTimeoutSeconds": 3600,
+  "agents": {
+    "mainAgents": 1,
+    "maxSubagentsPerRole": 1,
+    "maxConcurrentSubagents": 4,
+    "releaseSubagentsAfterTask": true,
+    "subagentIdleTtlSeconds": 60
+  },
+  "providers": []
+}
 ```
 
 Useful environment variables:
@@ -208,7 +351,7 @@ Builtin role presets:
 | `inspector` | Inspect incomplete or suspicious tasks after failure. |
 | `memory-curator` | Promote valuable work into reusable experience. |
 
-Subagents are long-lived by role. If a role process already exists, new work is queued to that role instead of spawning duplicate role workers.
+The multi-agent model is intentionally conservative. There is exactly one main agent, and every agent is bound to one role. Each role has at most one active subagent; new work for that role is queued instead of spawning duplicate role workers. A global `agents.maxConcurrentSubagents` cap limits how many role workers can run at the same time, and idle subagents are released after `agents.subagentIdleTtlSeconds` when `agents.releaseSubagentsAfterTask` is enabled.
 
 ## Planning And Task Graphs
 
@@ -219,10 +362,34 @@ Core concepts:
 - `run`: one user request.
 - `task`: one role-owned unit of work.
 - `task_graph`: DAG for a run.
-- `task_dependencies`: dependency edges between tasks.
-- `PlanSpec`: initial structured plan.
-- `GraphPatchSpec`: dynamic graph update emitted while the graph is running.
+- `parentKey`: decomposition edge for the mind-map hierarchy, from goal to module to slice to leaf task.
+- `task_dependencies`: execution dependency edges between tasks.
+- `PlanSpec`: initial structured plan, usually coarse for large work.
+- `GraphPatchSpec`: dynamic graph update emitted while the graph is running, used to expand a parent node one level finer.
 - `TaskGraphExecutor`: executes ready tasks, expands rolling graph nodes, replans failed branches, and finalizes run state.
+
+The DAG deliberately separates two relationships:
+
+- **Decomposition** uses `parentKey`. This is the product-thinking shape of the graph: start broad, then refine into smaller branches.
+- **Execution gating** uses `dependsOn`. This controls when a node is allowed to run, and supports `success` or `finished` dependency semantics.
+
+The graph is inspectable while a run is active and after it completes. `dag.list` shows recent roots, `dag.list active` filters to queued/running roots, `graph.view` renders the parent/child decomposition as a text mind map, `graph.node` shows one node with dependencies and children, and `graph.add`/`graph.add_before`/`graph.add_after`/`graph.update`/`graph.delete` allow the main runtime or trusted clients to adjust branches that have not executed yet. Running and completed nodes are immutable through these graph-edit commands.
+
+The TUI also has an interactive DAG editor:
+
+```text
+/dag list
+/dag <root_id>
+```
+
+Inside the editor, use the up/down arrows to select a task node. Commands start with `:`:
+
+```text
+:add_before describe work to insert before this node
+:add_after describe work to insert after this node
+:update replace this node's instructions
+:del
+```
 
 Delivery levels:
 
@@ -343,7 +510,7 @@ Request shape:
 }
 ```
 
-Gateway methods include chat, sessions, provider management, roles, tools, skills, cron jobs, experiences, timeline, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
+Gateway methods include chat, sessions, provider management, roles, tools, skills, cron jobs, experiences, timeline, graph inspection/editing, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
 
 Token scopes:
 
@@ -402,10 +569,10 @@ TUI commands:
 
 - `/new`: create a new session;
 - `/clear`: create a new session and hide the old one;
-- `:resume latest`: resume the latest visible session;
-- `:export-session <id>`: export a session;
-- `:compact-preview <id>`: preview compaction;
-- `:session-usage <id>`: inspect usage.
+- `/resume latest`: resume the latest visible session;
+- `/export-session <id>`: export a session;
+- `/compact-preview <id>`: preview compaction;
+- `/session-usage <id>`: inspect usage.
 
 Hidden or trashed sessions are not implicitly reactivated. Restores are explicit. Trash lifecycle supports delayed deletion.
 
@@ -468,6 +635,37 @@ EMILY_VECTOR_INTEGRATION=true npm run check
 EMILY_PROVIDER_INTEGRATION=true npm run check
 ```
 
+Before submitting a change, prefer:
+
+```bash
+npm run typecheck
+node test/ui.test.ts
+node test/model-config.test.ts
+node test/chat-routing.test.ts
+```
+
+Run the full suite when touching runtime behavior, persistence, providers, planning, security, or command routing:
+
+```bash
+npm run check
+```
+
+## Contributing
+
+Contributions are welcome when they keep the runtime auditable and local-first.
+
+Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request. In short:
+
+- branch from `dev` for active development;
+- keep pull requests focused;
+- include tests or a clear reason tests are not needed;
+- avoid committing secrets, generated state, `.emily/` data, or unrelated formatting churn;
+- document user-facing behavior changes in this README or `user-guide.md`.
+
+## Security Reporting
+
+Please do not open a public issue for a suspected vulnerability. Follow [SECURITY.md](./SECURITY.md) for private reporting, expected triage, and supported-version guidance.
+
 ## Project Layout
 
 ```text
@@ -518,7 +716,7 @@ Emily AgentOS keeps third-party references explicit so downstream agent applicat
 Design references:
 
 - [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model.
-- [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics and local agent runtime packaging conventions. Emily AgentOS keeps its own runtime architecture and install script.
+- [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics, local agent runtime packaging conventions, `hermes model`-style provider setup, and terminal transcript/composer interaction patterns. Hermes Agent is MIT-licensed; Emily AgentOS keeps its own runtime architecture and does not vendor Hermes source.
 
 Optional integrations:
 

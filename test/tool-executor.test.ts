@@ -39,6 +39,23 @@ const read = await executor.execute({
 assert.equal(read.ok, true);
 assert.match(String((read.output as { content?: string }).content || ""), /Emily AgentOS/);
 
+const timeoutExecutor = new ToolExecutor({
+  workspaceDir: process.cwd(),
+  taskStore,
+  registry: createDefaultToolRegistry(),
+  toolCallTimeoutMs: 10,
+});
+(timeoutExecutor as unknown as { executeAllowed: () => Promise<never> }).executeAllowed = async () => new Promise<never>(() => undefined);
+const timedOut = await timeoutExecutor.execute({
+  tool: "read_file",
+  args: { path: "README.md" },
+  roleDefinition: role,
+  permissionMode: "read_only",
+  sessionId: "tool-executor",
+});
+assert.equal(timedOut.ok, false);
+assert.match(String(timedOut.error || ""), /timed out after 10ms/);
+
 const deniedByMode = await executor.execute({
   tool: "http_fetch",
   args: { url: "https://example.com" },

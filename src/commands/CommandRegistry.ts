@@ -1,5 +1,15 @@
 import type { CronJobInput } from "../cron/CronScheduler.ts";
 import type { ToolApproval } from "../tools/ToolExecutor.ts";
+import type { Metadata } from "../types.ts";
+import {
+  renderTaskMindMap,
+  renderTaskMindMapNode,
+  renderTaskMindMapRootList,
+  type TaskGraphNodeAddInput,
+  type TaskGraphNodeDeleteInput,
+  type TaskGraphNodeMutationInput,
+  type TaskGraphNodeSiblingInput,
+} from "../tasks/TaskMindMap.ts";
 
 export type CommandPermission = "read" | "write" | "danger";
 
@@ -90,6 +100,7 @@ export function createCommandRegistry(runtime: CommandRuntime): CommandRegistry 
   for (const command of sessionCommands(runtime)) registry.add(command);
   for (const command of providerCommands(runtime)) registry.add(command);
   for (const command of roleCommands(runtime)) registry.add(command);
+  for (const command of graphCommands(runtime)) registry.add(command);
   for (const command of skillCandidateCommands(runtime)) registry.add(command);
   for (const command of cronCommands(runtime)) registry.add(command);
   for (const command of runtimeControlCommands(runtime)) registry.add(command);
@@ -118,6 +129,15 @@ interface CommandRuntime {
   getTimeline: (options: { runId: string }) => unknown;
   renderTimeline: (runId: string) => string;
   getTaskTrace: (taskId: string) => unknown;
+  listSubagents: (options?: { includeIdle?: boolean }) => unknown;
+  getTaskMindMap: (runId: string) => unknown;
+  listTaskMindMapRoots: (options?: { activeOnly?: boolean; limit?: number }) => unknown;
+  getTaskMindMapNode: (runId: string, selector: string) => unknown;
+  addTaskMindMapNode: (input: TaskGraphNodeAddInput) => unknown;
+  addTaskMindMapNodeBefore: (input: TaskGraphNodeSiblingInput) => unknown;
+  addTaskMindMapNodeAfter: (input: TaskGraphNodeSiblingInput) => unknown;
+  updateTaskMindMapNode: (input: TaskGraphNodeMutationInput) => unknown;
+  deleteTaskMindMapNode: (input: TaskGraphNodeDeleteInput) => unknown;
   securityAudit: () => Promise<unknown>;
   buildContext: (options: { query: string; sessionId?: string; runId?: string | null; role?: string; mode?: "active" | "deep" }) => Promise<unknown>;
   routeMessage: (input: string) => unknown;
@@ -438,6 +458,21 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       renderText: (result) => typeof result === "string" ? result : JSON.stringify(result, null, 2),
     },
     {
+      name: "subagents.list",
+      aliases: ["sub", "subagents", "agents.active"],
+      description: "List subagents and their currently running tasks.",
+      permission: "read",
+      inputSchema: {
+        args: ["[all]"],
+        examples: ["subagents.list", "subagents.list all"],
+        properties: { includeIdle: "boolean" },
+      },
+      run: ({ args, input }) => runtime.listSubagents({
+        includeIdle: input.includeIdle === true || args[0] === "all",
+      }),
+      renderText: renderSubagents,
+    },
+    {
       name: "task.trace",
       aliases: ["trace", "task-trace"],
       description: "Return a task trace.",
@@ -500,6 +535,229 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
       },
       run: ({ args, input }) => runtime.routeMessage(stringOptional(input.input) || stringOptional(input.message) || args.join(" ")),
       renderText: (result) => renderRoute(result),
+    },
+  ];
+}
+
+function graphCommands(runtime: CommandRuntime): RuntimeCommand[] {
+  return [
+    {
+      name: "dag.list",
+      aliases: ["dag.roots", "graph.roots"],
+      description: "List recent DAG roots, including queued/running roots.",
+      permission: "read",
+      inputSchema: {
+        args: ["[active|all]", "[limit]"],
+        examples: ["dag.list", "dag.list active", "dag.list all 20"],
+      },
+      run: ({ args, input }) => {
+        const mode = stringOptional(input.mode) || args[0] || "";
+        const activeOnly = input.activeOnly === true || mode === "active" || mode === "running";
+        const limitArg = mode === "active" || mode === "all" || mode === "recent" || mode === "running" ? args[1] : args[0];
+        return runtime.listTaskMindMapRoots({
+          activeOnly,
+          limit: numberInput(input.limit, limitArg, 20),
+        });
+      },
+      renderText: (result) => renderTaskMindMapRootList(result as Parameters<typeof renderTaskMindMapRootList>[0]),
+    },
+    {
+      name: "graph.view",
+      aliases: ["graph", "mindmap", "task-graph", "dag.view"],
+      description: "Render the task DAG as a mind-map tree.",
+      permission: "read",
+      inputSchema: {
+        args: ["<runId>"],
+        examples: ["graph.view run_123", "mindmap run_123"],
+        required: ["runId"],
+        properties: { runId: "string" },
+      },
+      run: ({ args, input }) => runtime.getTaskMindMap(stringInput(input.runId, args[0], "runId")),
+      renderText: (result) => renderTaskMindMap(result as Parameters<typeof renderTaskMindMap>[0]),
+    },
+    {
+      name: "graph.node",
+      aliases: ["node", "task-node"],
+      description: "Inspect one task graph node by graph key or task id.",
+      permission: "read",
+      inputSchema: {
+        args: ["<runId>", "<selector>"],
+        examples: ["graph.node run_123 implementation", "node run_123 7a1b2c"],
+        required: ["runId", "selector"],
+        properties: { runId: "string", selector: "string" },
+      },
+      run: ({ args, input }) => runtime.getTaskMindMapNode(
+        stringInput(input.runId, args[0], "runId"),
+        stringInput(input.selector, args[1], "selector"),
+      ),
+      renderText: (result) => renderTaskMindMapNode(result as Parameters<typeof renderTaskMindMapNode>[0]),
+    },
+    {
+      name: "graph.add",
+      aliases: ["graph-add", "node-add"],
+      description: "Add a child node under an unexecuted task graph branch.",
+      permission: "write",
+      inputSchema: {
+        args: ["<runId>", "<parent>", "<key>", "<role>", "<title>"],
+        examples: ["graph.add run_123 architecture api_slice developer 'API slice'"],
+        required: ["runId", "parent", "role", "title"],
+        properties: {
+          runId: "string",
+          parent: "string",
+          key: "string",
+          role: "string",
+          title: "string",
+          input: "string",
+          dependsOn: "array",
+          dependencyType: "string",
+          acceptanceCriteria: "array",
+          toolHints: "array",
+          skillHints: "array",
+          timeoutMs: "number",
+          maxRetries: "number",
+          metadata: "object",
+        },
+      },
+      run: ({ args, input }) => runtime.addTaskMindMapNode({
+        runId: stringInput(input.runId, args[0], "runId"),
+        parent: stringInput(input.parent, args[1], "parent"),
+        key: stringOptional(input.key) || args[2],
+        role: stringInput(input.role, args[3], "role"),
+        title: stringInput(input.title, args.slice(4).join(" "), "title"),
+        input: stringOptional(input.input) || stringInput(input.title, args.slice(4).join(" "), "title"),
+        dependsOn: stringArrayInput(input.dependsOn),
+        dependencyType: input.dependencyType === "finished" ? "finished" : "success",
+        acceptanceCriteria: stringArrayInput(input.acceptanceCriteria),
+        toolHints: stringArrayInput(input.toolHints),
+        skillHints: stringArrayInput(input.skillHints),
+        timeoutMs: numberOptional(input.timeoutMs),
+        maxRetries: numberOptional(input.maxRetries),
+        maxResultChars: numberOptional(input.maxResultChars),
+        maxMemoryCandidates: numberOptional(input.maxMemoryCandidates),
+        expandable: booleanOptional(input.expandable),
+        expansionGoal: stringOptional(input.expansionGoal),
+        maxExpansionDepth: numberOptional(input.maxExpansionDepth),
+        permissionMode: stringOptional(input.permissionMode),
+        metadata: objectInput(input.metadata) as Metadata,
+      }),
+      renderText: (result) => renderTaskMindMapNode((result as { node: Parameters<typeof renderTaskMindMapNode>[0] }).node),
+    },
+    {
+      name: "graph.add_before",
+      aliases: ["graph-add-before", "node-add-before"],
+      description: "Insert a node before an unexecuted task graph node.",
+      permission: "write",
+      inputSchema: {
+        args: ["<runId>", "<selector>", "<key>", "<role>", "<title>"],
+        examples: ["graph.add_before run_123 implementation prep_slice developer 'Prepare inputs'"],
+        required: ["runId", "selector", "role", "title"],
+        properties: {
+          runId: "string",
+          selector: "string",
+          key: "string",
+          role: "string",
+          title: "string",
+          input: "string",
+          acceptanceCriteria: "array",
+          toolHints: "array",
+          skillHints: "array",
+          metadata: "object",
+        },
+      },
+      run: ({ args, input }) => runtime.addTaskMindMapNodeBefore(siblingInput(input, args)),
+      renderText: (result) => renderTaskMindMapNode((result as { node: Parameters<typeof renderTaskMindMapNode>[0] }).node),
+    },
+    {
+      name: "graph.add_after",
+      aliases: ["graph-add-after", "node-add-after"],
+      description: "Insert a node after an unexecuted task graph node.",
+      permission: "write",
+      inputSchema: {
+        args: ["<runId>", "<selector>", "<key>", "<role>", "<title>"],
+        examples: ["graph.add_after run_123 implementation polish_slice developer 'Polish result'"],
+        required: ["runId", "selector", "role", "title"],
+        properties: {
+          runId: "string",
+          selector: "string",
+          key: "string",
+          role: "string",
+          title: "string",
+          input: "string",
+          acceptanceCriteria: "array",
+          toolHints: "array",
+          skillHints: "array",
+          metadata: "object",
+        },
+      },
+      run: ({ args, input }) => runtime.addTaskMindMapNodeAfter(siblingInput(input, args)),
+      renderText: (result) => renderTaskMindMapNode((result as { node: Parameters<typeof renderTaskMindMapNode>[0] }).node),
+    },
+    {
+      name: "graph.update",
+      aliases: ["graph-update", "node-update"],
+      description: "Update an unexecuted task graph node.",
+      permission: "write",
+      inputSchema: {
+        args: ["<runId>", "<selector>"],
+        examples: ["graph.update run_123 implementation -- input='Narrow this slice'"],
+        required: ["runId", "selector"],
+        properties: {
+          runId: "string",
+          selector: "string",
+          role: "string",
+          title: "string",
+          input: "string",
+          dependsOn: "array",
+          dependencyType: "string",
+          acceptanceCriteria: "array",
+          toolHints: "array",
+          skillHints: "array",
+          timeoutMs: "number",
+          maxRetries: "number",
+          reopenBlocked: "boolean",
+          metadata: "object",
+        },
+      },
+      run: ({ args, input }) => runtime.updateTaskMindMapNode({
+        runId: stringInput(input.runId, args[0], "runId"),
+        selector: stringInput(input.selector, args[1], "selector"),
+        role: stringOptional(input.role),
+        title: stringOptional(input.title),
+        input: stringOptional(input.input),
+        dependsOn: stringArrayInput(input.dependsOn),
+        dependencyType: input.dependencyType === "finished" ? "finished" : "success",
+        acceptanceCriteria: stringArrayInput(input.acceptanceCriteria),
+        toolHints: stringArrayInput(input.toolHints),
+        skillHints: stringArrayInput(input.skillHints),
+        timeoutMs: numberOptional(input.timeoutMs),
+        maxRetries: numberOptional(input.maxRetries),
+        maxResultChars: numberOptional(input.maxResultChars),
+        maxMemoryCandidates: numberOptional(input.maxMemoryCandidates),
+        expandable: booleanOptional(input.expandable),
+        expansionGoal: stringOptional(input.expansionGoal),
+        maxExpansionDepth: numberOptional(input.maxExpansionDepth),
+        reopenBlocked: booleanOptional(input.reopenBlocked),
+        metadata: objectInput(input.metadata) as Metadata,
+      }),
+      renderText: (result) => renderTaskMindMapNode((result as { node: Parameters<typeof renderTaskMindMapNode>[0] }).node),
+    },
+    {
+      name: "graph.delete",
+      aliases: ["graph-del", "node-delete", "node-del"],
+      description: "Delete an unexecuted task graph node and its unexecuted children.",
+      permission: "write",
+      inputSchema: {
+        args: ["<runId>", "<selector>"],
+        examples: ["graph.delete run_123 implementation"],
+        required: ["runId", "selector"],
+        properties: { runId: "string", selector: "string", reason: "string" },
+      },
+      run: ({ args, input }) => runtime.deleteTaskMindMapNode({
+        runId: stringInput(input.runId, args[0], "runId"),
+        selector: stringInput(input.selector, args[1], "selector"),
+        reason: stringOptional(input.reason),
+      }),
+      renderText: (result) => `Deleted: ${((result as { deleted?: string[] }).deleted || []).join(", ") || "(none)"}`,
     },
   ];
 }
@@ -1131,6 +1389,18 @@ function renderProviderUsage(result: unknown): string {
   ].join("\n");
 }
 
+function renderSubagents(result: unknown): string {
+  return renderTable("Subagents", result, [
+    ["Subagent", "agentId"],
+    ["Role", "configuredRole"],
+    ["Status", "status"],
+    ["Task", (item) => shortId(item.taskId)],
+    ["Task Role", "taskRole"],
+    ["Title", (item) => truncate(String(item.taskTitle || ""), 48)],
+    ["Run", (item) => shortId(item.runId)],
+  ]);
+}
+
 function renderSessionMessages(result: unknown): string {
   const messages = asRecordArray(result);
   if (!messages.length) return "Messages\n(no messages)";
@@ -1331,6 +1601,32 @@ function stringInput(input: unknown, arg: string | undefined, label: string): st
   return requiredString(input ?? arg, label);
 }
 
+function siblingInput(input: Record<string, unknown>, args: string[]): TaskGraphNodeSiblingInput {
+  const title = stringOptional(input.title) || args.slice(4).join(" ").trim();
+  return {
+    runId: stringInput(input.runId, args[0], "runId"),
+    selector: stringInput(input.selector, args[1], "selector"),
+    key: stringOptional(input.key) || args[2],
+    role: stringOptional(input.role) || args[3],
+    title: stringInput(title, undefined, "title"),
+    input: stringOptional(input.input) || title,
+    dependsOn: stringArrayInput(input.dependsOn),
+    dependencyType: input.dependencyType === "finished" ? "finished" : "success",
+    acceptanceCriteria: stringArrayInput(input.acceptanceCriteria),
+    toolHints: stringArrayInput(input.toolHints),
+    skillHints: stringArrayInput(input.skillHints),
+    timeoutMs: numberOptional(input.timeoutMs),
+    maxRetries: numberOptional(input.maxRetries),
+    maxResultChars: numberOptional(input.maxResultChars),
+    maxMemoryCandidates: numberOptional(input.maxMemoryCandidates),
+    expandable: booleanOptional(input.expandable),
+    expansionGoal: stringOptional(input.expansionGoal),
+    maxExpansionDepth: numberOptional(input.maxExpansionDepth),
+    permissionMode: stringOptional(input.permissionMode),
+    metadata: objectInput(input.metadata) as Metadata,
+  };
+}
+
 function requiredString(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${label} is required`);
   return value;
@@ -1343,6 +1639,16 @@ function stringOptional(value: unknown): string | undefined {
 function numberInput(input: unknown, arg: string | undefined, fallback: number): number {
   const parsed = Number(input ?? arg);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function numberOptional(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function booleanOptional(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function objectInput(value: unknown): Record<string, unknown> {
@@ -1358,6 +1664,12 @@ function normalizeDatedOptions(input: Record<string, unknown>): Record<string, u
 
 function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) ? value.map(String) : undefined;
+}
+
+function stringArrayInput(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  if (typeof value === "string" && value.trim()) return value.split(/\n|,/).map((item) => item.trim()).filter(Boolean);
+  return undefined;
 }
 
 function parseProviderType(value: unknown): "echo" | "openai" | "ollama" {

@@ -201,6 +201,9 @@ async function runRoleTask({
     workspaceDir: process.cwd(),
     taskStore,
     registry: createDefaultToolRegistry(),
+    onEvent: ({ eventId }) => {
+      notify("task.changed", { taskId: task.id, eventId, leaseToken: task.leaseToken });
+    },
   });
   const toolExecutionResults: ToolExecutionResult[] = [];
   for (const request of readToolRequests(task.metadata.toolRequests)) {

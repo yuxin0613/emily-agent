@@ -50,6 +50,14 @@ Terminal UI:
 npm run tui
 ```
 
+When started, the TUI opens on a home dashboard. The visible values are read from the current runtime:
+
+- `Available Tools:` lists the tool groups registered for this process.
+- `Available Skills:` lists loaded skill groups.
+- `Run Log:` shows recent subagent, task, graph, anomaly, and tool execution events; when nothing has happened yet it shows an idle hint.
+- The status bar below the dashboard shows the current provider model/provider id, active session id, pending/running task counts, and open graph count. For example, `deepseek-v4-flash · main-deepseek | Session: tui | Tasks: 0/0 Graphs: 0` is only an example shape; the values change when you switch providers, sessions, or when tasks/graphs start and finish.
+- The prompt line at the bottom is the only input target. Long-running jobs can update `Run Log` while the prompt stays available for read-only commands and queued follow-up messages.
+
 WebUI:
 
 ```bash
@@ -76,6 +84,8 @@ Providers are stored in `.emily/config.json`. Existing `.emily/providers.json` f
 
 Use `echo` for local architecture tests only. Use `openai` or `ollama` for real model work.
 
+Agent runtime limits live in the same file. Emily uses one ordered main-agent context and role-bound subagents: `agents.mainAgents` must stay `1`, and `agents.maxSubagentsPerRole` must stay `1` in the current stable runtime. Use `agents.maxConcurrentSubagents` to cap how many subagents can run at once, and `agents.subagentIdleTtlSeconds` plus `agents.releaseSubagentsAfterTask` to control when idle subagent processes are released.
+
 The easiest setup path is:
 
 ```bash
@@ -90,6 +100,13 @@ OpenAI-compatible example:
 {
   "defaultProviderId": "openai-main",
   "fallbackMode": "fallback",
+  "agents": {
+    "mainAgents": 1,
+    "maxSubagentsPerRole": 1,
+    "maxConcurrentSubagents": 4,
+    "releaseSubagentsAfterTask": true,
+    "subagentIdleTtlSeconds": 60
+  },
   "providers": [
     {
       "id": "openai-main",
@@ -169,12 +186,48 @@ If you omit the delivery level for an obvious long task, AgentOS may pause and a
 The runtime will:
 
 1. create a run;
-2. create an initial task graph;
+2. create an initial task graph shaped like a mind map;
 3. execute ready tasks by role;
 4. dynamically expand tasks when more detail is needed;
 5. replan failed branches when possible;
 6. review results;
 7. summarize the outcome.
+
+Task graphs separate two ideas:
+
+- `parentKey` is the decomposition relationship: goal -> module -> slice -> executable leaf.
+- `dependsOn` is the execution relationship: a task waits for another task to finish or succeed.
+
+Inspect recent graphs from the TUI:
+
+```text
+/dag list
+/dag list active
+/sub
+/dag <root_id>
+/graph
+/node architecture
+```
+
+The TUI remains responsive while a long job is running. You can type read-only commands such as `/dag list`, `/sub`, `/status`, or `/timeline` immediately. A normal message enters the main-agent context queue and runs after the current main-agent turn finishes, so main-agent context is handled in order. The home panel has a Run Log area for recent subagent, task, graph, anomaly, and tool execution events, and the dashboard status bar updates from runtime health rather than a fixed template. `/sub` shows which subagent is currently running, the configured role, the task name, and task id.
+
+`/dag <root_id>` opens the interactive DAG editor. Use up/down arrows to select a task node. Editor commands start with `:`:
+
+```text
+:add_before prepare the inputs before this task
+:add_after verify the output after this task
+:update replace the selected task instructions
+:del
+```
+
+Trusted write clients can add or edit branches before they execute:
+
+```text
+/graph-add architecture api_slice developer "API slice"
+/graph-update api_slice input "Implement only the API leaf slice."
+```
+
+Running and completed nodes are locked for graph editing.
 
 ## 6. Understand Roles
 

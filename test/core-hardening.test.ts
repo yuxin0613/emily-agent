@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
+import { normalizeAgentRuntimeConfig } from "../src/llm/ProviderRegistry.ts";
 import { workerExecArgv } from "../src/tasks/RoleAgentManager.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
@@ -13,9 +14,21 @@ assert.deepEqual(workerExecArgv([
   "console.log('parent only')",
   "--conditions=development",
 ]), ["--trace-warnings", "--conditions=development"]);
+assert.throws(() => normalizeAgentRuntimeConfig({ mainAgents: 2 }), /agents\.mainAgents/);
+assert.throws(() => normalizeAgentRuntimeConfig({ maxSubagentsPerRole: 2 }), /agents\.maxSubagentsPerRole/);
+assert.equal(normalizeAgentRuntimeConfig({ maxConcurrentSubagents: 2 }).maxConcurrentSubagents, 2);
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-core-"));
-const runtime = await createRuntime({ dataDir });
+const runtime = await createRuntime({
+  dataDir,
+  agents: {
+    maxConcurrentSubagents: 2,
+    releaseSubagentsAfterTask: true,
+    subagentIdleTtlSeconds: 0,
+  },
+});
+assert.equal(runtime.roleAgentManager.maxSubagentsPerRole, 1);
+assert.equal(runtime.roleAgentManager.maxConcurrentSubagents, 2);
 
 const cancellable = runtime.taskStore.createTask({
   role: "developer",

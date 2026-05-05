@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { MainAgent } from "../agents/MainAgent.ts";
@@ -9,7 +9,7 @@ import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
 import { GATEWAY_METHODS } from "../gateway/GatewayProtocol.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
-import { ProviderRegistry } from "../llm/ProviderRegistry.ts";
+import { normalizeAgentRuntimeConfig, ProviderRegistry, type AgentRuntimeConfig } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import type { VectorStoreConfig } from "../memory/VectorStoreAdapter.ts";
@@ -21,6 +21,21 @@ import { SkillCandidateStore } from "../skills/SkillCandidateStore.ts";
 import { defaultSkillDirs, SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
+import {
+  addTaskMindMapNode,
+  addTaskMindMapNodeAfter,
+  addTaskMindMapNodeBefore,
+  buildTaskMindMap,
+  deleteTaskMindMapNode,
+  getTaskMindMapNode,
+  listActiveTaskMindMapRoots,
+  type TaskMindMapRootListOptions,
+  updateTaskMindMapNode,
+  type TaskGraphNodeAddInput,
+  type TaskGraphNodeDeleteInput,
+  type TaskGraphNodeMutationInput,
+  type TaskGraphNodeSiblingInput,
+} from "../tasks/TaskMindMap.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import { ToolExecutor, type ToolApproval } from "../tools/ToolExecutor.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
@@ -47,12 +62,14 @@ export async function createRuntime(options: {
   skillDirs?: string[];
   vectorStore?: VectorStoreConfig;
   enableCron?: boolean;
+  agents?: Partial<AgentRuntimeConfig>;
 } = {}) {
   const dataDir = options.dataDir || process.env.EMILY_DATA_DIR || path.join(process.cwd(), ".emily");
   const roleDir = options.roleDir || process.env.EMILY_ROLE_DIR || path.join(process.cwd(), "agents");
   const skillDir = options.skillDir || process.env.EMILY_SKILL_DIR || path.join(process.cwd(), "skills");
   const skillDirs = options.skillDirs || defaultSkillDirs(skillDir);
   await mkdir(dataDir, { recursive: true });
+  await loadDataDirEnv(dataDir);
 
   const requestedMainProviderId = options.mainProviderId || options.defaultProviderId;
   if (options.model && !requestedMainProviderId) {
@@ -65,6 +82,10 @@ export async function createRuntime(options: {
     defaultProviderId: requestedMainProviderId || "echo",
     fallbackMode: options.providerFallbackMode || "strict",
     usageStore: providerUsageStore,
+  });
+  const agentRuntimeConfig = normalizeAgentRuntimeConfig({
+    ...providerRegistry.agents,
+    ...(options.agents || {}),
   });
   const mainProviderId = requestedMainProviderId || providerRegistry.defaultProviderId;
   if (options.model && options.model.id !== mainProviderId) {
@@ -91,6 +112,7 @@ export async function createRuntime(options: {
     workspaceDir: process.cwd(),
     taskStore,
     registry: toolRegistry,
+    toolCallTimeoutMs: providerRegistry.toolCallTimeoutSeconds * 1000,
   });
   const skillRegistry = await SkillRegistry.create({ skillDirs });
   const skillCandidateStore = SkillCandidateStore.create({ dataDir, skillDir });
@@ -120,6 +142,10 @@ export async function createRuntime(options: {
     skillDir,
     skillDirs,
     hooks,
+    maxSubagentsPerRole: agentRuntimeConfig.maxSubagentsPerRole,
+    maxConcurrentSubagents: agentRuntimeConfig.maxConcurrentSubagents,
+    releaseSubagentsAfterTask: agentRuntimeConfig.releaseSubagentsAfterTask,
+    subagentIdleTtlMs: agentRuntimeConfig.subagentIdleTtlSeconds * 1000,
   });
   await roleAgentManager.start();
 
@@ -427,6 +453,15 @@ export async function createRuntime(options: {
     getTimeline: (input) => taskStore.getTimeline(input),
     renderTimeline: (runId) => renderTimeline(taskStore.getTimeline({ runId })),
     getTaskTrace: (taskId) => taskStore.getTaskTrace(taskId),
+    listSubagents: (input = {}) => roleAgentManager.listSubagents(input),
+    getTaskMindMap: (runId) => buildTaskMindMap(taskStore, runId),
+    listTaskMindMapRoots: (input: TaskMindMapRootListOptions = {}) => listActiveTaskMindMapRoots(taskStore, input),
+    getTaskMindMapNode: (runId, selector) => getTaskMindMapNode(taskStore, runId, selector),
+    addTaskMindMapNode: (input: TaskGraphNodeAddInput) => addTaskMindMapNode(taskStore, input),
+    addTaskMindMapNodeBefore: (input: TaskGraphNodeSiblingInput) => addTaskMindMapNodeBefore(taskStore, input),
+    addTaskMindMapNodeAfter: (input: TaskGraphNodeSiblingInput) => addTaskMindMapNodeAfter(taskStore, input),
+    updateTaskMindMapNode: (input: TaskGraphNodeMutationInput) => updateTaskMindMapNode(taskStore, input),
+    deleteTaskMindMapNode: (input: TaskGraphNodeDeleteInput) => deleteTaskMindMapNode(taskStore, input),
     securityAudit,
     buildContext: (input) => contextEngine.build(input),
     routeMessage: (input) => router.route(input),
@@ -638,6 +673,33 @@ export async function createRuntime(options: {
     getTaskTrace(taskId: string) {
       return taskStore.getTaskTrace(taskId);
     },
+    listSubagents(input: { includeIdle?: boolean } = {}) {
+      return roleAgentManager.listSubagents(input);
+    },
+    getTaskMindMap(runId: string) {
+      return buildTaskMindMap(taskStore, runId);
+    },
+    listTaskMindMapRoots(input: TaskMindMapRootListOptions = {}) {
+      return listActiveTaskMindMapRoots(taskStore, input);
+    },
+    getTaskMindMapNode(runId: string, selector: string) {
+      return getTaskMindMapNode(taskStore, runId, selector);
+    },
+    addTaskMindMapNode(input: TaskGraphNodeAddInput) {
+      return addTaskMindMapNode(taskStore, input);
+    },
+    addTaskMindMapNodeBefore(input: TaskGraphNodeSiblingInput) {
+      return addTaskMindMapNodeBefore(taskStore, input);
+    },
+    addTaskMindMapNodeAfter(input: TaskGraphNodeSiblingInput) {
+      return addTaskMindMapNodeAfter(taskStore, input);
+    },
+    updateTaskMindMapNode(input: TaskGraphNodeMutationInput) {
+      return updateTaskMindMapNode(taskStore, input);
+    },
+    deleteTaskMindMapNode(input: TaskGraphNodeDeleteInput) {
+      return deleteTaskMindMapNode(taskStore, input);
+    },
     diagnostics,
     securityAudit,
     doctor,
@@ -702,4 +764,40 @@ export async function createRuntime(options: {
     const roles = await roleManager.listRoles();
     return roles.filter((role) => role.provider === providerId).map((role) => role.name);
   }
+}
+
+async function loadDataDirEnv(dataDir: string): Promise<void> {
+  const envPath = path.join(dataDir, ".env");
+  let raw = "";
+  try {
+    raw = await readFile(envPath, "utf8");
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return;
+    throw error;
+  }
+  for (const line of raw.split(/\r?\n/)) {
+    const parsed = parseEnvLine(line);
+    if (!parsed) continue;
+    if (process.env[parsed.key] === undefined) process.env[parsed.key] = parsed.value;
+  }
+}
+
+function parseEnvLine(line: string): { key: string; value: string } | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+  if (!match) return null;
+  return { key: match[1], value: parseEnvValue(match[2]) };
+}
+
+function parseEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1).replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+  }
+  return trimmed;
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
 }

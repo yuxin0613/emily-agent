@@ -25,6 +25,8 @@ import {
   type PlanSpec,
 } from "../planning/PlanSpec.ts";
 
+const PLANNER_TASK_TIMEOUT_MS = 120000;
+
 interface MainAgentResult {
   agent: string;
   runId?: string;
@@ -128,8 +130,7 @@ export class MainAgent {
       run,
       payload: { input: normalizedInput, sessionId, source, permissionMode },
     });
-    const selectedAgents = this.selectSubAgents(normalizedInput);
-    let delegatedTo = selectedAgents;
+    let delegatedTo: string[] = [];
     let planSummary: MainAgentResult["plan"];
     let subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }> = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
@@ -141,6 +142,100 @@ export class MainAgent {
         content: normalizedInput,
         metadata: { source, runId: run.id, permissionMode },
       });
+
+      const intent = classifyUserMessageIntent(normalizedInput);
+      if (intent === "chat") {
+        if (isModelIdentityQuestion(normalizedInput)) {
+          const content = formatCurrentModelAnswer(this.model);
+          await this.remember({
+            scope: sessionId,
+            kind: "message:assistant",
+            content,
+            metadata: {
+              source: "main-agent",
+              runId: run.id,
+              intent,
+              delegatedTo: [],
+              answeredFrom: "runtime_model_config",
+            },
+          });
+          this.taskStore.completeRun(run.id, "done");
+          await this.hooks?.emit("afterRun", {
+            run: this.taskStore.getRun(run.id) || run,
+            payload: {
+              status: "done",
+              intent,
+              delegatedTo: [],
+              answeredFrom: "runtime_model_config",
+            },
+          });
+          return {
+            agent: this.name,
+            runId: run.id,
+            content,
+            delegatedTo: [],
+            subResults: [],
+          };
+        }
+
+        const contextBundle = this.contextEngine
+          ? await this.contextEngine.build({
+            query: normalizedInput,
+            sessionId,
+            runId: run.id,
+            role: this.name,
+            mode: shouldUseDeepContext(normalizedInput) ? "deep" : "active",
+          })
+          : null;
+        const relevantMemory = contextBundle?.memory || await this.memory.recall(normalizedInput, {
+          scope: sessionId,
+          limit: 5,
+        });
+        const relevantExperiences = (contextBundle?.experiences || this.experienceStore.recall(normalizedInput, {
+          scope: "project",
+          limit: 3,
+        })).filter((experience) => experienceApplies(experience, normalizedInput));
+        const content = await this.answerDirectChat({
+          input: normalizedInput,
+          runId: run.id,
+          sessionId,
+          relevantMemory,
+          relevantExperiences,
+        });
+        for (const experience of relevantExperiences) {
+          this.experienceStore.recordUse(experience.id);
+        }
+        await this.remember({
+          scope: sessionId,
+          kind: "message:assistant",
+          content,
+          metadata: {
+            source: "main-agent",
+            runId: run.id,
+            intent,
+            delegatedTo: [],
+          },
+        });
+        await this.approveRunMemoryCandidates(run.id);
+        this.taskStore.completeRun(run.id, "done");
+        await this.hooks?.emit("afterRun", {
+          run: this.taskStore.getRun(run.id) || run,
+          payload: {
+            status: "done",
+            intent,
+            delegatedTo: [],
+          },
+        });
+        return {
+          agent: this.name,
+          runId: run.id,
+          content,
+          delegatedTo: [],
+          memory: relevantMemory,
+          experiences: relevantExperiences,
+          subResults: [],
+        };
+      }
 
       if (requiresDeliveryLevelClarification(normalizedInput)) {
         const content = deliveryLevelQuestion(normalizedInput);
@@ -186,6 +281,8 @@ export class MainAgent {
         limit: 3,
       })).filter((experience) => experienceApplies(experience, normalizedInput));
 
+      const selectedAgents = this.selectSubAgents(normalizedInput);
+      delegatedTo = selectedAgents;
       const delegated = await this.delegateTasks({
         input: normalizedInput,
         sessionId,
@@ -364,7 +461,7 @@ export class MainAgent {
         source,
         runId,
         createdBy: this.name,
-        timeoutMs: 30000,
+        timeoutMs: PLANNER_TASK_TIMEOUT_MS,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
         permissionMode: permissionMode || "workspace_write",
@@ -387,7 +484,9 @@ export class MainAgent {
     });
     const plannerTask = planningGraph.planner;
 
-    const finishedPlanner = await this.roleAgentManager.runTask(plannerTask);
+    const finishedPlanner = await this.roleAgentManager.runTask(plannerTask, {
+      timeoutMs: PLANNER_TASK_TIMEOUT_MS + 5000,
+    });
     results.push(this.formatTaskResult("planner", finishedPlanner));
     if (finishedPlanner.status !== "done") {
       this.taskStore.refreshTaskGraphStatuses();
@@ -610,21 +709,158 @@ export class MainAgent {
       "Write a concise, helpful response in Chinese.",
     ].join("\n");
 
-    const result = normalizeModelCompleteResult(await this.model.complete({
+    const result = await this.completeWithMainModel({
       agent: this.name,
       role: "Communicate with the user and coordinate sub-agents.",
       prompt,
       runId,
       source: sessionId ? `session:${sessionId}` : "main-agent",
-    }), this.model);
+      phase: "synthesize",
+    });
     return result.content;
   }
+
+  async answerDirectChat({
+    input,
+    runId,
+    sessionId,
+    relevantMemory,
+    relevantExperiences,
+  }: {
+    input: string;
+    runId?: string;
+    sessionId?: string;
+    relevantMemory: MemoryRecallResult;
+    relevantExperiences: ExperienceRecallResult[];
+  }): Promise<string> {
+    const prompt = [
+      "Conversation mode: direct_chat",
+      `User input: ${input}`,
+      `Relevant memory count: ${relevantMemory.semantic.length + relevantMemory.shortTerm.length}`,
+      "Relevant active experiences:",
+      ...formatExperiences(relevantExperiences),
+      "",
+      "Reply naturally and concisely in Chinese.",
+      "Do not create a task plan, delegate to sub-agents, or ask for task scope unless the user explicitly asks you to do work.",
+    ].join("\n");
+
+    const result = await this.completeWithMainModel({
+      agent: this.name,
+      role: "Direct conversation without task delegation.",
+      prompt,
+      runId,
+      source: sessionId ? `session:${sessionId}` : "main-agent",
+      phase: "direct_chat",
+    });
+    return result.content;
+  }
+
+  private async completeWithMainModel({
+    agent,
+    role,
+    prompt,
+    runId,
+    source,
+    phase,
+  }: {
+    agent: string;
+    role: string;
+    prompt: string;
+    runId?: string;
+    source?: string;
+    phase: string;
+  }) {
+    const payload = {
+      agent,
+      role,
+      runId: runId || "",
+      source: source || "",
+      phase,
+      providerId: this.model.id,
+      model: this.model.model,
+    };
+    await this.hooks?.emit("beforeModelComplete", { payload });
+    try {
+      const result = normalizeModelCompleteResult(await this.model.complete({
+        agent,
+        role,
+        prompt,
+        runId,
+        source,
+      }), this.model);
+      await this.hooks?.emit("afterModelComplete", {
+        payload: {
+          ...payload,
+          finishReason: result.finishReason || "",
+          latencyMs: result.latencyMs || 0,
+          providerId: result.providerId || this.model.id,
+          model: result.model || this.model.model,
+        },
+      });
+      return result;
+    } catch (error) {
+      await this.hooks?.emit("afterModelComplete", {
+        payload: {
+          ...payload,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      throw error;
+    }
+  }
+}
+
+export function classifyUserMessageIntent(input: string): "chat" | "task" {
+  const normalized = input.trim();
+  const compact = normalized.replace(/\s+/g, "");
+  const lower = normalized.toLowerCase();
+  if (!normalized) return "chat";
+
+  if (/^(?:hi|hello|hey|ping|test|thanks|thank you|你好|您好|在吗|谢谢|测试|测试消息|随便聊聊|聊聊)[。.!！?？]*$/i.test(compact)) {
+    return "chat";
+  }
+  if (/(?:你是谁|你叫什么|你能做什么|介绍一下你自己|你好吗|how are you|who are you|what can you do)/i.test(normalized)) {
+    return "chat";
+  }
+
+  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|做一个|搭建|接入|迁移|发布|提交|推送|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|write|generate|analyze|summarize|search)/i.test(normalized)) {
+    return "task";
+  }
+  if (/(?:帮我|请你|麻烦|能不能|可以帮|需要你|我想要|我要|给我).{0,16}(?:做|写|改|查|看|跑|测|建|实现|修|设计|生成|分析|总结|创建|配置|部署)/.test(normalized)) {
+    return "task";
+  }
+  if (/(?:[\w.-]+\/[\w./-]+|`[^`]+`|```|error:|exception|stack trace|报错|失败|崩溃)/i.test(normalized)) {
+    return "task";
+  }
+
+  if (/[?？]$/.test(normalized) && !/(?:代码|文件|项目|仓库|repo|bug|接口|api|实现|修复|部署|配置|测试|报错)/i.test(normalized)) {
+    return "chat";
+  }
+  if ([...compact].length <= 18) return "chat";
+  return "task";
+}
+
+function isModelIdentityQuestion(input: string): boolean {
+  return /(?:现在|当前|正在|用的|使用的)?.{0,8}(?:哪个|那个|什么|啥)?.{0,6}(?:模型|model|provider)|(?:模型|model|provider).{0,8}(?:哪个|那个|什么|啥)/i.test(input);
+}
+
+function formatCurrentModelAnswer(model: ModelProvider): string {
+  return [
+    `当前主模型是 ${model.model}。`,
+    `Provider: ${model.id}`,
+  ].join("\n");
 }
 
 function plannerPrompt(input: string, deliveryLevel: string): string {
   return [
-    "Create a PlanSpec JSON object for an outcome-oriented agent task graph.",
+    "Create a PlanSpec JSON object for an outcome-oriented DAG.",
     "Return only JSON. Do not wrap it in markdown.",
+    "",
+    "DAG model:",
+    "- Treat the DAG like a mind map that decomposes the user's goal from coarse to fine.",
+    "- parentKey is the decomposition parent: goal/root -> module/workstream -> feature slice -> executable leaf.",
+    "- dependsOn is only the execution gate between nodes; do not use it as a substitute for parentKey.",
+    "- Early nodes should map and narrow the problem. Leaf nodes should execute or verify concrete work.",
     "",
     "Required shape:",
     JSON.stringify({
@@ -639,7 +875,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
         role: "developer",
         title: "short task title",
         input: "full task instructions",
-        parentKey: "",
+        parentKey: "parent decomposition key, or empty for the root layer",
         dependsOn: [],
         dependencyType: "success",
         acceptanceCriteria: ["string"],
@@ -664,9 +900,11 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     }, null, 2),
     "",
     "Planning rules:",
-    "- For long product/application work, decompose by outcome -> module -> feature slice -> verification.",
-    "- For rolling mode, keep the initial graph coarse and mark tasks that should expand later with expandable=true.",
-    "- Expandable tasks should describe expansionGoal and maxExpansionDepth.",
+    "- For long product/application work, decompose by goal -> module/workstream -> feature slice -> verification.",
+    "- For rolling mode, keep the initial graph coarse and mark non-leaf nodes that should expand later with expandable=true.",
+    "- Expandable tasks should describe how to expand one level finer in expansionGoal and maxExpansionDepth.",
+    "- Do not flatten a large request directly into implementation tasks; preserve the coarse-to-fine hierarchy.",
+    "- A task with parentKey must be a child of an existing task key in the same PlanSpec.",
     "- Each task must have acceptanceCriteria.",
     "- Use dependencies instead of prose ordering.",
     "- Keep the first wave small enough to execute now; use planningMode=rolling for larger goals.",
@@ -697,7 +935,7 @@ function formatPlan(plan: PlanSpec): string[] {
     "- exitCriteria:",
     ...plan.exitCriteria.map((item) => `  - ${item}`),
     "- tasks:",
-    ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
+    ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] parent=${task.parentKey || "(root)"} wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
   ];
 }
 
