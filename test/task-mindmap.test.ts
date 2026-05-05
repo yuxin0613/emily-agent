@@ -35,6 +35,7 @@ try {
   assert.match(graphText, /Task Mind Map/);
   assert.match(graphText, /scope/);
   assert.match(graphText, /architecture/);
+  assert.match(graphText, /未开始/);
   assert.match(graphText, /Execution dependencies/);
 
   const architecture = await runtime.runCommand("graph.node", {
@@ -120,6 +121,7 @@ try {
 
   const dagList = String(await runtime.runCommand("dag.list", { format: "text" }));
   assert.match(dagList, /DAG Roots/);
+  assert.match(dagList, /未开始/);
   assert.match(dagList, new RegExp(run.id));
 
   const gatewayRead = await dispatchGatewayRequest(runtime as never, {

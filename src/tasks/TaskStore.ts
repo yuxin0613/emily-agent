@@ -867,6 +867,18 @@ export class TaskStore {
     return rows.map(parseTaskGraph);
   }
 
+  getRecentTaskGraphs({ limit = 20 }: { limit?: number } = {}): TaskGraph[] {
+    const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM task_graphs
+        ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC
+        LIMIT ?
+      `)
+      .all(safeLimit) as unknown as TaskGraphRow[];
+    return rows.map(parseTaskGraph);
+  }
+
   refreshTaskGraphStatuses(): TaskGraph[] {
     const updated: TaskGraph[] = [];
     for (const graph of this.getOpenTaskGraphs()) {

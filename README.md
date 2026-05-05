@@ -168,7 +168,7 @@ Useful TUI commands:
 | `/tools` | List available tools. |
 | `/skills` | List available skills. |
 | `/timeline [runId]` | Inspect the latest or selected run timeline. |
-| `/dag list` | List queued or running DAG roots. |
+| `/dag list` | List recent DAG roots, including queued/running ones. |
 | `/dag <root_id>` | Open the interactive DAG editor for one root. |
 | `/graph [runId]` | Render the task DAG as a mind-map tree. |
 | `/node <key> [runId]` | Inspect one task node by graph key or task id. |
@@ -349,7 +349,7 @@ The DAG deliberately separates two relationships:
 - **Decomposition** uses `parentKey`. This is the product-thinking shape of the graph: start broad, then refine into smaller branches.
 - **Execution gating** uses `dependsOn`. This controls when a node is allowed to run, and supports `success` or `finished` dependency semantics.
 
-The graph is inspectable while a run is active. `dag.list` shows active roots, `graph.view` renders the parent/child decomposition as a text mind map, `graph.node` shows one node with dependencies and children, and `graph.add`/`graph.add_before`/`graph.add_after`/`graph.update`/`graph.delete` allow the main runtime or trusted clients to adjust branches that have not executed yet. Running and completed nodes are immutable through these graph-edit commands.
+The graph is inspectable while a run is active and after it completes. `dag.list` shows recent roots, `dag.list active` filters to queued/running roots, `graph.view` renders the parent/child decomposition as a text mind map, `graph.node` shows one node with dependencies and children, and `graph.add`/`graph.add_before`/`graph.add_after`/`graph.update`/`graph.delete` allow the main runtime or trusted clients to adjust branches that have not executed yet. Running and completed nodes are immutable through these graph-edit commands.
 
 The TUI also has an interactive DAG editor:
 

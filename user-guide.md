@@ -181,10 +181,11 @@ Task graphs separate two ideas:
 - `parentKey` is the decomposition relationship: goal -> module -> slice -> executable leaf.
 - `dependsOn` is the execution relationship: a task waits for another task to finish or succeed.
 
-Inspect the active graph from the TUI:
+Inspect recent graphs from the TUI:
 
 ```text
 /dag list
+/dag list active
 /dag <root_id>
 /graph
 /node architecture

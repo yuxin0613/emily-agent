@@ -29,6 +29,7 @@ import {
   deleteTaskMindMapNode,
   getTaskMindMapNode,
   listActiveTaskMindMapRoots,
+  type TaskMindMapRootListOptions,
   updateTaskMindMapNode,
   type TaskGraphNodeAddInput,
   type TaskGraphNodeDeleteInput,
@@ -444,7 +445,7 @@ export async function createRuntime(options: {
     renderTimeline: (runId) => renderTimeline(taskStore.getTimeline({ runId })),
     getTaskTrace: (taskId) => taskStore.getTaskTrace(taskId),
     getTaskMindMap: (runId) => buildTaskMindMap(taskStore, runId),
-    listTaskMindMapRoots: () => listActiveTaskMindMapRoots(taskStore),
+    listTaskMindMapRoots: (input: TaskMindMapRootListOptions = {}) => listActiveTaskMindMapRoots(taskStore, input),
     getTaskMindMapNode: (runId, selector) => getTaskMindMapNode(taskStore, runId, selector),
     addTaskMindMapNode: (input: TaskGraphNodeAddInput) => addTaskMindMapNode(taskStore, input),
     addTaskMindMapNodeBefore: (input: TaskGraphNodeSiblingInput) => addTaskMindMapNodeBefore(taskStore, input),
@@ -665,8 +666,8 @@ export async function createRuntime(options: {
     getTaskMindMap(runId: string) {
       return buildTaskMindMap(taskStore, runId);
     },
-    listTaskMindMapRoots() {
-      return listActiveTaskMindMapRoots(taskStore);
+    listTaskMindMapRoots(input: TaskMindMapRootListOptions = {}) {
+      return listActiveTaskMindMapRoots(taskStore, input);
     },
     getTaskMindMapNode(runId: string, selector: string) {
       return getTaskMindMapNode(taskStore, runId, selector);

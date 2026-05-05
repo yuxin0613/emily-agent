@@ -100,6 +100,8 @@ const dagView = formatDagEditorView(dagMap, 1, "ready", 100);
 assert.match(dagView, /DAG run_dag/);
 assert.match(dagView, />  2/);
 assert.match(dagView, /:add_before\/:add_after\/:update\/:del/);
+assert.match(dagView, /已完成/);
+assert.match(dagView, /未开始/);
 assert.match(dagView, /ready/);
 
 const cliHelp = await execFileAsync(process.execPath, ["src/index.ts", "--help"], {

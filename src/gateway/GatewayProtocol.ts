@@ -443,7 +443,13 @@ async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: 
         format: params.format === "text" ? "text" : "json",
       });
     case "dag.list":
-      return runtime.runCommand("dag.list", { format: params.format === "text" ? "text" : "json" });
+      return runtime.runCommand("dag.list", {
+        input: {
+          activeOnly: params.activeOnly === true,
+          limit: params.limit,
+        },
+        format: params.format === "text" ? "text" : "json",
+      });
     case "graph.view":
       return runtime.runCommand("graph.view", {
         input: { runId: String(params.runId || "") },

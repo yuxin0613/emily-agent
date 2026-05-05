@@ -468,12 +468,17 @@ export async function startWebServer({
       }
 
       if (request.method === "GET" && url.pathname === "/dag") {
+        const dagInput = {
+          activeOnly: url.searchParams.get("activeOnly") === "true" || url.searchParams.get("mode") === "active",
+          limit: url.searchParams.get("limit") || undefined,
+        };
         if (url.searchParams.get("format") === "text") {
           return sendText(response, 200, String(await runCommand("dag.list", {
+            input: dagInput,
             format: "text",
           })), "text/plain; charset=utf-8");
         }
-        return sendJson(response, 200, await runCommand("dag.list"));
+        return sendJson(response, 200, await runCommand("dag.list", { input: dagInput }));
       }
 
       if (request.method === "GET" && url.pathname === "/graph") {

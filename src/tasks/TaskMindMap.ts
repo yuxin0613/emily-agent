@@ -55,6 +55,11 @@ export interface TaskMindMapRootSummary {
   updatedAt: string;
 }
 
+export interface TaskMindMapRootListOptions {
+  activeOnly?: boolean;
+  limit?: number;
+}
+
 export interface TaskGraphNodeMutationInput {
   runId: string;
   selector: string;
@@ -200,15 +205,18 @@ export function buildTaskMindMap(taskStore: TaskStore, runId: string): TaskMindM
   };
 }
 
-export function listActiveTaskMindMapRoots(taskStore: TaskStore): TaskMindMapRootSummary[] {
+export function listActiveTaskMindMapRoots(taskStore: TaskStore, options: TaskMindMapRootListOptions = {}): TaskMindMapRootSummary[] {
   const summaries: TaskMindMapRootSummary[] = [];
-  for (const graph of taskStore.getOpenTaskGraphs()) {
+  const graphs = options.activeOnly
+    ? taskStore.getOpenTaskGraphs()
+    : taskStore.getRecentTaskGraphs({ limit: options.limit ?? 20 });
+  for (const graph of graphs) {
     if (!graph.runId) continue;
     const run = taskStore.getRun(graph.runId);
     const tasks = taskStore.getTasksForGraph(graph.id).filter((task) => isVisibleGraphTask(task));
     if (!run || !tasks.length) continue;
     const active = tasks.filter((task) => ACTIVE_STATUSES.has(task.status));
-    if (!active.length) continue;
+    if (options.activeOnly && !active.length) continue;
     const byKey = new Map(tasks.map((task) => [graphKey(task), task]));
     const roots = tasks
       .filter((task) => !parentKeyFor(task) || !byKey.has(parentKeyFor(task)))
@@ -238,13 +246,13 @@ export function listActiveTaskMindMapRoots(taskStore: TaskStore): TaskMindMapRoo
 }
 
 export function renderTaskMindMapRootList(roots: TaskMindMapRootSummary[]): string {
-  if (!roots.length) return "No queued or running DAG roots.";
+  if (!roots.length) return "No recent DAG roots.";
   const lines = ["DAG Roots", ""];
   roots.forEach((root, index) => {
-    const rootLabels = root.roots.map((node) => `${node.key}:${node.status}`).join(", ") || "(none)";
+    const rootLabels = root.roots.map((node) => `${node.key}:${statusLabel(node.status)}`).join(", ") || "(none)";
     lines.push(`${index + 1}. ${root.rootId}`);
-    lines.push(`   graph: ${root.graphId} | run: ${root.runStatus} | graph: ${root.graphStatus}`);
-    lines.push(`   active: ${root.running} running, ${root.queued} queued, ${root.pending} pending/blocked | editable: ${root.editable}`);
+    lines.push(`   graph: ${root.graphId} | run: ${runStatusLabel(root.runStatus)} | graph: ${graphStatusLabel(root.graphStatus)}`);
+    lines.push(`   active: ${root.running} 进行中, ${root.queued} 排队中, ${root.pending} 未开始/阻塞 | editable: ${root.editable}`);
     lines.push(`   roots: ${rootLabels}`);
     lines.push(`   goal: ${root.goal}`);
   });
@@ -266,7 +274,7 @@ export function renderTaskMindMap(map: TaskMindMap): string {
   if (map.dependencies.length) {
     lines.push("", "Execution dependencies:");
     for (const edge of map.dependencies) {
-      lines.push(`  ${edge.toKey} <- ${edge.fromKey} (${edge.dependencyType}, ${edge.status})`);
+      lines.push(`  ${edge.toKey} <- ${edge.fromKey} (${edge.dependencyType}, ${statusLabel(edge.status)})`);
     }
   }
   return lines.join("\n");
@@ -276,12 +284,12 @@ export function renderTaskMindMapNode(node: TaskMindMapNode): string {
   const lines = [
     `Task Node: ${node.key}`,
     `Task: ${node.id}`,
-    `Status: ${node.status}${node.editable ? " (editable)" : ""}`,
+    `Status: ${statusLabel(node.status)}${node.editable ? " (editable)" : ""}`,
     `Role: ${node.role}`,
     `Title: ${node.title}`,
     `Parent: ${node.parentKey || "(root)"}`,
     `Children: ${node.children.length ? node.children.join(", ") : "(none)"}`,
-    `Depends on: ${node.dependencies.length ? node.dependencies.map((edge) => `${edge.fromKey} (${edge.dependencyType}, ${edge.status})`).join(", ") : "(none)"}`,
+    `Depends on: ${node.dependencies.length ? node.dependencies.map((edge) => `${edge.fromKey} (${edge.dependencyType}, ${statusLabel(edge.status)})`).join(", ") : "(none)"}`,
     `Dependents: ${node.dependents.length ? node.dependents.map((edge) => edge.toKey).join(", ") : "(none)"}`,
     `Updated: ${node.updatedAt}`,
     "",
@@ -571,12 +579,77 @@ export function resolveNode(map: TaskMindMap, selector: string): TaskMindMapNode
 
 function renderNode(lines: string[], node: TaskMindMapNode, byKey: Map<string, TaskMindMapNode>, prefix: string, last: boolean): void {
   const connector = prefix ? (last ? "`- " : "+- ") : "";
-  lines.push(`${prefix}${connector}${statusGlyph(node.status)} ${node.key} [${node.status}] ${node.role} - ${node.title}${node.editable ? " *" : ""}`);
+  lines.push(`${prefix}${connector}${statusGlyph(node.status)} ${node.key} ${node.role} - ${node.title} · ${statusLabel(node.status)}${node.editable ? " *" : ""}`);
   const nextPrefix = prefix ? `${prefix}${last ? "   " : "|  "}` : "";
   node.children.forEach((childKey, index) => {
     const child = byKey.get(childKey);
     if (child) renderNode(lines, child, byKey, nextPrefix, index === node.children.length - 1);
   });
+}
+
+export function statusLabel(status: TaskStatus | string): string {
+  switch (status) {
+    case "pending":
+      return "未开始";
+    case "queued":
+      return "排队中";
+    case "running":
+      return "进行中";
+    case "blocked":
+      return "已阻塞";
+    case "needs_inspection":
+      return "待检查";
+    case "done":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    case "dead_letter":
+      return "死信";
+    default:
+      return String(status || "未知");
+  }
+}
+
+function runStatusLabel(status: string): string {
+  switch (status) {
+    case "running":
+      return "进行中";
+    case "reviewing":
+      return "评审中";
+    case "recovering":
+      return "恢复中";
+    case "partially_done":
+      return "部分完成";
+    case "waiting_user":
+      return "等待输入";
+    case "done":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "blocked":
+      return "已阻塞";
+    case "cancelled":
+      return "已取消";
+    default:
+      return status || "未知";
+  }
+}
+
+function graphStatusLabel(status: string): string {
+  switch (status) {
+    case "pending":
+      return "未开始";
+    case "running":
+      return "进行中";
+    case "done":
+      return "已完成";
+    case "failed":
+      return "失败";
+    default:
+      return status || "未知";
+  }
 }
 
 function statusGlyph(status: TaskStatus): string {

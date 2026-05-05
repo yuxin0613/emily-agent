@@ -1,6 +1,7 @@
 import readline from "node:readline/promises";
 import { emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
+import { statusLabel } from "../tasks/TaskMindMap.ts";
 
 const ANSI = {
   reset: "\x1b[0m",
@@ -68,7 +69,7 @@ const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
     ["/roles", "list roles"],
     ["/tools", "list tools"],
     ["/skills", "list skills"],
-    ["/dag list", "list active DAG roots"],
+    ["/dag list", "list recent DAG roots"],
     ["/dag <root_id>", "open interactive DAG editor"],
     ["/graph [runId]", "show task mind map"],
     ["/node <key> [runId]", "inspect a mind-map node"],
@@ -593,7 +594,7 @@ async function rejectSkill(runtime, args: string[]): Promise<void> {
 
 async function handleDagCommand(runtime, state, args: string[], rl?: readline.Interface): Promise<void> {
   if (!args[0] || args[0] === "list") {
-    printText(await runtime.runCommand("dag.list", { format: "text" }));
+    printText(await runtime.runCommand("dag.list", { args: args.slice(args[0] === "list" ? 1 : 0), format: "text" }));
     return;
   }
   const runId = await resolveDagRunId(runtime, args[0]);
@@ -863,12 +864,12 @@ export function formatDagEditorView(map, selectedIndex = 0, message = "", width 
     const marker = selected ? ">" : " ";
     const indentText = "  ".repeat(row.depth);
     const editMark = row.editable ? "*" : " ";
-    lines.push(`${marker} ${String(row.index).padStart(2, " ")} ${indentText}${editMark} ${row.key} [${row.status}] ${row.role} - ${truncate(row.title, Math.max(24, width - 34 - row.depth * 2))}`);
+    lines.push(`${marker} ${String(row.index).padStart(2, " ")} ${indentText}${editMark} ${row.key} ${row.role} - ${truncate(row.title, Math.max(24, width - 40 - row.depth * 2))} · ${statusLabel(row.status)}`);
   }
   const selected = rows[selectedIndex];
   lines.push("");
   if (selected) {
-    lines.push(`Selected: ${selected.index}. ${selected.key} (${selected.status}) ${selected.editable ? "editable" : "locked"}`);
+    lines.push(`Selected: ${selected.index}. ${selected.key} (${statusLabel(selected.status)}) ${selected.editable ? "可编辑" : "已锁定"}`);
     lines.push(`Task: ${selected.taskId}`);
   }
   if (message) {

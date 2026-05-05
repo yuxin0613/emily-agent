@@ -130,7 +130,7 @@ interface CommandRuntime {
   renderTimeline: (runId: string) => string;
   getTaskTrace: (taskId: string) => unknown;
   getTaskMindMap: (runId: string) => unknown;
-  listTaskMindMapRoots: () => unknown;
+  listTaskMindMapRoots: (options?: { activeOnly?: boolean; limit?: number }) => unknown;
   getTaskMindMapNode: (runId: string, selector: string) => unknown;
   addTaskMindMapNode: (input: TaskGraphNodeAddInput) => unknown;
   addTaskMindMapNodeBefore: (input: TaskGraphNodeSiblingInput) => unknown;
@@ -528,13 +528,21 @@ function graphCommands(runtime: CommandRuntime): RuntimeCommand[] {
     {
       name: "dag.list",
       aliases: ["dag.roots", "graph.roots"],
-      description: "List queued or running DAG roots.",
+      description: "List recent DAG roots, including queued/running roots.",
       permission: "read",
       inputSchema: {
-        args: [],
-        examples: ["dag.list"],
+        args: ["[active|all]", "[limit]"],
+        examples: ["dag.list", "dag.list active", "dag.list all 20"],
       },
-      run: () => runtime.listTaskMindMapRoots(),
+      run: ({ args, input }) => {
+        const mode = stringOptional(input.mode) || args[0] || "";
+        const activeOnly = input.activeOnly === true || mode === "active" || mode === "running";
+        const limitArg = mode === "active" || mode === "all" || mode === "recent" || mode === "running" ? args[1] : args[0];
+        return runtime.listTaskMindMapRoots({
+          activeOnly,
+          limit: numberInput(input.limit, limitArg, 20),
+        });
+      },
       renderText: (result) => renderTaskMindMapRootList(result as Parameters<typeof renderTaskMindMapRootList>[0]),
     },
     {
