@@ -49,28 +49,28 @@ type TuiHelpSection = [string, string[][]];
 const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ["Chat", [
     ["type anything", "send a message to the current session"],
-    [":help", "show common commands"],
-    [":help all", "show every advanced command"],
+    ["/help", "show common commands"],
+    ["/help all", "show every advanced command"],
     ["/new [title]", "create a new visible session"],
     ["/clear", "hide current session and create a new one"],
-    [":status", "show current TUI/runtime status"],
-    [":mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
+    ["/status", "show current TUI/runtime status"],
+    ["/mode [mode]", "show or set read_only, workspace_write, danger_full_access"],
   ]],
   ["Sessions", [
-    [":sessions [all|hidden|trash]", "list sessions"],
-    [":messages [limit]", "show current session messages"],
-    [":resume latest [hidden]", "resume latest session"],
-    [":export-session <id> [md]", "export session"],
+    ["/sessions [all|hidden|trash]", "list sessions"],
+    ["/messages [limit]", "show current session messages"],
+    ["/resume latest [hidden]", "resume latest session"],
+    ["/export-session <id> [md]", "export session"],
   ]],
   ["Inspect", [
-    [":providers", "list providers"],
-    [":roles", "list roles"],
-    [":tools", "list tools"],
-    [":skills", "list skills"],
-    [":timeline [runId]", "show the latest or selected run timeline"],
+    ["/providers", "list providers"],
+    ["/roles", "list roles"],
+    ["/tools", "list tools"],
+    ["/skills", "list skills"],
+    ["/timeline [runId]", "show the latest or selected run timeline"],
   ]],
   ["Shell", [
-    [":clear-screen", "redraw the TUI"],
+    ["/clear-screen", "redraw the TUI"],
     ["exit", "quit"],
   ]],
 ];
@@ -78,37 +78,37 @@ const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
 const TUI_ADVANCED_HELP_SECTIONS: TuiHelpSection[] = [
   ...TUI_COMMON_HELP_SECTIONS.filter(([section]) => section !== "Shell"),
   ["Runtime", [
-    [":health", "runtime health"],
-    [":doctor [deep|repair]", "aggregated runtime doctor"],
-    [":diagnostics [repair]", "runtime diagnostics"],
-    [":maintenance", "run maintenance"],
-    [":commands", "list command registry entries"],
+    ["/health", "runtime health"],
+    ["/doctor [deep|repair]", "aggregated runtime doctor"],
+    ["/diagnostics [repair]", "runtime diagnostics"],
+    ["/maintenance", "run maintenance"],
+    ["/commands", "list command registry entries"],
   ]],
   ["Sessions Advanced", [
-    [":session <id>", "switch session"],
-    [":compact-preview <id> [n]", "preview session compaction"],
-    [":session-usage <id>", "provider usage for a session"],
-    [":restore-session <id>", "restore hidden or trashed session"],
-    [":trash-session <id>", "move session to trash"],
+    ["/session <id>", "switch session"],
+    ["/compact-preview <id> [n]", "preview session compaction"],
+    ["/session-usage <id>", "provider usage for a session"],
+    ["/restore-session <id>", "restore hidden or trashed session"],
+    ["/trash-session <id>", "move session to trash"],
   ]],
   ["Work Advanced", [
-    [":trace <taskId>", "show task trace"],
-    [":experiences [query]", "list or search experiences"],
+    ["/trace <taskId>", "show task trace"],
+    ["/experiences [query]", "list or search experiences"],
   ]],
   ["Skills And Cron", [
-    [":candidates [status]", "list skill candidates"],
-    [":build-skills", "build skill candidates"],
-    [":approve-skill <id> [reason]", "approve proposed skill"],
-    [":reject-skill <id> [reason]", "reject proposed skill"],
-    [":cron", "list cron jobs"],
-    [":cron-add <name> <cron> <msg>", "schedule a chat cron job"],
-    [":cron-pause <id>", "pause a cron job"],
-    [":cron-resume <id>", "resume a cron job"],
-    [":cron-run <id>", "run a cron job now"],
-    [":cron-delete <id>", "delete a cron job"],
+    ["/candidates [status]", "list skill candidates"],
+    ["/build-skills", "build skill candidates"],
+    ["/approve-skill <id> [reason]", "approve proposed skill"],
+    ["/reject-skill <id> [reason]", "reject proposed skill"],
+    ["/cron", "list cron jobs"],
+    ["/cron-add <name> <cron> <msg>", "schedule a chat cron job"],
+    ["/cron-pause <id>", "pause a cron job"],
+    ["/cron-resume <id>", "resume a cron job"],
+    ["/cron-run <id>", "run a cron job now"],
+    ["/cron-delete <id>", "delete a cron job"],
   ]],
   ["Shell", [
-    [":clear-screen", "redraw the TUI"],
+    ["/clear-screen", "redraw the TUI"],
     ["exit", "quit"],
   ]],
 ];
@@ -771,7 +771,7 @@ export function formatTuiHelp(mode: TuiHelpMode = "common"): string {
   const sections = mode === "all" ? TUI_ADVANCED_HELP_SECTIONS : TUI_COMMON_HELP_SECTIONS;
   const lines = [
     mode === "all" ? "Commands" : "Common Commands",
-    mode === "all" ? "Most commands require an existing session, run id, task id, or cron id." : "Use :help all to show advanced runtime, task, skill, and cron commands.",
+    mode === "all" ? "Most commands require an existing session, run id, task id, or cron id." : "Use /help all to show advanced runtime, task, skill, and cron commands.",
   ];
   for (const [section, rows] of sections) {
     lines.push("", `  ${section}`);
@@ -798,7 +798,7 @@ export function formatTuiCommandHints(prefix = "/", query = ""): string {
   const width = Math.max(...visibleRows.map(([command]) => command.length));
   const lines = [
     normalizedQuery ? `Command hints for ${normalizedPrefix}${normalizedQuery}` : "Command hints",
-    normalizedQuery ? "Type :help all for every command." : "Type :help all for advanced commands.",
+    normalizedQuery ? "Type /help all for every command." : "Type /help all for advanced commands.",
     "",
   ];
   for (const [command, description] of visibleRows) {

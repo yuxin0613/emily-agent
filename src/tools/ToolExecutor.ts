@@ -16,6 +16,7 @@ import { createDefaultToolRegistry, type ToolRegistry } from "./ToolRegistry.ts"
 import type { ToolDefinition } from "../types.ts";
 
 const execFileAsync = promisify(execFile);
+const DEFAULT_TOOL_CALL_TIMEOUT_MS = 3600 * 1000;
 
 export interface ToolExecutionRequest {
   tool: string;
@@ -85,19 +86,23 @@ export class ToolExecutor {
   workspaceDir: string;
   taskStore: TaskStore | null;
   registry: ToolRegistry;
+  toolCallTimeoutMs: number;
 
   constructor({
     workspaceDir = process.cwd(),
     taskStore = null,
     registry = createDefaultToolRegistry(),
+    toolCallTimeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS,
   }: {
     workspaceDir?: string;
     taskStore?: TaskStore | null;
     registry?: ToolRegistry;
+    toolCallTimeoutMs?: number;
   } = {}) {
     this.workspaceDir = path.resolve(workspaceDir);
     this.taskStore = taskStore;
     this.registry = registry;
+    this.toolCallTimeoutMs = normalizeToolCallTimeoutMs(toolCallTimeoutMs);
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -116,12 +121,17 @@ export class ToolExecutor {
       startedEventId = this.addEvent("tool.execution.started", request, {
         tool: definition.name,
         permissionMode,
+        timeoutMs: this.toolCallTimeoutMs,
         requiresApproval: definition.requiresApproval,
         approvalTemplate: approvalRequirement.template || "",
         args: summarizeArgs(request.args || {}),
       });
       this.assertApproved(approvalRequirement, request);
-      const output = await this.executeAllowed(definition.name, request.args || {}, request);
+      const output = await withToolCallTimeout(
+        () => this.executeAllowed(definition.name, request.args || {}, request),
+        this.toolCallTimeoutMs,
+        definition.name,
+      );
       const result: ToolExecutionResult = {
         tool: definition.name,
         ok: true,
@@ -135,6 +145,7 @@ export class ToolExecutor {
         tool: definition.name,
         ok: true,
         durationMs: result.durationMs,
+        timeoutMs: this.toolCallTimeoutMs,
         startedEventId,
         output: summarizeOutput(output),
       });
@@ -163,6 +174,8 @@ export class ToolExecutor {
         tool: failedDefinition?.name || String(request.tool),
         ok: false,
         durationMs: result.durationMs,
+        timeoutMs: this.toolCallTimeoutMs,
+        timedOut: error instanceof ToolCallTimeoutError,
         startedEventId,
         error: result.error,
       });
@@ -682,6 +695,34 @@ function parseSafeTestCommand(input: unknown): string[] {
   if (command[0] === "npm" && command[1] === "run" && (command[2] === "check" || command[2] === "test") && command.length === 3) return command;
   if (command[0] === "node" && /^test\/[A-Za-z0-9._/-]+\.test\.ts$/.test(command[1] || "") && command.length === 2) return command;
   throw new Error(`run_tests only allows npm test, npm run check/test, or node test/*.test.ts. Received: ${command.join(" ")}`);
+}
+
+class ToolCallTimeoutError extends Error {
+  constructor(tool: string, timeoutMs: number) {
+    super(`Tool ${tool} timed out after ${timeoutMs}ms.`);
+    this.name = "ToolCallTimeoutError";
+  }
+}
+
+async function withToolCallTimeout<T>(operation: () => Promise<T>, timeoutMs: number, tool: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new ToolCallTimeoutError(tool, timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function normalizeToolCallTimeoutMs(value: number): number {
+  if (!Number.isFinite(value) || value < 1 || value > 24 * 60 * 60 * 1000) {
+    throw new Error("toolCallTimeoutMs must be between 1 and 86400000.");
+  }
+  return Math.round(value);
 }
 
 function parseHttpUrl(input: string): URL {

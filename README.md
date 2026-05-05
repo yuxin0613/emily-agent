@@ -154,21 +154,21 @@ Typical flow:
 2. Press Enter to send.
 3. If the runtime is waiting on a model call, the TUI shows an animated `┊ thinking...` line.
 4. Plain chat stays conversational; task-like requests can still invoke planner/subagent execution.
-5. Use `/help` or `:help` for common commands, `:help all` for advanced commands, and `exit` or `quit` to leave.
+5. Use `/help` for common commands, `/help all` for advanced commands, and `exit` or `quit` to leave.
 
 Useful TUI commands:
 
 | Command | Purpose |
 | --- | --- |
-| `:help all` | Show advanced runtime, task, skill, and cron commands. |
+| `/help all` | Show advanced runtime, task, skill, and cron commands. |
 | `/new [title]` | Start a new visible session. |
 | `/clear` | Hide the current session and create a fresh one. |
-| `:status` | Show current session/runtime status. |
-| `:providers` | List configured providers. |
-| `:tools` | List available tools. |
-| `:skills` | List available skills. |
-| `:timeline [runId]` | Inspect the latest or selected run timeline. |
-| `:mode [mode]` | Show or set permission mode. |
+| `/status` | Show current session/runtime status. |
+| `/providers` | List configured providers. |
+| `/tools` | List available tools. |
+| `/skills` | List available skills. |
+| `/timeline [runId]` | Inspect the latest or selected run timeline. |
+| `/mode [mode]` | Show or set permission mode. |
 
 ## Model Setup
 
@@ -215,6 +215,23 @@ Runtime state lives under `.emily/` by default:
   memory/
     events.jsonl
     vector-index.json
+```
+
+Runtime settings in `.emily/config.json`:
+
+| Key | Purpose |
+| --- | --- |
+| `toolCallTimeoutSeconds` | Maximum time to wait for any single tool execution before returning a failed tool result. Default: `3600`. |
+
+Example:
+
+```json
+{
+  "defaultProviderId": "main-deepseek",
+  "fallbackMode": "strict",
+  "toolCallTimeoutSeconds": 3600,
+  "providers": []
+}
 ```
 
 Useful environment variables:
@@ -498,10 +515,10 @@ TUI commands:
 
 - `/new`: create a new session;
 - `/clear`: create a new session and hide the old one;
-- `:resume latest`: resume the latest visible session;
-- `:export-session <id>`: export a session;
-- `:compact-preview <id>`: preview compaction;
-- `:session-usage <id>`: inspect usage.
+- `/resume latest`: resume the latest visible session;
+- `/export-session <id>`: export a session;
+- `/compact-preview <id>`: preview compaction;
+- `/session-usage <id>`: inspect usage.
 
 Hidden or trashed sessions are not implicitly reactivated. Restores are explicit. Trash lifecycle supports delayed deletion.
 
