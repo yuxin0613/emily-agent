@@ -193,6 +193,8 @@ Useful TUI commands:
 
 While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/sub`, `/status`, and `/timeline` run immediately. A normal chat/task message is added to the main-agent context queue and runs after the current main-agent turn finishes, so the main agent does not process multiple user contexts at the same time. The home panel includes a Run Log column showing recent subagent, task, graph, anomaly, and tool execution events.
 
+Planning-only requests are supported. A message such as `帮我规划一个 Todo 应用 POC，不要立即实现` is enough; users do not need to spell out “需求范围、数据模型、CLI 命令、持久化、验证” in the prompt. The main agent treats that as a plan-only task, asks the planner to work backward from the desired result, creates an editable DAG with module nodes and executable leaves, and leaves implementation tasks pending until the user explicitly starts or edits them.
+
 ## Model Setup
 
 Run:

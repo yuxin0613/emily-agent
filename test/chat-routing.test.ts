@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
-import { classifyUserMessageIntent } from "../src/agents/MainAgent.ts";
+import { classifyUserMessageIntent, isPlanningOnlyRequest } from "../src/agents/MainAgent.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-chat-routing-"));
 const runtime = await createRuntime({ dataDir });
@@ -12,6 +12,9 @@ try {
   assert.equal(classifyUserMessageIntent("测试消息"), "chat");
   assert.equal(classifyUserMessageIntent("你好"), "chat");
   assert.equal(classifyUserMessageIntent("帮我测试这个接口"), "task");
+  assert.equal(classifyUserMessageIntent("帮我规划一个 Todo 应用，不要立即实现"), "task");
+  assert.equal(isPlanningOnlyRequest("帮我规划一个 Todo 应用 POC，不要立即实现"), true);
+  assert.equal(isPlanningOnlyRequest("帮我做一个 Todo 应用 POC"), false);
 
   const response = await runtime.handleUserMessage("测试消息", {
     sessionId: "chat-routing",
