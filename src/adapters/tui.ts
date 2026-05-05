@@ -54,6 +54,8 @@ const BUSY_SAFE_COMMANDS = new Set([
   "messages",
   "commands",
 ]);
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 
 type TuiHelpMode = "common" | "all";
 type TuiHelpSection = [string, string[][]];
@@ -178,6 +180,7 @@ export async function startTui({ runtime }) {
 }
 
 async function readPromptLine(rl: readline.Interface, state: TuiState): Promise<string | null> {
+  if (input.isTTY && output.isTTY) return readRawPromptLine(rl, state);
   try {
     focusInputLine();
     const answer = await rl.question(promptFor(state));
@@ -188,6 +191,48 @@ async function readPromptLine(rl: readline.Interface, state: TuiState): Promise<
     output.write("\n");
     return null;
   }
+}
+
+function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<string | null> {
+  return new Promise((resolve) => {
+    let closed = false;
+    let buffer = "";
+    const restoreInput = enterRawPromptMode(rl);
+    const finish = (value: string | null) => {
+      if (closed) return;
+      closed = true;
+      input.off("data", onData);
+      clearPromptLine();
+      restoreInput();
+      resolve(value);
+    };
+    const render = () => {
+      if (!closed) renderPromptLine(state, buffer);
+    };
+    const decoder = createPromptInputDecoder({
+      appendText(text) {
+        buffer += normalizePastedText(text);
+        render();
+      },
+      backspace() {
+        buffer = removeLastChar(buffer);
+        render();
+      },
+      submit() {
+        finish(buffer);
+      },
+      abort() {
+        output.write("\n");
+        finish(null);
+      },
+      isClosed() {
+        return closed;
+      },
+    });
+    const onData = (chunk: Buffer) => decoder(chunk);
+    input.on("data", onData);
+    render();
+  });
 }
 
 export function isTuiAbortError(error: unknown): boolean {
@@ -237,6 +282,110 @@ function focusInputLine(): void {
   output.write("\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   cursorTo(output, 0);
   clearLine(output, 0);
+}
+
+function clearPromptLine(): void {
+  if (!output.isTTY) return;
+  cursorTo(output, 0);
+  clearLine(output, 0);
+}
+
+function renderPromptLine(state: TuiState, buffer = ""): void {
+  focusInputLine();
+  const prompt = promptFor(state);
+  output.write(`${prompt}${formatPromptBufferPreview(buffer, terminalWidth() - visibleLength(prompt) - 1)}`);
+}
+
+function formatPromptBufferPreview(buffer: string, width: number): string {
+  const normalized = normalizePastedText(buffer).replace(/\n/g, "\\n");
+  return truncate(normalized, Math.max(8, width));
+}
+
+function enterRawPromptMode(rl: readline.Interface): () => void {
+  rl.pause();
+  if (output.isTTY) output.write("\x1b[?2004h");
+  input.setRawMode?.(true);
+  input.resume();
+  return () => {
+    if (output.isTTY) output.write("\x1b[?2004l");
+    input.setRawMode?.(false);
+    input.pause();
+    rl.resume();
+  };
+}
+
+function createPromptInputDecoder(handlers: {
+  appendText: (text: string) => void;
+  backspace: () => void;
+  submit: () => void;
+  abort: () => void;
+  isClosed: () => boolean;
+}): (chunk: Buffer | string) => void {
+  let pasteMode = false;
+  let pending = "";
+  return (chunk: Buffer | string) => {
+    let text = pending + chunk.toString();
+    pending = "";
+    while (text && !handlers.isClosed()) {
+      if (text === "\x1b" || BRACKETED_PASTE_START.startsWith(text) || BRACKETED_PASTE_END.startsWith(text)) {
+        pending = text;
+        return;
+      }
+      if (text.startsWith(BRACKETED_PASTE_START)) {
+        pasteMode = true;
+        text = text.slice(BRACKETED_PASTE_START.length);
+        continue;
+      }
+      if (text.startsWith(BRACKETED_PASTE_END)) {
+        pasteMode = false;
+        text = text.slice(BRACKETED_PASTE_END.length);
+        continue;
+      }
+      if (pasteMode) {
+        const endIndex = text.indexOf(BRACKETED_PASTE_END);
+        const pasted = endIndex >= 0 ? text.slice(0, endIndex) : text;
+        if (pasted) handlers.appendText(pasted);
+        text = endIndex >= 0 ? text.slice(endIndex) : "";
+        continue;
+      }
+      if (text.startsWith("\x1b")) {
+        const escapeSequence = text.match(/^\x1b\[[0-9;?]*[A-Za-z~]/)?.[0] || text.slice(0, 1);
+        text = text.slice(escapeSequence.length);
+        continue;
+      }
+      const char = [...text][0] || "";
+      text = text.slice(char.length);
+      if (char === "\x03") {
+        handlers.abort();
+        continue;
+      }
+      if (char === "\x04") {
+        handlers.abort();
+        continue;
+      }
+      if (char === "\r" || char === "\n") {
+        handlers.submit();
+        continue;
+      }
+      if (char === "\x7f" || char === "\b") {
+        handlers.backspace();
+        continue;
+      }
+      if (char === "\t" || char >= " ") {
+        handlers.appendText(char);
+      }
+    }
+  };
+}
+
+function normalizePastedText(value: string): string {
+  return String(value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function removeLastChar(value: string): string {
+  const chars = [...value];
+  chars.pop();
+  return chars.join("");
 }
 
 function isCommand(message: string): boolean {
@@ -484,24 +633,25 @@ function attachBusyInputReader(
 ): { detach: () => Promise<string[]>; writeReadyPrompt: () => void; clearReadyPrompt: () => void } {
   let closed = false;
   let promptVisible = false;
+  let buffer = "";
   const queuedMessages: string[] = [];
   const pending = new Set<Promise<void>>();
+  const restoreInput = enterRawPromptMode(rl);
   const writeReadyPrompt = () => {
     if (closed) return;
-    focusInputLine();
-    output.write(promptFor(state));
+    renderPromptLine(state, buffer);
     promptVisible = true;
   };
   const clearReadyPrompt = () => {
     if (!promptVisible || !output.isTTY) return;
-    cursorTo(output, 0);
-    clearLine(output, 0);
+    clearPromptLine();
     promptVisible = false;
   };
-  const onLine = (line: string) => {
+  const submitBuffer = () => {
     if (closed) return;
-    const message = line.trim();
-    clearSubmittedPromptLine();
+    const message = buffer.trim();
+    buffer = "";
+    clearReadyPrompt();
     promptVisible = false;
     if (!message) {
       writeReadyPrompt();
@@ -523,15 +673,36 @@ function attachBusyInputReader(
       });
     pending.add(task);
   };
-  rl.on("line", onLine);
+  const decoder = createPromptInputDecoder({
+    appendText(text) {
+      buffer += normalizePastedText(text);
+      writeReadyPrompt();
+    },
+    backspace() {
+      buffer = removeLastChar(buffer);
+      writeReadyPrompt();
+    },
+    submit: submitBuffer,
+    abort() {
+      output.write("\n");
+      closed = true;
+    },
+    isClosed() {
+      return closed;
+    },
+  });
+  const onData = (chunk: Buffer) => decoder(chunk);
+  input.on("data", onData);
   writeReadyPrompt();
   return {
     writeReadyPrompt,
     clearReadyPrompt,
     async detach() {
       closed = true;
-      rl.off("line", onLine);
+      input.off("data", onData);
       await Promise.allSettled([...pending]);
+      clearReadyPrompt();
+      restoreInput();
       return queuedMessages;
     },
   };

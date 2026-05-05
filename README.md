@@ -165,6 +165,8 @@ The home screen is a live runtime dashboard, not a static banner:
 | `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. When idle it shows a waiting hint. |
 | Status bar | Current provider model and provider id, current TUI session id, pending/running task counts, and open graph count. Values change as provider configuration, sessions, and runtime state change. |
 
+The prompt line is the only input target. The TUI enables bracketed paste in capable terminals, keeps pasted content in the bottom prompt buffer, previews pasted newlines as `\n`, and submits the message only when Enter is pressed.
+
 Useful TUI commands:
 
 | Command | Purpose |
