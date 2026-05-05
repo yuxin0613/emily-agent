@@ -169,12 +169,44 @@ If you omit the delivery level for an obvious long task, AgentOS may pause and a
 The runtime will:
 
 1. create a run;
-2. create an initial task graph;
+2. create an initial task graph shaped like a mind map;
 3. execute ready tasks by role;
 4. dynamically expand tasks when more detail is needed;
 5. replan failed branches when possible;
 6. review results;
 7. summarize the outcome.
+
+Task graphs separate two ideas:
+
+- `parentKey` is the decomposition relationship: goal -> module -> slice -> executable leaf.
+- `dependsOn` is the execution relationship: a task waits for another task to finish or succeed.
+
+Inspect the active graph from the TUI:
+
+```text
+/dag list
+/dag <root_id>
+/graph
+/node architecture
+```
+
+`/dag <root_id>` opens the interactive DAG editor. Use up/down arrows to select a task node. Editor commands start with `:`:
+
+```text
+:add_before prepare the inputs before this task
+:add_after verify the output after this task
+:update replace the selected task instructions
+:del
+```
+
+Trusted write clients can add or edit branches before they execute:
+
+```text
+/graph-add architecture api_slice developer "API slice"
+/graph-update api_slice input "Implement only the API leaf slice."
+```
+
+Running and completed nodes are locked for graph editing.
 
 ## 6. Understand Roles
 

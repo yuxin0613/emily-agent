@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
+import { flattenDagEditorNodes, formatDagEditorView, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -23,6 +23,10 @@ const tuiHelp = formatTuiHelp();
 assert.match(tuiHelp, /\/mode \[mode\]/);
 assert.match(tuiHelp, /\/status/);
 assert.match(tuiHelp, /\/timeline \[runId\]/);
+assert.match(tuiHelp, /\/graph \[runId\]/);
+assert.match(tuiHelp, /\/dag list/);
+assert.match(tuiHelp, /\/dag <root_id>/);
+assert.match(tuiHelp, /\/node <key> \[runId\]/);
 assert.match(tuiHelp, /\/help all/);
 assert.doesNotMatch(tuiHelp, /:status/);
 assert.doesNotMatch(tuiHelp, /\/cron-pause/);
@@ -33,6 +37,12 @@ assert.match(allTuiHelp, /\/cron-pause <id>/);
 assert.match(allTuiHelp, /\/cron-resume <id>/);
 assert.match(allTuiHelp, /\/cron-run <id>/);
 assert.match(allTuiHelp, /\/cron-delete <id>/);
+assert.match(allTuiHelp, /\/graph-add <parent> <key> <role> <title>/);
+assert.match(allTuiHelp, /\/graph-update <key> <field> <value>/);
+assert.match(allTuiHelp, /:add_before <text>/);
+assert.match(allTuiHelp, /:add_after <text>/);
+assert.match(allTuiHelp, /:update <text>/);
+assert.match(allTuiHelp, /:del/);
 assert.doesNotMatch(allTuiHelp, /cron-pause\|resume/);
 assert.doesNotMatch(allTuiHelp, /:cron-pause/);
 const slashHints = formatTuiCommandHints("/");
@@ -73,6 +83,24 @@ assert.equal(isTuiAbortError(Object.assign(new Error("Aborted with Ctrl+C"), {
   code: "ABORT_ERR",
 })), true);
 assert.equal(isTuiAbortError(new Error("regular failure")), false);
+
+const dagMap = {
+  runId: "run_dag",
+  goal: "Build a DAG editor",
+  roots: ["scope"],
+  nodes: [
+    { key: "scope", id: "task_scope", role: "researcher", status: "done", title: "Scope", input: "scope", editable: false, children: ["implementation"] },
+    { key: "implementation", id: "task_impl", role: "developer", status: "pending", title: "Implement", input: "implement", editable: true, children: [] },
+  ],
+};
+const dagRows = flattenDagEditorNodes(dagMap);
+assert.equal(dagRows.length, 2);
+assert.equal(dagRows[1].depth, 1);
+const dagView = formatDagEditorView(dagMap, 1, "ready", 100);
+assert.match(dagView, /DAG run_dag/);
+assert.match(dagView, />  2/);
+assert.match(dagView, /:add_before\/:add_after\/:update\/:del/);
+assert.match(dagView, /ready/);
 
 const cliHelp = await execFileAsync(process.execPath, ["src/index.ts", "--help"], {
   cwd: process.cwd(),

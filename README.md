@@ -22,7 +22,7 @@ Emily AgentOS is that substrate. It is not only a chat app; it is a base runtime
 ## Highlights
 
 - **Main agent + role subagents**: main agent handles the user, planning, delegation, recovery, and final summaries; subagents run as independent worker processes.
-- **Adaptive task graph**: `PlanSpec` creates the initial DAG, `GraphPatchSpec` adds dynamic tasks as work completes, and the executor tracks dependencies, waves, retries, and exit criteria.
+- **Adaptive task graph**: `PlanSpec` creates a mind-map-like DAG from coarse goals to executable leaves, `GraphPatchSpec` expands nodes as work completes, and the executor tracks dependencies, waves, retries, and exit criteria.
 - **Long task support**: result-oriented requests can require a delivery level such as `poc`, `uat`, or `production` before execution starts.
 - **Hermes-inspired TUI flow**: the terminal UI uses a transcript/composer layout with compact prompt glyphs, live thinking feedback, and command hints.
 - **Interactive model setup**: `emily model` supports keyboard navigation, provider templates, default base URLs, API-key environment storage, model discovery, custom models, and role-specific overrides.
@@ -168,6 +168,12 @@ Useful TUI commands:
 | `/tools` | List available tools. |
 | `/skills` | List available skills. |
 | `/timeline [runId]` | Inspect the latest or selected run timeline. |
+| `/dag list` | List queued or running DAG roots. |
+| `/dag <root_id>` | Open the interactive DAG editor for one root. |
+| `/graph [runId]` | Render the task DAG as a mind-map tree. |
+| `/node <key> [runId]` | Inspect one task node by graph key or task id. |
+| `/graph-add <parent> <key> <role> <title>` | Add a child node under an unexecuted branch. |
+| `/graph-update <key> <field> <value>` | Edit an unexecuted node field such as `title`, `input`, `role`, or `dependsOn`. |
 | `/mode [mode]` | Show or set permission mode. |
 
 ## Model Setup
@@ -332,10 +338,34 @@ Core concepts:
 - `run`: one user request.
 - `task`: one role-owned unit of work.
 - `task_graph`: DAG for a run.
-- `task_dependencies`: dependency edges between tasks.
-- `PlanSpec`: initial structured plan.
-- `GraphPatchSpec`: dynamic graph update emitted while the graph is running.
+- `parentKey`: decomposition edge for the mind-map hierarchy, from goal to module to slice to leaf task.
+- `task_dependencies`: execution dependency edges between tasks.
+- `PlanSpec`: initial structured plan, usually coarse for large work.
+- `GraphPatchSpec`: dynamic graph update emitted while the graph is running, used to expand a parent node one level finer.
 - `TaskGraphExecutor`: executes ready tasks, expands rolling graph nodes, replans failed branches, and finalizes run state.
+
+The DAG deliberately separates two relationships:
+
+- **Decomposition** uses `parentKey`. This is the product-thinking shape of the graph: start broad, then refine into smaller branches.
+- **Execution gating** uses `dependsOn`. This controls when a node is allowed to run, and supports `success` or `finished` dependency semantics.
+
+The graph is inspectable while a run is active. `dag.list` shows active roots, `graph.view` renders the parent/child decomposition as a text mind map, `graph.node` shows one node with dependencies and children, and `graph.add`/`graph.add_before`/`graph.add_after`/`graph.update`/`graph.delete` allow the main runtime or trusted clients to adjust branches that have not executed yet. Running and completed nodes are immutable through these graph-edit commands.
+
+The TUI also has an interactive DAG editor:
+
+```text
+/dag list
+/dag <root_id>
+```
+
+Inside the editor, use the up/down arrows to select a task node. Commands start with `:`:
+
+```text
+:add_before describe work to insert before this node
+:add_after describe work to insert after this node
+:update replace this node's instructions
+:del
+```
 
 Delivery levels:
 
@@ -456,7 +486,7 @@ Request shape:
 }
 ```
 
-Gateway methods include chat, sessions, provider management, roles, tools, skills, cron jobs, experiences, timeline, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
+Gateway methods include chat, sessions, provider management, roles, tools, skills, cron jobs, experiences, timeline, graph inspection/editing, diagnostics, doctor, maintenance, security audit, context, router, task cancel, run cancel, and command execution.
 
 Token scopes:
 

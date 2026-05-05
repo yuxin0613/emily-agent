@@ -1,4 +1,5 @@
 import readline from "node:readline/promises";
+import { emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 
 const ANSI = {
@@ -67,6 +68,10 @@ const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
     ["/roles", "list roles"],
     ["/tools", "list tools"],
     ["/skills", "list skills"],
+    ["/dag list", "list active DAG roots"],
+    ["/dag <root_id>", "open interactive DAG editor"],
+    ["/graph [runId]", "show task mind map"],
+    ["/node <key> [runId]", "inspect a mind-map node"],
     ["/timeline [runId]", "show the latest or selected run timeline"],
   ]],
   ["Shell", [
@@ -92,6 +97,12 @@ const TUI_ADVANCED_HELP_SECTIONS: TuiHelpSection[] = [
     ["/trash-session <id>", "move session to trash"],
   ]],
   ["Work Advanced", [
+    [":add_before <text>", "DAG editor: insert before selected node"],
+    [":add_after <text>", "DAG editor: insert after selected node"],
+    [":update <text>", "DAG editor: replace selected node instructions"],
+    [":del", "DAG editor: delete selected unexecuted node"],
+    ["/graph-add <parent> <key> <role> <title>", "add a child node under an unexecuted branch"],
+    ["/graph-update <key> <field> <value>", "edit an unexecuted node"],
     ["/trace <taskId>", "show task trace"],
     ["/experiences [query]", "list or search experiences"],
   ]],
@@ -133,7 +144,7 @@ export async function startTui({ runtime }) {
 
       try {
         if (isCommand(message)) {
-          await handleCommand(runtime, state, message);
+          await handleCommand(runtime, state, message, rl);
         } else {
           await sendChat(runtime, state, message);
         }
@@ -194,12 +205,12 @@ function clearSubmittedPromptLine(): void {
 }
 
 function isCommand(message: string): boolean {
-  return message.startsWith(":") || message.startsWith("/");
+  return message.startsWith(":") || message.startsWith("：") || message.startsWith("/");
 }
 
-async function handleCommand(runtime, state, message: string): Promise<void> {
-  const prefix = message[0];
-  const [command, ...args] = splitArgs(message.replace(/^[:/]/, ""));
+async function handleCommand(runtime, state, message: string, rl?: readline.Interface): Promise<void> {
+  const prefix = message[0] === "：" ? ":" : message[0];
+  const [command, ...args] = splitArgs(message.replace(/^[:：/]/, ""));
   if (!command) {
     printText(formatTuiCommandHints(prefix));
     return;
@@ -313,6 +324,22 @@ async function handleCommand(runtime, state, message: string): Promise<void> {
       return;
     case "timeline":
       await printTimeline(runtime, state, args[0]);
+      return;
+    case "dag":
+      await handleDagCommand(runtime, state, args, rl);
+      return;
+    case "graph":
+    case "mindmap":
+      await printGraph(runtime, state, args[0]);
+      return;
+    case "node":
+      await printNode(runtime, state, args);
+      return;
+    case "graph-add":
+      await graphAdd(runtime, state, args);
+      return;
+    case "graph-update":
+      await graphUpdate(runtime, state, args);
       return;
     case "trace":
       await printTrace(runtime, args[0]);
@@ -564,6 +591,292 @@ async function rejectSkill(runtime, args: string[]): Promise<void> {
   }));
 }
 
+async function handleDagCommand(runtime, state, args: string[], rl?: readline.Interface): Promise<void> {
+  if (!args[0] || args[0] === "list") {
+    printText(await runtime.runCommand("dag.list", { format: "text" }));
+    return;
+  }
+  const runId = await resolveDagRunId(runtime, args[0]);
+  state.lastRunId = runId;
+  if (!output.isTTY || !input.isTTY || !rl) {
+    await printGraph(runtime, state, runId);
+    return;
+  }
+  await startDagEditor(runtime, state, runId, rl);
+}
+
+async function resolveDagRunId(runtime, rootId: string): Promise<string> {
+  try {
+    await runtime.runCommand("graph.view", { input: { runId: rootId } });
+    return rootId;
+  } catch {
+    const roots = await runtime.runCommand("dag.list") as Array<{ rootId: string; runId: string; graphId: string; roots?: Array<{ key: string; taskId: string }> }>;
+    const match = roots.find((root) => root.rootId === rootId
+      || root.runId === rootId
+      || root.graphId === rootId
+      || root.graphId.startsWith(rootId)
+      || root.roots?.some((node) => node.taskId === rootId || node.taskId.startsWith(rootId) || node.key === rootId));
+    if (!match) throw new Error(`DAG root not found: ${rootId}`);
+    return match.runId;
+  }
+}
+
+async function startDagEditor(runtime, state, runId: string, rl: readline.Interface): Promise<void> {
+  let selectedIndex = 0;
+  let selectedKey = "";
+  let message = "";
+  let map = await loadDagMap(runtime, runId);
+
+  const refresh = async (nextSelectedKey = selectedKey): Promise<void> => {
+    map = await loadDagMap(runtime, runId);
+    const nodes = flattenDagEditorNodes(map);
+    selectedIndex = Math.max(0, nodes.findIndex((node) => node.key === nextSelectedKey));
+    if (selectedIndex < 0) selectedIndex = 0;
+    selectedKey = nodes[selectedIndex]?.key || "";
+    render();
+  };
+  const render = (): void => {
+    const nodes = flattenDagEditorNodes(map);
+    if (selectedIndex >= nodes.length) selectedIndex = Math.max(0, nodes.length - 1);
+    selectedKey = nodes[selectedIndex]?.key || "";
+    output.write("\x1b[2J\x1b[H");
+    output.write(formatDagEditorView(map, selectedIndex, message));
+  };
+
+  rl.pause();
+  emitKeypressEvents(input);
+  input.setRawMode?.(true);
+  input.resume();
+  render();
+
+  try {
+    while (true) {
+      const action = await readDagEditorAction();
+      const nodes = flattenDagEditorNodes(map);
+      if (action.type === "exit") break;
+      if (action.type === "move") {
+        selectedIndex = clamp(selectedIndex + action.delta, 0, Math.max(0, nodes.length - 1));
+        message = "";
+        render();
+        continue;
+      }
+      if (action.type === "inspect") {
+        const selected = nodes[selectedIndex];
+        message = selected ? selected.input : "";
+        render();
+        continue;
+      }
+      if (action.type === "command") {
+        const selected = nodes[selectedIndex];
+        if (!selected) {
+          message = "No node selected.";
+          render();
+          continue;
+        }
+        try {
+          const commandResult = await runDagEditorCommand(runtime, runId, selected, action.command);
+          selectedKey = commandResult.selectedKey || selected.key;
+          message = commandResult.message;
+          await refresh(selectedKey);
+        } catch (error) {
+          message = error instanceof Error ? error.message : String(error);
+          render();
+        }
+      }
+    }
+  } finally {
+    input.setRawMode?.(false);
+    input.pause();
+    rl.resume();
+    output.write("\x1b[2J\x1b[H");
+    await printBanner(runtime, state);
+  }
+}
+
+async function loadDagMap(runtime, runId: string) {
+  return await runtime.runCommand("graph.view", { input: { runId } });
+}
+
+function readDagEditorAction(): Promise<
+  | { type: "move"; delta: number }
+  | { type: "command"; command: string }
+  | { type: "inspect" }
+  | { type: "exit" }
+> {
+  return new Promise((resolve) => {
+    let commandMode = false;
+    let buffer = "";
+    const cleanup = () => input.off("keypress", onKeypress);
+    const finish = (action: Parameters<typeof resolve>[0]) => {
+      cleanup();
+      resolve(action);
+    };
+    const renderCommand = () => {
+      output.write(`\r\x1b[2K:${buffer}`);
+    };
+    const onKeypress = (str: string, key: { name?: string; ctrl?: boolean; sequence?: string }) => {
+      if (key.ctrl && key.name === "c") return finish({ type: "exit" });
+      if (commandMode) {
+        if (key.name === "escape") return finish({ type: "inspect" });
+        if (key.name === "return" || key.name === "enter") {
+          output.write("\r\x1b[2K");
+          return finish({ type: "command", command: buffer.trim() });
+        }
+        if (key.name === "backspace" || key.name === "delete") {
+          buffer = buffer.slice(0, -1);
+          renderCommand();
+          return;
+        }
+        if (str && !key.ctrl) {
+          buffer += str;
+          renderCommand();
+        }
+        return;
+      }
+      if (key.name === "up") return finish({ type: "move", delta: -1 });
+      if (key.name === "down") return finish({ type: "move", delta: 1 });
+      if (key.name === "return" || key.name === "enter") return finish({ type: "inspect" });
+      if (key.name === "escape" || key.name === "q") return finish({ type: "exit" });
+      if (str === ":" || str === "：" || key.sequence === ":") {
+        commandMode = true;
+        buffer = "";
+        renderCommand();
+      }
+    };
+    input.on("keypress", onKeypress);
+  });
+}
+
+async function runDagEditorCommand(runtime, runId: string, selected, rawCommand: string): Promise<{ selectedKey?: string; message: string }> {
+  const [command, ...rest] = splitArgs(rawCommand);
+  const text = rest.join(" ").trim();
+  if (!command || command === "help") {
+    return {
+      selectedKey: selected.key,
+      message: "Commands: :add_before <text>, :add_after <text>, :update <text>, :del, :q",
+    };
+  }
+  if (command === "q" || command === "quit") {
+    return { selectedKey: selected.key, message: "Use Esc or q to leave the DAG editor." };
+  }
+  if (command === "add_before" || command === "add-before") {
+    if (!text) throw new Error("usage: :add_before <description>");
+    const result = await runtime.runCommand("graph.add_before", {
+      input: dagSiblingCommandInput(runId, selected, text),
+    }) as { node?: { key?: string } };
+    return { selectedKey: result.node?.key || selected.key, message: `Added before ${selected.key}: ${text}` };
+  }
+  if (command === "add_after" || command === "add-after") {
+    if (!text) throw new Error("usage: :add_after <description>");
+    const result = await runtime.runCommand("graph.add_after", {
+      input: dagSiblingCommandInput(runId, selected, text),
+    }) as { node?: { key?: string } };
+    return { selectedKey: result.node?.key || selected.key, message: `Added after ${selected.key}: ${text}` };
+  }
+  if (command === "update") {
+    if (!text) throw new Error("usage: :update <description>");
+    await runtime.runCommand("graph.update", {
+      input: {
+        runId,
+        selector: selected.key,
+        title: truncate(text, 80),
+        input: text,
+      },
+    });
+    return { selectedKey: selected.key, message: `Updated ${selected.key}.` };
+  }
+  if (command === "del" || command === "delete") {
+    const result = await runtime.runCommand("graph.delete", {
+      input: { runId, selector: selected.key, reason: "deleted from TUI DAG editor" },
+    }) as { deleted?: string[] };
+    return { message: `Deleted: ${(result.deleted || []).join(", ") || selected.key}` };
+  }
+  throw new Error(`Unknown DAG command: ${command}`);
+}
+
+function dagSiblingCommandInput(runId: string, selected, text: string): Record<string, unknown> {
+  return {
+    runId,
+    selector: selected.key,
+    key: `${selected.key}_${Date.now().toString(36)}`,
+    role: selected.role,
+    title: truncate(text, 80),
+    input: text,
+  };
+}
+
+export function flattenDagEditorNodes(map): Array<{
+  key: string;
+  taskId: string;
+  depth: number;
+  index: number;
+  role: string;
+  status: string;
+  title: string;
+  input: string;
+  editable: boolean;
+}> {
+  const byKey = new Map((map.nodes || []).map((node) => [node.key, node]));
+  const rows: Array<{ key: string; taskId: string; depth: number; index: number; role: string; status: string; title: string; input: string; editable: boolean }> = [];
+  const visit = (key: string, depth: number) => {
+    const node = byKey.get(key) as {
+      key: string;
+      id: string;
+      role: string;
+      status: string;
+      title: string;
+      input: string;
+      editable?: boolean;
+      children?: string[];
+    } | undefined;
+    if (!node) return;
+    rows.push({
+      key: node.key,
+      taskId: node.id,
+      depth,
+      index: rows.length + 1,
+      role: node.role,
+      status: node.status,
+      title: node.title,
+      input: node.input,
+      editable: node.editable === true,
+    });
+    for (const child of node.children || []) visit(child, depth + 1);
+  };
+  for (const root of map.roots || []) visit(root, 0);
+  return rows;
+}
+
+export function formatDagEditorView(map, selectedIndex = 0, message = "", width = terminalWidth()): string {
+  const rows = flattenDagEditorNodes(map);
+  const lines = [
+    `DAG ${map.runId}`,
+    `Goal: ${truncate(String(map.goal || ""), Math.max(40, width - 8))}`,
+    "Use ↑/↓ to select, Enter to inspect, :add_before/:add_after/:update/:del, q to exit.",
+    "",
+  ];
+  if (!rows.length) {
+    lines.push("(empty DAG)");
+  }
+  for (const row of rows) {
+    const selected = row.index - 1 === selectedIndex;
+    const marker = selected ? ">" : " ";
+    const indentText = "  ".repeat(row.depth);
+    const editMark = row.editable ? "*" : " ";
+    lines.push(`${marker} ${String(row.index).padStart(2, " ")} ${indentText}${editMark} ${row.key} [${row.status}] ${row.role} - ${truncate(row.title, Math.max(24, width - 34 - row.depth * 2))}`);
+  }
+  const selected = rows[selectedIndex];
+  lines.push("");
+  if (selected) {
+    lines.push(`Selected: ${selected.index}. ${selected.key} (${selected.status}) ${selected.editable ? "editable" : "locked"}`);
+    lines.push(`Task: ${selected.taskId}`);
+  }
+  if (message) {
+    lines.push("", message);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 async function printTimeline(runtime, state, runId?: string): Promise<void> {
   const targetRunId = runId || state.lastRunId;
   if (!targetRunId) throw new Error("run id is required");
@@ -583,6 +896,69 @@ async function printTimeline(runtime, state, runId?: string): Promise<void> {
     ...timeline.events.slice(-20).map((event) => [String(event.id), event.type, event.taskId ? event.taskId.slice(0, 8) : "", event.createdAt]),
   ]);
   output.write("\n");
+}
+
+async function printGraph(runtime, state, runId?: string): Promise<void> {
+  const targetRunId = runId || state.lastRunId;
+  if (!targetRunId) throw new Error("run id is required");
+  state.lastRunId = targetRunId;
+  printText(await runtime.runCommand("graph.view", {
+    input: { runId: targetRunId },
+    format: "text",
+  }));
+}
+
+async function printNode(runtime, state, args: string[]): Promise<void> {
+  const selector = requiredArg(args[0], "node key or task id");
+  const runId = args[1] || state.lastRunId;
+  if (!runId) throw new Error("run id is required");
+  state.lastRunId = runId;
+  printText(await runtime.runCommand("graph.node", {
+    input: { runId, selector },
+    format: "text",
+  }));
+}
+
+async function graphAdd(runtime, state, args: string[]): Promise<void> {
+  const runId = state.lastRunId;
+  if (!runId) throw new Error("run id is required");
+  const parent = requiredArg(args[0], "parent key");
+  const key = requiredArg(args[1], "new node key");
+  const role = requiredArg(args[2], "role");
+  const title = args.slice(3).join(" ").trim();
+  if (!title) throw new Error("title is required");
+  printText(await runtime.runCommand("graph.add", {
+    input: {
+      runId,
+      parent,
+      key,
+      role,
+      title,
+      input: title,
+    },
+    format: "text",
+  }));
+}
+
+async function graphUpdate(runtime, state, args: string[]): Promise<void> {
+  const runId = state.lastRunId;
+  if (!runId) throw new Error("run id is required");
+  const selector = requiredArg(args[0], "node key or task id");
+  const field = requiredArg(args[1], "field");
+  const value = args.slice(2).join(" ").trim();
+  if (!value) throw new Error("value is required");
+  const input: Record<string, unknown> = { runId, selector };
+  if (field === "title" || field === "input" || field === "role" || field === "expansionGoal") {
+    input[field] = value;
+  } else if (field === "dependsOn") {
+    input.dependsOn = value.split(",").map((item) => item.trim()).filter(Boolean);
+  } else {
+    throw new Error("field must be title, input, role, dependsOn, or expansionGoal");
+  }
+  printText(await runtime.runCommand("graph.update", {
+    input,
+    format: "text",
+  }));
 }
 
 async function printTrace(runtime, taskId?: string): Promise<void> {
@@ -965,6 +1341,10 @@ function numberArg(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 function requiredArg(value: string | undefined, label: string): string {
