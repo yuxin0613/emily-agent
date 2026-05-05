@@ -1,5 +1,5 @@
 import readline from "node:readline/promises";
-import { emitKeypressEvents } from "node:readline";
+import { clearLine, cursorTo, emitKeypressEvents } from "node:readline";
 import { stdin as input, stdout as output } from "node:process";
 import { statusLabel } from "../tasks/TaskMindMap.ts";
 
@@ -188,6 +188,7 @@ export async function startTui({ runtime }) {
 
 async function readPromptLine(rl: readline.Interface, state: TuiState): Promise<string | null> {
   try {
+    focusInputLine();
     const answer = await rl.question(promptFor(state));
     clearSubmittedPromptLine();
     return answer;
@@ -238,6 +239,13 @@ function promptFor(_state: { sessionId: string; lastRunId: string; permissionMod
 function clearSubmittedPromptLine(): void {
   if (!output.isTTY) return;
   output.write("\x1b[1A\r\x1b[2K");
+}
+
+function focusInputLine(): void {
+  if (!output.isTTY) return;
+  output.write("\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+  cursorTo(output, 0);
+  clearLine(output, 0);
 }
 
 function isCommand(message: string): boolean {
@@ -489,12 +497,14 @@ function attachBusyInputReader(
   const pending = new Set<Promise<void>>();
   const writeReadyPrompt = () => {
     if (closed) return;
+    focusInputLine();
     output.write(promptFor(state));
     promptVisible = true;
   };
   const clearReadyPrompt = () => {
     if (!promptVisible || !output.isTTY) return;
-    output.write("\r\x1b[2K");
+    cursorTo(output, 0);
+    clearLine(output, 0);
     promptVisible = false;
   };
   const onLine = (line: string) => {
