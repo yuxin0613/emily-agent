@@ -139,13 +139,15 @@ or, from a source checkout:
 npm run tui
 ```
 
-The TUI is designed around a compact transcript/composer loop:
+The TUI is designed around a compact dashboard plus transcript/composer loop:
 
 | Glyph | Meaning |
 | --- | --- |
 | `❯` | User input and the active prompt. |
-| `┊` | Assistant output, progress, and live thinking state. |
-| `·` | Run metadata such as run id, delegated agents, and elapsed time. |
+| `● You` | A message already submitted by the user. |
+| `Emily` | Assistant response card. |
+| `┊` | Live thinking or progress output while a call is active. |
+| `·` | Run metadata such as run id, delegated agents, elapsed time, and queued context notices. |
 | `⚡` | Tool output in views that expose tool events. |
 
 Typical flow:
@@ -162,8 +164,11 @@ The home screen is a live runtime dashboard, not a static banner:
 | --- | --- |
 | `Available Tools:` | Tool groups currently registered in the active runtime. |
 | `Available Skills:` | Skill groups currently loaded from builtin and configured skill roots. |
-| `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. When idle it shows a waiting hint. |
+| `Run Log:` | Recent subagent, task graph, anomaly, and tool execution events. Entries are split into event, subagent/task/tool metadata, and detail lines for scanning. When idle it shows a waiting hint. |
 | Status bar | Current provider model and provider id, current TUI session id, pending/running task counts, and open graph count. Values change as provider configuration, sessions, and runtime state change. |
+| Transcript | Recent `You` and `Emily` turns plus run metadata. The transcript remains visible after redraws so the dashboard does not erase the conversation. |
+
+The prompt area is the only input target and is framed with horizontal divider lines so it is visually separate from dashboard and transcript output. The TUI enables bracketed paste in capable terminals, keeps pasted content in the bottom prompt buffer, wraps long pasted text across prompt lines, preserves pasted line breaks, and submits the message only when Enter is pressed.
 
 Useful TUI commands:
 
@@ -173,6 +178,8 @@ Useful TUI commands:
 | `/new [title]` | Start a new visible session. |
 | `/clear` | Hide the current session and create a fresh one. |
 | `/status` | Show current session/runtime status. |
+| `/queue` | Show pending contexts captured while the main agent is busy. |
+| `/queue merge <n>` | Merge queued contexts `1..n`; for example `/queue merge 2` merges only the first two pending contexts. |
 | `/sub` | Show running subagents, their configured roles, task names, and task ids. |
 | `/providers` | List configured providers. |
 | `/tools` | List available tools. |
@@ -187,6 +194,10 @@ Useful TUI commands:
 | `/mode [mode]` | Show or set permission mode. |
 
 While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/sub`, `/status`, and `/timeline` run immediately. A normal chat/task message is added to the main-agent context queue and runs after the current main-agent turn finishes, so the main agent does not process multiple user contexts at the same time. The home panel includes a Run Log column showing recent subagent, task, graph, anomaly, and tool execution events.
+
+Queued contexts can be merged before they are processed. The TUI shows a Context Queue section while pending contexts exist; row 2 and later display a merge action. `/queue merge 2` merges context 1 and 2 into one queued item and leaves context 3 onward untouched.
+
+Planning-only requests are supported. A message such as `帮我规划一个 Todo 应用 POC，不要立即实现` is enough; users do not need to spell out “需求范围、数据模型、CLI 命令、持久化、验证” in the prompt. The main agent treats that as a plan-only task, asks the planner to work backward from the desired result, creates an editable DAG with module nodes and executable leaves, and leaves implementation tasks pending until the user explicitly starts or edits them. The planner wait budget is controlled by `agents.plannerTaskTimeoutSeconds`.
 
 ## Model Setup
 
@@ -245,6 +256,7 @@ Runtime settings in `.emily/config.json`:
 | `agents.maxConcurrentSubagents` | Global cap for simultaneously running subagents. Default: based on local CPU, capped at `4`. |
 | `agents.releaseSubagentsAfterTask` | Whether idle subagent worker processes are released after they finish work. Default: `true`. |
 | `agents.subagentIdleTtlSeconds` | Idle time before releasing a finished subagent. Use `0` to release immediately. Default: `60`. |
+| `agents.plannerTaskTimeoutSeconds` | Maximum time to wait for the planner subagent to produce the initial DAG. Default: `600`. |
 
 Example:
 
@@ -258,7 +270,8 @@ Example:
     "maxSubagentsPerRole": 1,
     "maxConcurrentSubagents": 4,
     "releaseSubagentsAfterTask": true,
-    "subagentIdleTtlSeconds": 60
+    "subagentIdleTtlSeconds": 60,
+    "plannerTaskTimeoutSeconds": 600
   },
   "providers": []
 }

@@ -51,6 +51,31 @@ assert.ok(timeline.events.some((event) => event.type === "task.dependency.create
   && event.taskId === verificationTask.id
   && event.payload.dependsOnTaskId === implementationTask.id));
 
+const planOnly = await runtime.handleUserMessage("帮我规划一个 Todo 应用 POC，不要立即实现", {
+  sessionId: "planner-plan-only",
+  source: "test",
+});
+assert.ok(planOnly.plan);
+assert.equal(planOnly.plan.deliveryLevel, "poc");
+assert.equal(runtime.taskStore.getRun(planOnly.runId!)?.status, "done");
+assert.deepEqual(planOnly.delegatedTo, ["planner"]);
+assert.match(planOnly.content, /暂不执行实现任务/);
+assert.match(planOnly.content, /\/dag /);
+assert.equal(planOnly.subResults?.length, 1);
+assert.equal(planOnly.subResults?.[0]?.role, "planner");
+const planOnlyTimeline = runtime.getTimeline({ runId: planOnly.runId! });
+const planOnlyTasks = planOnlyTimeline.tasks.filter((task) => task.metadata.planOnly === true);
+assert.ok(planOnlyTasks.length >= 10);
+assert.ok(planOnlyTasks.every((task) => task.status === "pending"));
+assert.ok(planOnlyTasks.every((task) => typeof task.metadata.planSourceTaskId === "string"));
+assert.ok(planOnlyTimeline.tasks.some((task) => task.metadata.planPhase === "planning" && task.status === "done"));
+assert.ok(planOnlyTasks.some((task) => task.metadata.graphKey === "requirements_scope"));
+assert.ok(planOnlyTasks.some((task) => task.metadata.graphKey === "data_model"));
+assert.ok(planOnlyTasks.some((task) => task.metadata.graphKey === "cli_commands"));
+assert.ok(planOnlyTasks.some((task) => task.metadata.graphKey === "persistence"));
+assert.ok(planOnlyTasks.some((task) => task.metadata.graphKey === "validation"));
+assert.ok(!planOnly.subResults?.some((result) => result.role === "developer" || result.role === "reviewer"));
+
 const wrappedPatch = parseGraphPatchSpec(JSON.stringify({
   content: JSON.stringify({
     reason: "wrapped patch",

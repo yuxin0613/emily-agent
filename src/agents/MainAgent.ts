@@ -17,6 +17,7 @@ import { TaskGraphExecutor, type TaskGraphPause } from "../tasks/TaskGraphExecut
 import { taskResultSummary } from "../tasks/TaskResult.ts";
 import {
   createFallbackPlanSpec,
+  createPlanningOnlyPlanSpec,
   deliveryLevelQuestion,
   inferDeliveryLevel,
   parsePlanSpec,
@@ -25,7 +26,7 @@ import {
   type PlanSpec,
 } from "../planning/PlanSpec.ts";
 
-const PLANNER_TASK_TIMEOUT_MS = 120000;
+const DEFAULT_PLANNER_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface MainAgentResult {
   agent: string;
@@ -74,6 +75,7 @@ export class MainAgent {
   contextEngine: ContextEngine | null;
   hooks: LifecycleHooks | null;
   router: AgentRouter | null;
+  plannerTaskTimeoutMs: number;
 
   constructor({
     name,
@@ -85,6 +87,7 @@ export class MainAgent {
     contextEngine = null,
     hooks = null,
     router = null,
+    plannerTaskTimeoutMs = DEFAULT_PLANNER_TASK_TIMEOUT_MS,
   }: {
     name: string;
     model: ModelProvider;
@@ -95,6 +98,7 @@ export class MainAgent {
     contextEngine?: ContextEngine | null;
     hooks?: LifecycleHooks | null;
     router?: AgentRouter | null;
+    plannerTaskTimeoutMs?: number;
   }) {
     this.name = name;
     this.model = model;
@@ -106,6 +110,7 @@ export class MainAgent {
     this.contextEngine = contextEngine;
     this.hooks = hooks;
     this.router = router;
+    this.plannerTaskTimeoutMs = Math.max(1000, Math.floor(plannerTaskTimeoutMs));
   }
 
   async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}): Promise<MainAgentResult> {
@@ -237,7 +242,7 @@ export class MainAgent {
         };
       }
 
-      if (requiresDeliveryLevelClarification(normalizedInput)) {
+      if (!isPlanningOnlyRequest(normalizedInput) && requiresDeliveryLevelClarification(normalizedInput)) {
         const content = deliveryLevelQuestion(normalizedInput);
         this.taskStore.completeRun(run.id, "waiting_user");
         await this.remember({
@@ -283,6 +288,7 @@ export class MainAgent {
 
       const selectedAgents = this.selectSubAgents(normalizedInput);
       delegatedTo = selectedAgents;
+      const planOnly = isPlanningOnlyRequest(normalizedInput);
       const delegated = await this.delegateTasks({
         input: normalizedInput,
         sessionId,
@@ -290,6 +296,7 @@ export class MainAgent {
         runId: run.id,
         selectedAgents,
         permissionMode,
+        planOnly,
       });
       subResults = delegated.subResults;
       reviewerVerdict = delegated.reviewerVerdict;
@@ -340,6 +347,54 @@ export class MainAgent {
             reason: delegated.pause.reason,
             questions: delegated.pause.questions,
           },
+        };
+      }
+
+      if (delegated.planOnly) {
+        const content = formatPlanOnlyResponse(delegated.plan, {
+          runId: run.id,
+          graphId: delegated.graphId || "",
+        });
+        for (const experience of relevantExperiences) {
+          this.experienceStore.recordUse(experience.id);
+        }
+        await this.remember({
+          scope: context.sessionId || "default",
+          kind: "message:assistant",
+          content,
+          metadata: {
+            source: "main-agent",
+            runId: run.id,
+            delegatedTo,
+            plan: planSummary || null,
+            planOnly: true,
+            graphId: delegated.graphId || "",
+          },
+        });
+        for (const result of subResults) {
+          this.taskStore.acknowledgeTask(result.taskId);
+        }
+        await this.approveRunMemoryCandidates(run.id);
+        this.taskStore.completeRun(run.id, "done");
+        await this.hooks?.emit("afterRun", {
+          run: this.taskStore.getRun(run.id) || run,
+          payload: {
+            status: "done",
+            delegatedTo,
+            planOnly: true,
+            graphId: delegated.graphId || "",
+          },
+        });
+        return {
+          agent: this.name,
+          runId: run.id,
+          content,
+          delegatedTo,
+          memory: relevantMemory,
+          experiences: relevantExperiences,
+          plan: planSummary,
+          subResults,
+          reviewerVerdict,
         };
       }
 
@@ -437,6 +492,7 @@ export class MainAgent {
     selectedAgents,
     runId,
     permissionMode,
+    planOnly = false,
   }: {
     input: string;
     sessionId: string;
@@ -444,15 +500,19 @@ export class MainAgent {
     runId: string;
     selectedAgents: string[];
     permissionMode?: ReturnType<typeof parsePermissionMode>;
+    planOnly?: boolean;
   }): Promise<{
     subResults: Array<{ agent: string; role: string; taskId: string; status: string; content: string }>;
     reviewerVerdict?: ReviewerVerdict;
     delegatedTo: string[];
     plan: PlanSpec;
     pause?: UserInputPause;
+    planOnly?: boolean;
+    graphId?: string;
   }> {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
+
     const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc");
     const planningGraph = createTaskGraph({
       taskStore: this.taskStore,
@@ -461,7 +521,7 @@ export class MainAgent {
         source,
         runId,
         createdBy: this.name,
-        timeoutMs: PLANNER_TASK_TIMEOUT_MS,
+        timeoutMs: this.plannerTaskTimeoutMs,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
         permissionMode: permissionMode || "workspace_write",
@@ -485,7 +545,7 @@ export class MainAgent {
     const plannerTask = planningGraph.planner;
 
     const finishedPlanner = await this.roleAgentManager.runTask(plannerTask, {
-      timeoutMs: PLANNER_TASK_TIMEOUT_MS + 5000,
+      timeoutMs: this.plannerTaskTimeoutMs + 5000,
     });
     results.push(this.formatTaskResult("planner", finishedPlanner));
     if (finishedPlanner.status !== "done") {
@@ -525,6 +585,34 @@ export class MainAgent {
           taskId: finishedPlanner.id,
           source: "plan",
         },
+      };
+    }
+
+    if (planOnly) {
+      plan = createPlanningOnlyPlanSpec(input, selectedAgents, plan);
+      const plannedTasks = createTaskGraphFromPlan({
+        taskStore: this.taskStore,
+        plan,
+        baseMetadata: {
+          sessionId,
+          source,
+          runId,
+          createdBy: this.name,
+          planSourceTaskId: finishedPlanner.id,
+          permissionMode: permissionMode || "workspace_write",
+          planOnly: true,
+          executionState: "draft",
+        },
+      });
+      const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
+      this.taskStore.refreshTaskGraphStatuses();
+      return {
+        subResults: results,
+        reviewerVerdict,
+        delegatedTo: ["planner"],
+        plan,
+        planOnly: true,
+        graphId,
       };
     }
 
@@ -823,10 +911,10 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
     return "chat";
   }
 
-  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|做一个|搭建|接入|迁移|发布|提交|推送|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|write|generate|analyze|summarize|search)/i.test(normalized)) {
+  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|规划|计划|拆解|拆成|任务图|思维导图|做一个|搭建|接入|迁移|发布|提交|推送|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|plan|decompose|write|generate|analyze|summarize|search)/i.test(normalized)) {
     return "task";
   }
-  if (/(?:帮我|请你|麻烦|能不能|可以帮|需要你|我想要|我要|给我).{0,16}(?:做|写|改|查|看|跑|测|建|实现|修|设计|生成|分析|总结|创建|配置|部署)/.test(normalized)) {
+  if (/(?:帮我|请你|麻烦|能不能|可以帮|需要你|我想要|我要|给我).{0,16}(?:做|写|改|查|看|跑|测|建|实现|修|设计|规划|计划|拆解|生成|分析|总结|创建|配置|部署)/.test(normalized)) {
     return "task";
   }
   if (/(?:[\w.-]+\/[\w./-]+|`[^`]+`|```|error:|exception|stack trace|报错|失败|崩溃)/i.test(normalized)) {
@@ -838,6 +926,14 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
   }
   if ([...compact].length <= 18) return "chat";
   return "task";
+}
+
+export function isPlanningOnlyRequest(input: string): boolean {
+  const normalized = input.trim();
+  if (!normalized) return false;
+  const asksForPlan = /(?:规划|计划|拆解|拆成|任务图|思维导图|roadmap|plan|decompose|break down)/i.test(normalized);
+  if (!asksForPlan) return false;
+  return /(?:不要|不用|先别|暂不|别|无需).{0,16}(?:实现|执行|开发|写代码|动手|开工|run|execute|implement|code)|(?:只|仅).{0,8}(?:规划|计划|拆解|列出)|(?:先|先帮我).{0,8}(?:规划|计划|拆解)(?!.*(?:实现|执行|开发|写代码|implement|execute))/i.test(normalized);
 }
 
 function isModelIdentityQuestion(input: string): boolean {
@@ -858,6 +954,8 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "",
     "DAG model:",
     "- Treat the DAG like a mind map that decomposes the user's goal from coarse to fine.",
+    "- Start from the desired end result and work backward into the process, deliverables, and verification needed to reach it.",
+    "- The user should not have to name the decomposition dimensions; infer them from the task type and delivery level.",
     "- parentKey is the decomposition parent: goal/root -> module/workstream -> feature slice -> executable leaf.",
     "- dependsOn is only the execution gate between nodes; do not use it as a substitute for parentKey.",
     "- Early nodes should map and narrow the problem. Leaf nodes should execute or verify concrete work.",
@@ -901,6 +999,9 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "",
     "Planning rules:",
     "- For long product/application work, decompose by goal -> module/workstream -> feature slice -> verification.",
+    "- For application or CLI POC work, default to modules like requirements scope, data/domain model, interface or command surface, persistence/state, implementation slices, and validation.",
+    "- For bug/fix work, default to reproduce -> isolate -> patch -> regression validation.",
+    "- For research/document work, default to research questions -> source strategy -> synthesis -> validation.",
     "- For rolling mode, keep the initial graph coarse and mark non-leaf nodes that should expand later with expandable=true.",
     "- Expandable tasks should describe how to expand one level finer in expansionGoal and maxExpansionDepth.",
     "- Do not flatten a large request directly into implementation tasks; preserve the coarse-to-fine hierarchy.",
@@ -937,6 +1038,37 @@ function formatPlan(plan: PlanSpec): string[] {
     "- tasks:",
     ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] parent=${task.parentKey || "(root)"} wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
   ];
+}
+
+function formatPlanOnlyResponse(plan: PlanSpec, { runId, graphId }: { runId: string; graphId: string }): string {
+  const childrenByParent = new Map<string, PlanSpec["tasks"]>();
+  for (const task of plan.tasks) {
+    const parent = task.parentKey || "";
+    childrenByParent.set(parent, [...(childrenByParent.get(parent) || []), task]);
+  }
+  const roots = childrenByParent.get("") || [];
+  const moduleParents = roots.length === 1 ? roots.map((root) => root.key) : [""];
+  const modules = moduleParents.flatMap((parent) => childrenByParent.get(parent) || [])
+    .filter((task) => (childrenByParent.get(task.key) || []).length);
+  const leaves = plan.tasks.filter((task) => !(childrenByParent.get(task.key) || []).length);
+  return [
+    "已按结果导向生成 DAG，暂不执行实现任务。",
+    "",
+    `Run: ${runId}`,
+    graphId ? `Graph: ${graphId}` : "",
+    `目标：${plan.goal}`,
+    `准出等级：${plan.deliveryLevel.toUpperCase()}`,
+    `节点：${plan.tasks.length} 个，叶子任务：${leaves.length} 个`,
+    "",
+    "反推逻辑：先定义目标和验收结果，再拆模块，最后落到可执行叶子任务和验证节点。",
+    "",
+    "模块：",
+    ...(modules.length ? modules.map((task) => `- ${task.title} (${task.key})`) : ["- 已生成可编辑任务节点"]),
+    "",
+    "可以继续：",
+    `- /dag ${runId} 查看和编辑这棵 DAG`,
+    "- /dag list 查看所有 DAG 根节点",
+  ].filter(Boolean).join("\n");
 }
 
 function unique(values: string[]): string[] {

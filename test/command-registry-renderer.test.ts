@@ -119,6 +119,58 @@ try {
     /requires write permission/,
   );
 
+  await assert.rejects(
+    runtime.runCommand("provider.health", {
+      input: { deep: true },
+      maxPermission: "read",
+    }),
+    /requires danger permission/,
+  );
+
+  await assert.rejects(
+    runtime.runCommand("doctor", {
+      input: { deep: true },
+      maxPermission: "read",
+    }),
+    /requires danger permission/,
+  );
+
+  await assert.rejects(
+    runtime.runCommand("role.add", {
+      input: {
+        name: "danger-role",
+        role: "Danger role",
+        instructions: "This role should require admin approval.",
+        allowedTools: ["delete_file"],
+      },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
+  await assert.rejects(
+    runtime.runCommand("tool.execute", {
+      input: {
+        tool: "delete_file",
+        args: { path: "README.md" },
+        role: "developer",
+        permissionMode: "danger_full_access",
+        approval: { approved: true, template: "destructive_workspace" },
+      },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
+  await assert.rejects(
+    runtime.runCommand("tool.execute", {
+      args: ["delete_file"],
+      input: { args: { path: "README.md" } },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
   const commandRunRead = await dispatchGatewayRequest(runtime as never, {
     type: "request",
     id: "command-run-read-1",

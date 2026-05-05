@@ -63,6 +63,9 @@ const runtime = {
     if (name === "diagnostics.repair" && options.maxPermission === "read") {
       throw new CommandPermissionError("Command diagnostics.repair requires write permission; caller is limited to read.");
     }
+    if (name === "provider.health" && options.input?.deep === true && options.maxPermission === "read") {
+      throw new CommandPermissionError("Command provider.health requires danger permission; caller is limited to read.");
+    }
     if (name === "diagnostics.run") return runtime.diagnostics({ repair: false });
     if (name === "diagnostics.repair") return runtime.diagnostics({ repair: true });
     if (name === "maintenance.run") return runtime.maintenance(options.input);
@@ -74,13 +77,27 @@ const runtime = {
   },
 };
 
-const server = await startWebServer({
-  runtime: runtime as never,
-  port: 0,
-  authToken: "test-token",
-  readAuthToken: "read-token",
-  writeAuthToken: "write-token",
-});
+const webLogLines: string[] = [];
+const originalConsoleLog = console.log;
+console.log = (...args: unknown[]) => {
+  webLogLines.push(args.map(String).join(" "));
+  originalConsoleLog(...args);
+};
+let server: Awaited<ReturnType<typeof startWebServer>> | undefined;
+try {
+  server = await startWebServer({
+    runtime: runtime as never,
+    port: 0,
+    authToken: "test-token",
+    readAuthToken: "read-token",
+    writeAuthToken: "write-token",
+  });
+} finally {
+  console.log = originalConsoleLog;
+}
+if (!server) throw new Error("web server failed to start");
+assert.equal(webLogLines.some((line) => line.includes("Emily Agent web token: test-token")), false);
+assert.equal(webLogLines.some((line) => line.includes("Emily Agent web token: test...oken (10 chars)")), true);
 
 try {
   const app = await fetch(`${server.url}/`);
@@ -98,6 +115,11 @@ try {
     headers: { "x-emily-token": "read-token" },
   });
   assert.equal(readScopedProviders.status, 200);
+
+  const readScopedDeepProviderHealth = await fetch(`${server.url}/providers/health?deep=true`, {
+    headers: { "x-emily-token": "read-token" },
+  });
+  assert.equal(readScopedDeepProviderHealth.status, 403);
 
   const readScopedWrite = await fetch(`${server.url}/chat`, {
     method: "POST",

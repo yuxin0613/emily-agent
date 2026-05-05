@@ -159,6 +159,7 @@ export async function createRuntime(options: {
     contextEngine,
     hooks,
     router,
+    plannerTaskTimeoutMs: agentRuntimeConfig.plannerTaskTimeoutSeconds * 1000,
   });
 
   async function approvePendingMemoryCandidates({ runId }: { runId?: string } = {}): Promise<{

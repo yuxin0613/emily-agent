@@ -173,6 +173,90 @@ export function createFallbackPlanSpec(input: string, selectedAgents: string[]):
   };
 }
 
+export function createPlanningOnlyPlanSpec(input: string, selectedAgents: string[], seed?: PlanSpec | null): PlanSpec {
+  const deliveryLevel = seed?.deliveryLevel || inferDeliveryLevel(input) || "poc";
+  const goal = normalizePlanningGoal(seed?.goal || input.trim());
+  const exitCriteria = seed?.exitCriteria?.length ? seed.exitCriteria : defaultExitCriteria(deliveryLevel, goal);
+  const templates = planningTemplatesFor(goal, selectedAgents);
+  const tasks: PlanTaskSpec[] = [
+    planTask({
+      key: "goal",
+      role: "planner",
+      title: `目标反推: ${goal.slice(0, 60)}`,
+      input: [
+        `Goal: ${goal}`,
+        `Delivery level: ${deliveryLevel}`,
+        "Work backward from the desired result, define the coarse modules, and keep implementation tasks pending until the user explicitly starts execution.",
+      ].join("\n"),
+      acceptanceCriteria: [
+        "The desired result is stated clearly.",
+        "The decomposition can be edited before execution.",
+      ],
+      skillHints: ["planning"],
+      metadata: { module: "goal" },
+    }),
+  ];
+
+  let previousModule = "goal";
+  for (const template of templates) {
+    tasks.push(planTask({
+      key: template.key,
+      role: template.role,
+      title: template.title,
+      input: [
+        `Goal: ${goal}`,
+        `Module: ${template.title}`,
+        template.moduleInstruction,
+        "Return the module decision and keep child leaf tasks executable.",
+      ].join("\n"),
+      parentKey: "goal",
+      dependsOn: previousModule === "goal" ? ["goal"] : [previousModule],
+      acceptanceCriteria: template.acceptanceCriteria,
+      skillHints: template.skillHints,
+      toolHints: template.toolHints,
+      wave: 1,
+      metadata: { module: template.key },
+    }));
+    for (const leaf of template.leaves) {
+      tasks.push(planTask({
+        key: leaf.key,
+        role: leaf.role || template.leafRole || template.role,
+        title: leaf.title,
+        input: [
+          `Goal: ${goal}`,
+          `Parent module: ${template.title}`,
+          leaf.instruction,
+          "Produce a concrete, reviewable work product when this leaf is executed.",
+        ].join("\n"),
+        parentKey: template.key,
+        dependsOn: [template.key, ...(leaf.dependsOn || [])],
+        acceptanceCriteria: leaf.acceptanceCriteria,
+        skillHints: leaf.skillHints || template.skillHints,
+        toolHints: leaf.toolHints || template.toolHints,
+        wave: 2,
+        metadata: { module: template.key, slice: leaf.key },
+      }));
+    }
+    previousModule = template.key;
+  }
+
+  return {
+    goal,
+    deliveryLevel,
+    exitCriteria,
+    planningMode: "single_wave",
+    maxWaves: 2,
+    failureStrategy: "block_dependents",
+    tasks,
+    review: {
+      required: false,
+      criteria: exitCriteria,
+    },
+    clarificationRequired: false,
+    clarificationQuestions: [],
+  };
+}
+
 export function createFallbackGraphPatch({
   plan,
   parentKey,
@@ -452,6 +536,240 @@ function planTask(input: Partial<PlanTaskSpec> & {
     permissionMode: input.permissionMode,
     metadata: input.metadata,
   };
+}
+
+interface PlanningTemplate {
+  key: string;
+  role: string;
+  leafRole?: string;
+  title: string;
+  moduleInstruction: string;
+  acceptanceCriteria: string[];
+  toolHints: string[];
+  skillHints: string[];
+  leaves: Array<{
+    key: string;
+    role?: string;
+    title: string;
+    instruction: string;
+    acceptanceCriteria: string[];
+    dependsOn?: string[];
+    toolHints?: string[];
+    skillHints?: string[];
+  }>;
+}
+
+function planningTemplatesFor(goal: string, selectedAgents: string[]): PlanningTemplate[] {
+  const normalized = goal.toLowerCase();
+  if (/todo|待办|任务清单|cli|命令行/.test(normalized)) return todoCliPlanningTemplates();
+  if (/(应用|app|系统|平台|网站|web|api|工具|项目|product)/i.test(goal)) return applicationPlanningTemplates(selectedAgents);
+  if (/(bug|报错|修复|排查|debug|fix|崩溃|失败)/i.test(goal)) return fixPlanningTemplates();
+  if (/(调研|研究|分析|总结|报告|文档|research|report|document)/i.test(goal)) return researchPlanningTemplates();
+  return generalPlanningTemplates(selectedAgents);
+}
+
+function todoCliPlanningTemplates(): PlanningTemplate[] {
+  return [
+    {
+      key: "requirements_scope",
+      role: "planner",
+      leafRole: "researcher",
+      title: "需求范围",
+      moduleInstruction: "Define the Todo POC boundary from the requested result instead of asking the user to enumerate modules.",
+      acceptanceCriteria: ["Core flows and explicit out-of-scope items are defined."],
+      toolHints: [],
+      skillHints: ["planning", "requirements"],
+      leaves: [
+        {
+          key: "requirements_core_flows",
+          title: "列出核心用户流程",
+          instruction: "Define add, list, complete, and delete flows plus the expected CLI feedback.",
+          acceptanceCriteria: ["Core Todo commands and expected outputs are listed."],
+        },
+        {
+          key: "requirements_poc_limits",
+          title: "明确 POC 边界",
+          instruction: "State which non-core concerns are intentionally deferred for the POC.",
+          acceptanceCriteria: ["POC scope and follow-up scope are separated."],
+        },
+      ],
+    },
+    {
+      key: "data_model",
+      role: "developer",
+      title: "数据模型",
+      moduleInstruction: "Design the smallest useful Todo data shape for the POC.",
+      acceptanceCriteria: ["Todo entity and collection shape are specified."],
+      toolHints: ["read_file"],
+      skillHints: ["coding"],
+      leaves: [
+        {
+          key: "data_model_todo_entity",
+          title: "定义 Todo 实体",
+          instruction: "Define id, title, completed, and timestamp fields with validation expectations.",
+          acceptanceCriteria: ["Todo fields and constraints are concrete."],
+        },
+        {
+          key: "data_model_storage_shape",
+          title: "定义存储结构",
+          instruction: "Define the JSON file shape and migration-free POC assumptions.",
+          acceptanceCriteria: ["JSON storage structure is reviewable."],
+        },
+      ],
+    },
+    {
+      key: "cli_commands",
+      role: "developer",
+      title: "CLI 命令",
+      moduleInstruction: "Define the command surface that proves the Todo POC works end to end.",
+      acceptanceCriteria: ["Every command has syntax, behavior, and error output."],
+      toolHints: ["read_file", "write_file"],
+      skillHints: ["coding"],
+      leaves: [
+        {
+          key: "cli_add_list",
+          title: "设计 add/list 命令",
+          instruction: "Specify add <title> and list command behavior, including empty-list output.",
+          acceptanceCriteria: ["Add and list command behavior is executable."],
+          dependsOn: ["data_model_storage_shape"],
+        },
+        {
+          key: "cli_complete_delete",
+          title: "设计 complete/delete 命令",
+          instruction: "Specify complete <id> and delete <id> behavior and invalid id handling.",
+          acceptanceCriteria: ["Complete and delete command behavior is executable."],
+          dependsOn: ["data_model_todo_entity"],
+        },
+      ],
+    },
+    {
+      key: "persistence",
+      role: "developer",
+      title: "持久化",
+      moduleInstruction: "Plan the minimal persistence layer required to keep tasks between CLI runs.",
+      acceptanceCriteria: ["Read/write behavior and error recovery are specified."],
+      toolHints: ["read_file", "write_file"],
+      skillHints: ["coding"],
+      leaves: [
+        {
+          key: "persistence_load_save",
+          title: "实现读写 JSON 的任务",
+          instruction: "Define load/save functions, default file location, and first-run behavior.",
+          acceptanceCriteria: ["Load/save behavior can be implemented directly."],
+          dependsOn: ["data_model_storage_shape"],
+        },
+        {
+          key: "persistence_error_paths",
+          title: "处理文件异常路径",
+          instruction: "Define behavior for missing, empty, or malformed storage files.",
+          acceptanceCriteria: ["Persistence failure handling is explicit."],
+          dependsOn: ["persistence_load_save"],
+        },
+      ],
+    },
+    {
+      key: "validation",
+      role: "reviewer",
+      leafRole: "reviewer",
+      title: "验证",
+      moduleInstruction: "Define how to prove the POC satisfies the requested result without expanding scope.",
+      acceptanceCriteria: ["Manual and data-level verification steps are listed."],
+      toolHints: ["run_tests"],
+      skillHints: ["review", "quality"],
+      leaves: [
+        {
+          key: "validation_manual_flow",
+          title: "验证完整 CLI 流程",
+          instruction: "Run through add, list, complete, delete, and list again as an acceptance script.",
+          acceptanceCriteria: ["The acceptance script covers the core path."],
+          dependsOn: ["cli_add_list", "cli_complete_delete", "persistence_load_save"],
+        },
+        {
+          key: "validation_storage_file",
+          title: "验证数据文件结果",
+          instruction: "Inspect the JSON file after operations to confirm persistence and completed state.",
+          acceptanceCriteria: ["Stored data matches the CLI-visible state."],
+          dependsOn: ["validation_manual_flow"],
+        },
+      ],
+    },
+  ];
+}
+
+function applicationPlanningTemplates(selectedAgents: string[]): PlanningTemplate[] {
+  const implementationRole = selectedAgents.includes("developer") ? "developer" : "researcher";
+  return [
+    simpleTemplate("requirements_scope", "planner", "需求范围", "Define the outcome, users, core flows, and non-goals.", ["Core flows and constraints are explicit."]),
+    simpleTemplate("domain_model", implementationRole, "领域/数据模型", "Define the domain objects, state transitions, and data boundaries.", ["Domain state is concrete enough for implementation."]),
+    simpleTemplate("interface_surface", implementationRole, "接口/交互面", "Define the user-visible commands, screens, APIs, or integration points.", ["The interaction surface proves the core result."]),
+    simpleTemplate("implementation_slices", implementationRole, "实现切片", "Break the result into independently executable implementation slices.", ["Leaf slices can be assigned to subagents."]),
+    simpleTemplate("validation", "reviewer", "验证", "Define tests, manual checks, and acceptance evidence.", ["Verification proves the requested result."]),
+  ];
+}
+
+function fixPlanningTemplates(): PlanningTemplate[] {
+  return [
+    simpleTemplate("reproduce", "developer", "复现", "Define how to reproduce or observe the failure.", ["The failure signal is reproducible or bounded."]),
+    simpleTemplate("isolate", "developer", "定位", "Identify likely components, inputs, and failure boundaries.", ["The suspected cause is testable."]),
+    simpleTemplate("patch_plan", "developer", "修复方案", "Define the smallest safe patch and rollback considerations.", ["The patch scope is narrow and reviewable."]),
+    simpleTemplate("regression_validation", "reviewer", "回归验证", "Define tests or checks that prevent recurrence.", ["Regression coverage is explicit."]),
+  ];
+}
+
+function researchPlanningTemplates(): PlanningTemplate[] {
+  return [
+    simpleTemplate("research_questions", "researcher", "研究问题", "Turn the goal into answerable questions and decision criteria.", ["Questions map to the desired deliverable."]),
+    simpleTemplate("source_strategy", "researcher", "资料路径", "Define primary sources, search strategy, and freshness requirements.", ["Source requirements are explicit."]),
+    simpleTemplate("synthesis", "researcher", "综合分析", "Define comparison dimensions and synthesis output.", ["The synthesis will support a decision or clear answer."]),
+    simpleTemplate("validation", "reviewer", "验证", "Define cross-checks, uncertainty notes, and citation expectations.", ["Findings can be audited." ]),
+  ];
+}
+
+function generalPlanningTemplates(selectedAgents: string[]): PlanningTemplate[] {
+  const role = selectedAgents.includes("developer") ? "developer" : "researcher";
+  return [
+    simpleTemplate("scope", "planner", "范围", "Clarify the desired result, constraints, and explicit non-goals.", ["Scope is actionable."]),
+    simpleTemplate("workstreams", role, "工作流", "Break the result into independent workstreams.", ["Workstreams have clear outputs."]),
+    simpleTemplate("execution_leaves", role, "可执行叶子任务", "Split workstreams into concrete leaf tasks.", ["Leaves can be assigned and verified."]),
+    simpleTemplate("validation", "reviewer", "验证", "Define the acceptance checks.", ["The final result can be reviewed."]),
+  ];
+}
+
+function simpleTemplate(key: string, role: string, title: string, moduleInstruction: string, acceptanceCriteria: string[]): PlanningTemplate {
+  return {
+    key,
+    role,
+    title,
+    moduleInstruction,
+    acceptanceCriteria,
+    toolHints: role === "developer" ? ["read_file"] : [],
+    skillHints: role === "reviewer" ? ["review"] : role === "developer" ? ["coding"] : ["planning"],
+    leaves: [
+      {
+        key: `${key}_define`,
+        role,
+        title: `${title}定义`,
+        instruction: `Define the work product for ${title}.`,
+        acceptanceCriteria,
+      },
+      {
+        key: `${key}_verify`,
+        role: "reviewer",
+        title: `${title}检查点`,
+        instruction: `Define how to verify the ${title} work product.`,
+        acceptanceCriteria: ["A clear check or acceptance note is available."],
+        dependsOn: [`${key}_define`],
+        skillHints: ["review"],
+      },
+    ],
+  };
+}
+
+function normalizePlanningGoal(input: string): string {
+  return input
+    .replace(/[，,。.;；]?\s*(?:不要|不用|先别|暂不|别|无需).{0,16}(?:实现|执行|开发|写代码|动手|开工|run|execute|implement|code).*$/i, "")
+    .replace(/[，,。.;；]?\s*(?:只|仅).{0,8}(?:规划|计划|拆解|拆成|列出).{0,20}$/i, "")
+    .trim() || input.trim();
 }
 
 function parsePermissionModeValue(value: unknown): PermissionMode | undefined {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { flattenDagEditorNodes, formatDagEditorView, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
+import { flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError, mergeContextQueueToIndex } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,6 +29,7 @@ assert.match(tuiHelp, /\/dag list/);
 assert.match(tuiHelp, /\/dag <root_id>/);
 assert.match(tuiHelp, /\/node <key> \[runId\]/);
 assert.match(tuiHelp, /\/help all/);
+assert.match(tuiHelp, /\/queue/);
 assert.doesNotMatch(tuiHelp, /:status/);
 assert.doesNotMatch(tuiHelp, /\/cron-pause/);
 assert.ok(!tuiHelp.includes("undefined"));
@@ -69,6 +70,17 @@ const tuiHome = formatTuiHome({
   runLog: [
     "[12:00:00] developer running · subagent dev-1 · task abc123 - build",
     "[12:00:01] developer tool completed · shell · subagent dev-1 · task abc123",
+    "[12:00:02] planner failed · subagent planner-1 · task fail123 - planner | 原因: Task fail123 timed out after 120000ms",
+  ],
+  transcript: [
+    { role: "user", content: "测试消息" },
+    { role: "assistant", content: "收到，测试成功。" },
+    { role: "system", content: "run abc · elapsed 2s" },
+  ],
+  contextQueue: [
+    { id: "ctx-1", content: "第一条新 context", recorded: true },
+    { id: "ctx-2", content: "第二条新 context", recorded: true },
+    { id: "ctx-3", content: "第三条新 context", recorded: true },
   ],
 });
 process.stdout.columns = originalColumns;
@@ -78,14 +90,46 @@ assert.match(tuiHome, /Available Skills:/);
 assert.match(tuiHome, /Run Log:/);
 assert.match(tuiHome, /subagent dev-1/);
 assert.match(tuiHome, /tool completed/);
+assert.match(tuiHome, /planner failed/);
+assert.match(tuiHome, /timed out after 120000ms/);
 assert.match(tuiHome, /deepseek-chat/);
 assert.match(tuiHome, /Session: tui/);
 assert.match(tuiHome, /Welcome to Emily Agent! Type your message or \/help for commands\./);
+assert.match(tuiHome, /You/);
+assert.match(tuiHome, /测试消息/);
+assert.match(tuiHome, /Emily/);
+assert.match(tuiHome, /收到，测试成功。/);
+assert.match(tuiHome, /run abc/);
+assert.match(tuiHome, /Context Queue/);
+assert.match(tuiHome, /第一条新 context/);
+assert.match(tuiHome, /merge: \/queue merge 2/);
 assert.ok(!tuiHome.includes("undefined"));
+const mergedQueue = mergeContextQueueToIndex([
+  { id: "ctx-1", content: "第一条", recorded: true },
+  { id: "ctx-2", content: "第二条", recorded: true },
+  { id: "ctx-3", content: "第三条", recorded: true },
+], 2);
+assert.equal(mergedQueue.ok, true);
+assert.equal(mergedQueue.queue.length, 2);
+assert.match(mergedQueue.queue[0].content, /Context 1:\n第一条/);
+assert.match(mergedQueue.queue[0].content, /Context 2:\n第二条/);
+assert.equal(mergedQueue.queue[1].content, "第三条");
+assert.equal(mergeContextQueueToIndex([{ content: "one" }], 1).ok, false);
 const idleTuiHome = formatTuiHome();
 assert.match(idleTuiHome, /Run Log:/);
 assert.match(idleTuiHome, /waiting for activity/);
 assert.match(idleTuiHome, /subagent\/task\/tool events appear here/);
+const failedProgress = formatProgressEvent("task.failed", {
+  id: "31e64bd2-f90d-4f9f-80ec-fb7891bf41d4",
+  role: "planner",
+  title: "planner: Todo POC",
+  assignedAgentId: "planner-73447",
+  error: "Error: Task 31e64bd2 timed out after 120000ms\n    at Timeout",
+  metadata: {},
+}, { payload: { reason: "worker failed" } });
+assert.match(failedProgress, /planner failed/);
+assert.match(failedProgress, /subagent planner-73447/);
+assert.match(failedProgress, /原因: Error: Task 31e64bd2 timed out after 120000ms/);
 process.stdout.columns = 180;
 const dynamicStatusHome = formatTuiHome({
   state: { sessionId: "review-session", lastRunId: "run_dynamic", permissionMode: "read_only" },
@@ -104,6 +148,10 @@ assert.match(submitted, /❯ what can you do for me\?/);
 assert.doesNotMatch(submitted, /─/);
 assert.doesNotMatch(submitted, /Initializing agent\.\.\./);
 assert.ok(!submitted.includes("undefined"));
+const promptPreview = formatPromptBufferPreviewLines("帮我规划一个 Todo 应用 POC，先拆成 DAG：需求范围、数据模型、CLI 命令、持久化、验证\n/dag list", 32);
+assert.ok(promptPreview.length > 1);
+assert.equal(promptPreview.at(-1), "/dag list");
+assert.ok(promptPreview.every((line) => !line.includes("...")));
 const assistant = formatTranscriptMessage("assistant", "hello from emily", 80);
 assert.match(assistant, /┊ hello from emily/);
 assert.match(formatThinkingFrame(3), /thinking\.\.\./);

@@ -337,37 +337,41 @@ export function addTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNodeAdd
   const dependencyKeys = input.dependsOn?.length ? input.dependsOn : [parent.key];
   const dependencyTasks = dependencyKeys.map((dependency) => resolveNode(map, dependency));
   assertNoDependencyCycle(map, key, dependencyTasks.map((dependency) => dependency.key));
+  const inheritedPermissionMode = typeof parent.metadata.permissionMode === "string" ? parent.metadata.permissionMode : "";
+  const permissionMode = input.permissionMode || inheritedPermissionMode;
+  const metadata: Metadata = {
+    ...inheritedGraphMetadata(parentTask.metadata),
+    ...(input.metadata || {}),
+    graphKey: key,
+    graphId: parent.metadata.graphId || "",
+    graphRole: normalizeRole(input.role),
+    parentKey: parent.key,
+    acceptanceCriteria: stringList(input.acceptanceCriteria, ["The task produces a useful result for this branch."]),
+    toolHints: stringList(input.toolHints, []),
+    skillHints: stringList(input.skillHints, []),
+    timeoutMs: boundedNumber(input.timeoutMs, 30000, 1000, 10 * 60 * 1000),
+    maxResultChars: boundedNumber(input.maxResultChars, 12000, 1000, 100000),
+    maxMemoryCandidates: boundedNumber(input.maxMemoryCandidates, 1, 0, 20),
+    wave: nextWave(parent),
+    expandable: input.expandable === true,
+    expansionGoal: input.expansionGoal || "",
+    maxExpansionDepth: boundedNumber(input.maxExpansionDepth, 0, 0, 20),
+    manuallyAdded: true,
+    graphMutation: {
+      type: "add",
+      at: new Date().toISOString(),
+      parentKey: parent.key,
+    },
+  };
+  if (permissionMode) metadata.permissionMode = permissionMode;
+
   const created = taskStore.createTask({
     role: normalizeRole(input.role),
     title: input.title.trim(),
     input: input.input.trim(),
     parentTaskId: parent.id,
     maxRetries: normalizeRetries(input.maxRetries, 1),
-    metadata: {
-      ...inheritedGraphMetadata(parentTask.metadata),
-      ...(input.metadata || {}),
-      graphKey: key,
-      graphId: parent.metadata.graphId || "",
-      graphRole: normalizeRole(input.role),
-      parentKey: parent.key,
-      acceptanceCriteria: stringList(input.acceptanceCriteria, ["The task produces a useful result for this branch."]),
-      toolHints: stringList(input.toolHints, []),
-      skillHints: stringList(input.skillHints, []),
-      timeoutMs: boundedNumber(input.timeoutMs, 30000, 1000, 10 * 60 * 1000),
-      maxResultChars: boundedNumber(input.maxResultChars, 12000, 1000, 100000),
-      maxMemoryCandidates: boundedNumber(input.maxMemoryCandidates, 1, 0, 20),
-      wave: nextWave(parent),
-      expandable: input.expandable === true,
-      expansionGoal: input.expansionGoal || "",
-      maxExpansionDepth: boundedNumber(input.maxExpansionDepth, 0, 0, 20),
-      permissionMode: input.permissionMode || parent.metadata.permissionMode || undefined,
-      manuallyAdded: true,
-      graphMutation: {
-        type: "add",
-        at: new Date().toISOString(),
-        parentKey: parent.key,
-      },
-    },
+    metadata,
   });
   for (const dependency of dependencyTasks) {
     taskStore.addTaskDependency(created.id, dependency.id, input.dependencyType || "success");
