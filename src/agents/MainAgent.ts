@@ -508,6 +508,50 @@ export class MainAgent {
   }> {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
+
+    if (planOnly) {
+      const plan = createPlanningOnlyPlanSpec(input, selectedAgents);
+      const validation = validatePlanSpec(plan);
+      if (!validation.ok) {
+        this.taskStore.addEvent({
+          type: "runtime.anomaly",
+          payload: {
+            severity: "warning",
+            code: "plan_only_template_invalid",
+            message: "Template planning-only PlanSpec was invalid; fallback plan was used.",
+            errors: validation.errors,
+            runId,
+            repaired: true,
+          },
+        });
+      }
+      const safePlan = validation.ok ? plan : createFallbackPlanSpec(input, selectedAgents);
+      const plannedTasks = createTaskGraphFromPlan({
+        taskStore: this.taskStore,
+        plan: safePlan,
+        baseMetadata: {
+          sessionId,
+          source,
+          runId,
+          createdBy: this.name,
+          planSource: validation.ok ? "template" : "fallback",
+          permissionMode: permissionMode || "workspace_write",
+          planOnly: true,
+          executionState: "draft",
+        },
+      });
+      const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
+      this.taskStore.refreshTaskGraphStatuses();
+      return {
+        subResults: results,
+        reviewerVerdict,
+        delegatedTo: ["planner"],
+        plan: safePlan,
+        planOnly: true,
+        graphId,
+      };
+    }
+
     const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc");
     const planningGraph = createTaskGraph({
       taskStore: this.taskStore,
@@ -580,34 +624,6 @@ export class MainAgent {
           taskId: finishedPlanner.id,
           source: "plan",
         },
-      };
-    }
-
-    if (planOnly) {
-      plan = createPlanningOnlyPlanSpec(input, selectedAgents, plan);
-      const plannedTasks = createTaskGraphFromPlan({
-        taskStore: this.taskStore,
-        plan,
-        baseMetadata: {
-          sessionId,
-          source,
-          runId,
-          createdBy: this.name,
-          planSourceTaskId: finishedPlanner.id,
-          permissionMode: permissionMode || "workspace_write",
-          planOnly: true,
-          executionState: "draft",
-        },
-      });
-      const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
-      this.taskStore.refreshTaskGraphStatuses();
-      return {
-        subResults: results,
-        reviewerVerdict,
-        delegatedTo: ["planner"],
-        plan,
-        planOnly: true,
-        graphId,
       };
     }
 

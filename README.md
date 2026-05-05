@@ -197,7 +197,7 @@ While a long-running job is active, the TUI keeps accepting input. Read-only com
 
 Queued contexts can be merged before they are processed. The TUI shows a Context Queue section while pending contexts exist; row 2 and later display a merge action. `/queue merge 2` merges context 1 and 2 into one queued item and leaves context 3 onward untouched.
 
-Planning-only requests are supported. A message such as `帮我规划一个 Todo 应用 POC，不要立即实现` is enough; users do not need to spell out “需求范围、数据模型、CLI 命令、持久化、验证” in the prompt. The main agent treats that as a plan-only task, asks the planner to work backward from the desired result, creates an editable DAG with module nodes and executable leaves, and leaves implementation tasks pending until the user explicitly starts or edits them.
+Planning-only requests are supported. A message such as `帮我规划一个 Todo 应用 POC，不要立即实现` is enough; users do not need to spell out “需求范围、数据模型、CLI 命令、持久化、验证” in the prompt. The main agent treats that as a plan-only task, uses a deterministic result-first template to create an editable DAG with module nodes and executable leaves, and leaves implementation tasks pending until the user explicitly starts or edits them. This fast path avoids waiting for a planner model call just to draft the first DAG.
 
 ## Model Setup
 
