@@ -156,8 +156,9 @@ export async function startTui({ runtime }) {
   await printBanner(runtime, state);
 
   try {
+    const queuedMessages: string[] = [];
     while (true) {
-      const raw = await readPromptLine(rl, state);
+      const raw = queuedMessages.length ? queuedMessages.shift() || "" : await readPromptLine(rl, state);
       if (raw === null) break;
       const message = raw.trim();
       if (!message) continue;
@@ -167,7 +168,7 @@ export async function startTui({ runtime }) {
         if (isCommand(message)) {
           await handleCommand(runtime, state, message, rl);
         } else {
-          await sendChat(runtime, state, message, rl);
+          queuedMessages.push(...await sendChat(runtime, state, message, rl));
         }
       } catch (error) {
         printError(error);
@@ -416,14 +417,23 @@ async function handleCommand(runtime, state, message: string, rl?: readline.Inte
   }
 }
 
-async function sendChat(runtime, state, message: string, rl?: readline.Interface): Promise<void> {
+async function sendChat(runtime, state, message: string, rl?: readline.Interface): Promise<string[]> {
   output.write(formatTuiSubmittedInput(message));
   const thinking = createThinkingIndicator();
+  const busyReader = rl ? attachBusyInputReader(runtime, state, rl, thinking) : null;
   const detachModelThinking = attachModelThinkingReporter(runtime, state, thinking);
-  const detachProgress = attachProgressReporter(runtime, state, () => thinking.stop());
-  const detachBusyCommands = rl ? attachBusyCommandReader(runtime, state, rl, thinking) : async () => undefined;
+  const detachProgress = attachProgressReporter(
+    runtime,
+    state,
+    () => {
+      busyReader?.clearReadyPrompt();
+      thinking.stop();
+    },
+    () => busyReader?.writeReadyPrompt(),
+  );
   const startedAt = Date.now();
   let response;
+  let queuedMessages: string[] = [];
   try {
     response = await runtime.handleUserMessage(message, {
       sessionId: state.sessionId,
@@ -434,7 +444,7 @@ async function sendChat(runtime, state, message: string, rl?: readline.Interface
     thinking.stop();
     detachModelThinking();
     detachProgress();
-    await detachBusyCommands();
+    queuedMessages = busyReader ? await busyReader.detach() : [];
   }
   if (response.runId) state.lastRunId = response.runId;
   printAssistantMessage(response.content);
@@ -447,37 +457,65 @@ async function sendChat(runtime, state, message: string, rl?: readline.Interface
     printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
   }
   output.write("\n");
+  return queuedMessages;
 }
 
-function attachBusyCommandReader(
+function attachBusyInputReader(
   runtime,
   state,
   rl: readline.Interface,
   thinking: ReturnType<typeof createThinkingIndicator>,
-): () => Promise<void> {
+): { detach: () => Promise<string[]>; writeReadyPrompt: () => void; clearReadyPrompt: () => void } {
   let closed = false;
+  let promptVisible = false;
+  const queuedMessages: string[] = [];
   const pending = new Set<Promise<void>>();
-  const backgroundJobs = new Set<Promise<void>>();
+  const writeReadyPrompt = () => {
+    if (closed) return;
+    output.write(promptFor(state));
+    promptVisible = true;
+  };
+  const clearReadyPrompt = () => {
+    if (!promptVisible || !output.isTTY) return;
+    output.write("\r\x1b[2K");
+    promptVisible = false;
+  };
   const onLine = (line: string) => {
     if (closed) return;
     const message = line.trim();
-    if (!message) return;
-    const task = (isCommand(message)
-      ? runBusyCommand(runtime, state, message, thinking)
-      : runBusyChat(runtime, state, message, thinking))
+    clearSubmittedPromptLine();
+    promptVisible = false;
+    if (!message) {
+      writeReadyPrompt();
+      return;
+    }
+    if (!isCommand(message)) {
+      thinking.stop();
+      output.write(formatTuiSubmittedInput(message));
+      queuedMessages.push(message);
+      output.write(`${style("·", "gray")} queued context ${queuedMessages.length}\n\n`);
+      writeReadyPrompt();
+      return;
+    }
+    const task = runBusyCommand(runtime, state, message, thinking)
       .catch((error) => printError(error))
       .finally(() => {
         pending.delete(task);
-        backgroundJobs.delete(task);
+        writeReadyPrompt();
       });
-    if (isCommand(message)) pending.add(task);
-    else backgroundJobs.add(task);
+    pending.add(task);
   };
   rl.on("line", onLine);
-  return async () => {
-    closed = true;
-    rl.off("line", onLine);
-    await Promise.allSettled([...pending]);
+  writeReadyPrompt();
+  return {
+    writeReadyPrompt,
+    clearReadyPrompt,
+    async detach() {
+      closed = true;
+      rl.off("line", onLine);
+      await Promise.allSettled([...pending]);
+      return queuedMessages;
+    },
   };
 }
 
@@ -487,18 +525,12 @@ async function runBusyCommand(
   message: string,
   thinking: ReturnType<typeof createThinkingIndicator>,
 ): Promise<void> {
-  const command = busyCommandName(message);
-  const wasThinking = thinking.isActive();
   thinking.stop();
-  try {
-    if (!isBusySafeCommand(message)) {
-      printPanel("Busy", `当前任务还在运行中。现在支持只读命令，例如 /dag list、/status、/timeline；普通文本会作为新的后台作业启动。`, "yellow");
-      return;
-    }
-    await handleCommand(runtime, state, message);
-  } finally {
-    if (wasThinking) thinking.start();
+  if (!isBusySafeCommand(message)) {
+    printPanel("Busy", `当前 main agent 还在处理上下文。现在支持只读命令，例如 /dag list、/sub、/status、/timeline；普通文本会进入 context queue。`, "yellow");
+    return;
   }
+  await handleCommand(runtime, state, message);
 }
 
 function busyCommandName(message: string): string {
@@ -517,38 +549,6 @@ function isBusySafeCommand(message: string): boolean {
     return !args[0] || args[0] === "list";
   }
   return true;
-}
-
-async function runBusyChat(
-  runtime,
-  state,
-  message: string,
-  thinking: ReturnType<typeof createThinkingIndicator>,
-): Promise<void> {
-  const wasThinking = thinking.isActive();
-  thinking.stop();
-  output.write(formatTuiSubmittedInput(message));
-  const startedAt = Date.now();
-  try {
-    const response = await runtime.handleUserMessage(message, {
-      sessionId: state.sessionId,
-      source: "tui",
-      permissionMode: state.permissionMode,
-    });
-    if (response.runId) state.lastRunId = response.runId;
-    printAssistantMessage(response.content);
-    const meta = [];
-    if (response.runId) meta.push(`run ${response.runId}`);
-    if (response.delegatedTo?.length) meta.push(`agents ${response.delegatedTo.join(", ")}`);
-    meta.push(`elapsed ${formatDuration(Date.now() - startedAt)}`);
-    printMeta(meta);
-    if (response.needsUserInput?.questions?.length) {
-      printPanel("Needs Input", response.needsUserInput.questions.map((question) => `- ${question}`).join("\n"), "yellow");
-    }
-    output.write("\n");
-  } finally {
-    if (wasThinking) thinking.start();
-  }
 }
 
 async function printStatus(runtime, state): Promise<void> {
@@ -1178,7 +1178,12 @@ export function formatThinkingFrame(frame: number): string {
   )).join("");
 }
 
-function attachProgressReporter(runtime, state, beforePrint: () => void = () => undefined): () => void {
+function attachProgressReporter(
+  runtime,
+  state,
+  beforePrint: () => void = () => undefined,
+  afterPrint: () => void = () => undefined,
+): () => void {
   const manager = runtime.roleAgentManager;
   if (!manager?.on || !manager?.off) return () => undefined;
   const seen = new Set<string>();
@@ -1195,6 +1200,7 @@ function attachProgressReporter(runtime, state, beforePrint: () => void = () => 
     if (line) {
       beforePrint();
       output.write(`${style(TUI_GLYPHS.assistant, "gray")} ${style(line, "gray")}\n`);
+      afterPrint();
     }
   };
   manager.on("event", handler);
