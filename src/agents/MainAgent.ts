@@ -26,7 +26,7 @@ import {
   type PlanSpec,
 } from "../planning/PlanSpec.ts";
 
-const PLANNER_TASK_TIMEOUT_MS = 120000;
+const DEFAULT_PLANNER_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface MainAgentResult {
   agent: string;
@@ -75,6 +75,7 @@ export class MainAgent {
   contextEngine: ContextEngine | null;
   hooks: LifecycleHooks | null;
   router: AgentRouter | null;
+  plannerTaskTimeoutMs: number;
 
   constructor({
     name,
@@ -86,6 +87,7 @@ export class MainAgent {
     contextEngine = null,
     hooks = null,
     router = null,
+    plannerTaskTimeoutMs = DEFAULT_PLANNER_TASK_TIMEOUT_MS,
   }: {
     name: string;
     model: ModelProvider;
@@ -96,6 +98,7 @@ export class MainAgent {
     contextEngine?: ContextEngine | null;
     hooks?: LifecycleHooks | null;
     router?: AgentRouter | null;
+    plannerTaskTimeoutMs?: number;
   }) {
     this.name = name;
     this.model = model;
@@ -107,6 +110,7 @@ export class MainAgent {
     this.contextEngine = contextEngine;
     this.hooks = hooks;
     this.router = router;
+    this.plannerTaskTimeoutMs = Math.max(1000, Math.floor(plannerTaskTimeoutMs));
   }
 
   async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}): Promise<MainAgentResult> {
@@ -509,49 +513,6 @@ export class MainAgent {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
 
-    if (planOnly) {
-      const plan = createPlanningOnlyPlanSpec(input, selectedAgents);
-      const validation = validatePlanSpec(plan);
-      if (!validation.ok) {
-        this.taskStore.addEvent({
-          type: "runtime.anomaly",
-          payload: {
-            severity: "warning",
-            code: "plan_only_template_invalid",
-            message: "Template planning-only PlanSpec was invalid; fallback plan was used.",
-            errors: validation.errors,
-            runId,
-            repaired: true,
-          },
-        });
-      }
-      const safePlan = validation.ok ? plan : createFallbackPlanSpec(input, selectedAgents);
-      const plannedTasks = createTaskGraphFromPlan({
-        taskStore: this.taskStore,
-        plan: safePlan,
-        baseMetadata: {
-          sessionId,
-          source,
-          runId,
-          createdBy: this.name,
-          planSource: validation.ok ? "template" : "fallback",
-          permissionMode: permissionMode || "workspace_write",
-          planOnly: true,
-          executionState: "draft",
-        },
-      });
-      const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
-      this.taskStore.refreshTaskGraphStatuses();
-      return {
-        subResults: results,
-        reviewerVerdict,
-        delegatedTo: ["planner"],
-        plan: safePlan,
-        planOnly: true,
-        graphId,
-      };
-    }
-
     const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc");
     const planningGraph = createTaskGraph({
       taskStore: this.taskStore,
@@ -560,7 +521,7 @@ export class MainAgent {
         source,
         runId,
         createdBy: this.name,
-        timeoutMs: PLANNER_TASK_TIMEOUT_MS,
+        timeoutMs: this.plannerTaskTimeoutMs,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
         permissionMode: permissionMode || "workspace_write",
@@ -584,7 +545,7 @@ export class MainAgent {
     const plannerTask = planningGraph.planner;
 
     const finishedPlanner = await this.roleAgentManager.runTask(plannerTask, {
-      timeoutMs: PLANNER_TASK_TIMEOUT_MS + 5000,
+      timeoutMs: this.plannerTaskTimeoutMs + 5000,
     });
     results.push(this.formatTaskResult("planner", finishedPlanner));
     if (finishedPlanner.status !== "done") {
@@ -624,6 +585,34 @@ export class MainAgent {
           taskId: finishedPlanner.id,
           source: "plan",
         },
+      };
+    }
+
+    if (planOnly) {
+      plan = createPlanningOnlyPlanSpec(input, selectedAgents, plan);
+      const plannedTasks = createTaskGraphFromPlan({
+        taskStore: this.taskStore,
+        plan,
+        baseMetadata: {
+          sessionId,
+          source,
+          runId,
+          createdBy: this.name,
+          planSourceTaskId: finishedPlanner.id,
+          permissionMode: permissionMode || "workspace_write",
+          planOnly: true,
+          executionState: "draft",
+        },
+      });
+      const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
+      this.taskStore.refreshTaskGraphStatuses();
+      return {
+        subResults: results,
+        reviewerVerdict,
+        delegatedTo: ["planner"],
+        plan,
+        planOnly: true,
+        graphId,
       };
     }
 

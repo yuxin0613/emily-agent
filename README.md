@@ -197,7 +197,7 @@ While a long-running job is active, the TUI keeps accepting input. Read-only com
 
 Queued contexts can be merged before they are processed. The TUI shows a Context Queue section while pending contexts exist; row 2 and later display a merge action. `/queue merge 2` merges context 1 and 2 into one queued item and leaves context 3 onward untouched.
 
-Planning-only requests are supported. A message such as `帮我规划一个 Todo 应用 POC，不要立即实现` is enough; users do not need to spell out “需求范围、数据模型、CLI 命令、持久化、验证” in the prompt. The main agent treats that as a plan-only task, uses a deterministic result-first template to create an editable DAG with module nodes and executable leaves, and leaves implementation tasks pending until the user explicitly starts or edits them. This fast path avoids waiting for a planner model call just to draft the first DAG.
+Planning-only requests are supported. A message such as `帮我规划一个 Todo 应用 POC，不要立即实现` is enough; users do not need to spell out “需求范围、数据模型、CLI 命令、持久化、验证” in the prompt. The main agent treats that as a plan-only task, asks the planner to work backward from the desired result, creates an editable DAG with module nodes and executable leaves, and leaves implementation tasks pending until the user explicitly starts or edits them. The planner wait budget is controlled by `agents.plannerTaskTimeoutSeconds`.
 
 ## Model Setup
 
@@ -256,6 +256,7 @@ Runtime settings in `.emily/config.json`:
 | `agents.maxConcurrentSubagents` | Global cap for simultaneously running subagents. Default: based on local CPU, capped at `4`. |
 | `agents.releaseSubagentsAfterTask` | Whether idle subagent worker processes are released after they finish work. Default: `true`. |
 | `agents.subagentIdleTtlSeconds` | Idle time before releasing a finished subagent. Use `0` to release immediately. Default: `60`. |
+| `agents.plannerTaskTimeoutSeconds` | Maximum time to wait for the planner subagent to produce the initial DAG. Default: `600`. |
 
 Example:
 
@@ -269,7 +270,8 @@ Example:
     "maxSubagentsPerRole": 1,
     "maxConcurrentSubagents": 4,
     "releaseSubagentsAfterTask": true,
-    "subagentIdleTtlSeconds": 60
+    "subagentIdleTtlSeconds": 60,
+    "plannerTaskTimeoutSeconds": 600
   },
   "providers": []
 }

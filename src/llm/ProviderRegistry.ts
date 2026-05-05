@@ -25,6 +25,7 @@ export interface AgentRuntimeConfig {
   maxConcurrentSubagents: number;
   releaseSubagentsAfterTask: boolean;
   subagentIdleTtlSeconds: number;
+  plannerTaskTimeoutSeconds: number;
 }
 
 export class ProviderRegistry {
@@ -605,6 +606,7 @@ function defaultAgentRuntimeConfig(): AgentRuntimeConfig {
     maxConcurrentSubagents: Math.max(1, Math.min(4, available - 1 || 1)),
     releaseSubagentsAfterTask: true,
     subagentIdleTtlSeconds: 60,
+    plannerTaskTimeoutSeconds: 600,
   };
 }
 
@@ -625,6 +627,7 @@ export function normalizeAgentRuntimeConfig(value: unknown): AgentRuntimeConfig 
     maxConcurrentSubagents: numberConfig(input.maxConcurrentSubagents, defaults.maxConcurrentSubagents, "agents.maxConcurrentSubagents", 1, 64),
     releaseSubagentsAfterTask: typeof input.releaseSubagentsAfterTask === "boolean" ? input.releaseSubagentsAfterTask : defaults.releaseSubagentsAfterTask,
     subagentIdleTtlSeconds: numberConfig(input.subagentIdleTtlSeconds, defaults.subagentIdleTtlSeconds, "agents.subagentIdleTtlSeconds", 0, 24 * 60 * 60),
+    plannerTaskTimeoutSeconds: numberConfig(input.plannerTaskTimeoutSeconds, defaults.plannerTaskTimeoutSeconds, "agents.plannerTaskTimeoutSeconds", 1, 24 * 60 * 60),
   };
   return config;
 }

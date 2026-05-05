@@ -17,6 +17,9 @@ assert.deepEqual(workerExecArgv([
 assert.throws(() => normalizeAgentRuntimeConfig({ mainAgents: 2 }), /agents\.mainAgents/);
 assert.throws(() => normalizeAgentRuntimeConfig({ maxSubagentsPerRole: 2 }), /agents\.maxSubagentsPerRole/);
 assert.equal(normalizeAgentRuntimeConfig({ maxConcurrentSubagents: 2 }).maxConcurrentSubagents, 2);
+assert.equal(normalizeAgentRuntimeConfig({}).plannerTaskTimeoutSeconds, 600);
+assert.equal(normalizeAgentRuntimeConfig({ plannerTaskTimeoutSeconds: 1200 }).plannerTaskTimeoutSeconds, 1200);
+assert.throws(() => normalizeAgentRuntimeConfig({ plannerTaskTimeoutSeconds: 0 }), /agents\.plannerTaskTimeoutSeconds/);
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-core-"));
 const runtime = await createRuntime({
@@ -25,6 +28,7 @@ const runtime = await createRuntime({
     maxConcurrentSubagents: 2,
     releaseSubagentsAfterTask: true,
     subagentIdleTtlSeconds: 0,
+    plannerTaskTimeoutSeconds: 1200,
   },
 });
 assert.equal(runtime.roleAgentManager.maxSubagentsPerRole, 1);
