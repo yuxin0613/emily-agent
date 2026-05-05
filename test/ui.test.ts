@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { flattenDagEditorNodes, formatDagEditorView, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
+import { flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -69,6 +69,7 @@ const tuiHome = formatTuiHome({
   runLog: [
     "[12:00:00] developer running · subagent dev-1 · task abc123 - build",
     "[12:00:01] developer tool completed · shell · subagent dev-1 · task abc123",
+    "[12:00:02] planner failed · subagent planner-1 · task fail123 - planner | 原因: Task fail123 timed out after 120000ms",
   ],
   transcript: [
     { role: "user", content: "测试消息" },
@@ -83,6 +84,8 @@ assert.match(tuiHome, /Available Skills:/);
 assert.match(tuiHome, /Run Log:/);
 assert.match(tuiHome, /subagent dev-1/);
 assert.match(tuiHome, /tool completed/);
+assert.match(tuiHome, /planner failed/);
+assert.match(tuiHome, /timed out after 120000ms/);
 assert.match(tuiHome, /deepseek-chat/);
 assert.match(tuiHome, /Session: tui/);
 assert.match(tuiHome, /Welcome to Emily Agent! Type your message or \/help for commands\./);
@@ -96,6 +99,17 @@ const idleTuiHome = formatTuiHome();
 assert.match(idleTuiHome, /Run Log:/);
 assert.match(idleTuiHome, /waiting for activity/);
 assert.match(idleTuiHome, /subagent\/task\/tool events appear here/);
+const failedProgress = formatProgressEvent("task.failed", {
+  id: "31e64bd2-f90d-4f9f-80ec-fb7891bf41d4",
+  role: "planner",
+  title: "planner: Todo POC",
+  assignedAgentId: "planner-73447",
+  error: "Error: Task 31e64bd2 timed out after 120000ms\n    at Timeout",
+  metadata: {},
+}, { payload: { reason: "worker failed" } });
+assert.match(failedProgress, /planner failed/);
+assert.match(failedProgress, /subagent planner-73447/);
+assert.match(failedProgress, /原因: Error: Task 31e64bd2 timed out after 120000ms/);
 process.stdout.columns = 180;
 const dynamicStatusHome = formatTuiHome({
   state: { sessionId: "review-session", lastRunId: "run_dynamic", permissionMode: "read_only" },

@@ -1471,7 +1471,7 @@ function shouldShowProgressEvent(type: string): boolean {
     || type === "runtime.anomaly";
 }
 
-function formatProgressEvent(type: string, task, event): string {
+export function formatProgressEvent(type: string, task, event): string {
   if (type.startsWith("task.")) {
     const status = type.replace(/^task\./, "");
     const role = task?.role ? `${task.role} ` : "";
@@ -1479,7 +1479,8 @@ function formatProgressEvent(type: string, task, event): string {
     const agent = agentId ? ` · subagent ${agentId}` : "";
     const taskId = task?.id ? ` · task ${String(task.id).slice(0, 8)}` : "";
     const title = task?.title ? ` - ${truncate(task.title, 72)}` : "";
-    return `${role}${status}${agent}${taskId}${title}`;
+    const reason = taskFailureReason(status, task, event);
+    return `${role}${status}${agent}${taskId}${title}${reason ? ` | ${reason}` : ""}`;
   }
   if (type.startsWith("task_graph.")) {
     return type.replace(/^task_graph\./, "graph ");
@@ -1499,6 +1500,27 @@ function formatProgressEvent(type: string, task, event): string {
     return `anomaly: ${event?.payload?.code || event?.payload?.message || "runtime"}`;
   }
   return type;
+}
+
+function taskFailureReason(status: string, task, event): string {
+  if (!["failed", "dead_letter", "blocked", "cancelled"].includes(status)) return "";
+  const payloadReason = event?.payload?.reason || event?.payload?.error || event?.payload?.message;
+  const candidates = [
+    task?.error,
+    task?.metadata?.lastError,
+    task?.metadata?.deadLetterReason,
+    task?.metadata?.cancelReason,
+    payloadReason,
+  ];
+  const reason = candidates
+    .map((candidate) => typeof candidate === "string" ? candidate.trim() : "")
+    .find(Boolean);
+  if (!reason) return "原因未记录，使用 /trace 查看详情";
+  return `原因: ${firstLine(reason)}`;
+}
+
+function firstLine(value: string): string {
+  return value.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || value.trim();
 }
 
 function appendRunLog(state: { runLog?: string[] }, line: string): void {
