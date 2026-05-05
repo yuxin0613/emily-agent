@@ -111,18 +111,37 @@ try {
   }) as { deleted: string[] };
   assert.deepEqual(deleted.deleted, ["polish_slice"]);
 
+  const extraGraph = runtime.taskStore.createTaskGraph({ runId: run.id });
+  runtime.taskStore.createTask({
+    role: "planner",
+    title: "Extra root",
+    input: "A second graph under the same run should be grouped in DAG list.",
+    metadata: {
+      runId: run.id,
+      sessionId: "mindmap-test",
+      source: "test",
+      graphId: extraGraph.id,
+      graphKey: "extra-root",
+      graphRole: "planner",
+      acceptanceCriteria: ["Grouped by run."],
+    },
+  });
+
   const afterAddText = String(await runtime.runCommand("graph.view", {
     input: { runId: run.id },
     format: "text",
   }));
   assert.match(afterAddText, /api_slice/);
   assert.match(afterAddText, /prep_slice/);
+  assert.match(afterAddText, /extra-root/);
   assert.doesNotMatch(afterAddText, /polish_slice/);
 
   const dagList = String(await runtime.runCommand("dag.list", { format: "text" }));
   assert.match(dagList, /DAG Roots/);
   assert.match(dagList, /未开始/);
   assert.match(dagList, new RegExp(run.id));
+  assert.equal((dagList.match(new RegExp(run.id, "g")) || []).length, 1);
+  assert.match(dagList, /2 graphs/);
 
   const gatewayRead = await dispatchGatewayRequest(runtime as never, {
     type: "request",

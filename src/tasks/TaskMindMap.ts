@@ -44,6 +44,8 @@ export interface TaskMindMapRootSummary {
   rootId: string;
   runId: string;
   graphId: string;
+  graphIds: string[];
+  graphCount: number;
   runStatus: string;
   graphStatus: string;
   goal: string;
@@ -207,42 +209,53 @@ export function buildTaskMindMap(taskStore: TaskStore, runId: string): TaskMindM
 
 export function listActiveTaskMindMapRoots(taskStore: TaskStore, options: TaskMindMapRootListOptions = {}): TaskMindMapRootSummary[] {
   const summaries: TaskMindMapRootSummary[] = [];
+  const limit = Math.max(1, Math.min(100, Math.floor(options.limit ?? 20)));
   const graphs = options.activeOnly
     ? taskStore.getOpenTaskGraphs()
-    : taskStore.getRecentTaskGraphs({ limit: options.limit ?? 20 });
+    : taskStore.getRecentTaskGraphs({ limit: Math.min(100, limit * 4) });
+  const graphsByRun = new Map<string, typeof graphs>();
   for (const graph of graphs) {
     if (!graph.runId) continue;
-    const run = taskStore.getRun(graph.runId);
-    const tasks = taskStore.getTasksForGraph(graph.id).filter((task) => isVisibleGraphTask(task));
-    if (!run || !tasks.length) continue;
-    const active = tasks.filter((task) => ACTIVE_STATUSES.has(task.status));
+    graphsByRun.set(graph.runId, [...(graphsByRun.get(graph.runId) || []), graph]);
+  }
+  for (const [runId, runGraphs] of graphsByRun) {
+    const run = taskStore.getRun(runId);
+    const map = run ? buildTaskMindMap(taskStore, runId) : null;
+    if (!run || !map || !map.nodes.length) continue;
+    const active = map.nodes.filter((task) => ACTIVE_STATUSES.has(task.status));
     if (options.activeOnly && !active.length) continue;
-    const byKey = new Map(tasks.map((task) => [graphKey(task), task]));
-    const roots = tasks
-      .filter((task) => !parentKeyFor(task) || !byKey.has(parentKeyFor(task)))
-      .sort(taskSort)
-      .map((task) => ({
-        key: graphKey(task),
-        taskId: task.id,
-        title: task.title,
-        status: task.status,
+    const nodesByKey = new Map(map.nodes.map((node) => [node.key, node]));
+    const roots = map.roots
+      .map((key) => nodesByKey.get(key))
+      .filter((node): node is TaskMindMapNode => Boolean(node))
+      .map((node) => ({
+        key: node.key,
+        taskId: node.id,
+        title: node.title,
+        status: node.status,
       }));
+    const graphIds = unique(runGraphs.map((graph) => graph.id));
     summaries.push({
       rootId: run.id,
       runId: run.id,
-      graphId: graph.id,
+      graphId: graphIds[0] || map.graphId,
+      graphIds,
+      graphCount: graphIds.length,
       runStatus: run.status,
-      graphStatus: graph.status,
+      graphStatus: combinedGraphStatus(runGraphs.map((graph) => graph.status)),
       goal: run.userInput,
       roots,
-      queued: tasks.filter((task) => task.status === "queued").length,
-      running: tasks.filter((task) => task.status === "running").length,
-      pending: tasks.filter((task) => task.status === "pending" || task.status === "blocked").length,
-      editable: tasks.filter(isNodeEditable).length,
-      updatedAt: tasks.reduce((latest, task) => task.updatedAt > latest ? task.updatedAt : latest, graph.createdAt),
+      queued: map.nodes.filter((task) => task.status === "queued").length,
+      running: map.nodes.filter((task) => task.status === "running").length,
+      pending: map.nodes.filter((task) => task.status === "pending" || task.status === "blocked").length,
+      editable: map.nodes.filter((node) => node.editable).length,
+      updatedAt: [
+        ...map.nodes.map((node) => node.updatedAt),
+        ...runGraphs.map((graph) => graph.completedAt || graph.createdAt),
+      ].reduce((latest, value) => value > latest ? value : latest, run.startedAt),
     });
   }
-  return summaries.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  return summaries.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, limit);
 }
 
 export function renderTaskMindMapRootList(roots: TaskMindMapRootSummary[]): string {
@@ -251,7 +264,8 @@ export function renderTaskMindMapRootList(roots: TaskMindMapRootSummary[]): stri
   roots.forEach((root, index) => {
     const rootLabels = root.roots.map((node) => `${node.key}:${statusLabel(node.status)}`).join(", ") || "(none)";
     lines.push(`${index + 1}. ${root.rootId}`);
-    lines.push(`   graph: ${root.graphId} | run: ${runStatusLabel(root.runStatus)} | graph: ${graphStatusLabel(root.graphStatus)}`);
+    const graphLabel = root.graphCount > 1 ? `${root.graphCount} graphs, latest ${root.graphId}` : root.graphId;
+    lines.push(`   graph: ${graphLabel} | run: ${runStatusLabel(root.runStatus)} | graph: ${graphStatusLabel(root.graphStatus)}`);
     lines.push(`   active: ${root.running} 进行中, ${root.queued} 排队中, ${root.pending} 未开始/阻塞 | editable: ${root.editable}`);
     lines.push(`   roots: ${rootLabels}`);
     lines.push(`   goal: ${root.goal}`);
@@ -650,6 +664,14 @@ function graphStatusLabel(status: string): string {
     default:
       return status || "未知";
   }
+}
+
+function combinedGraphStatus(statuses: string[]): string {
+  if (statuses.some((status) => status === "running")) return "running";
+  if (statuses.some((status) => status === "pending")) return "pending";
+  if (statuses.some((status) => status === "failed")) return "failed";
+  if (statuses.length && statuses.every((status) => status === "done")) return "done";
+  return statuses[0] || "unknown";
 }
 
 function statusGlyph(status: TaskStatus): string {
