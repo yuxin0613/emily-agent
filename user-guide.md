@@ -186,12 +186,13 @@ Inspect recent graphs from the TUI:
 ```text
 /dag list
 /dag list active
+/sub
 /dag <root_id>
 /graph
 /node architecture
 ```
 
-The TUI remains responsive while a long job is running. You can type read-only commands such as `/dag list`, `/status`, or `/timeline` immediately, and typing a normal message starts another background job instead of waiting for the first one to finish.
+The TUI remains responsive while a long job is running. You can type read-only commands such as `/dag list`, `/sub`, `/status`, or `/timeline` immediately, and typing a normal message starts another background job instead of waiting for the first one to finish. `/sub` shows which subagent is currently running, the configured role, the task name, and task id.
 
 `/dag <root_id>` opens the interactive DAG editor. Use up/down arrows to select a task node. Editor commands start with `:`:
 

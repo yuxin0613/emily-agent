@@ -49,6 +49,8 @@ const BUSY_SAFE_COMMANDS = new Set([
   "h",
   "health",
   "status",
+  "sub",
+  "subagents",
   "providers",
   "roles",
   "tools",
@@ -83,6 +85,7 @@ const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ]],
   ["Inspect", [
     ["/providers", "list providers"],
+    ["/sub", "show running subagents and tasks"],
     ["/roles", "list roles"],
     ["/tools", "list tools"],
     ["/skills", "list skills"],
@@ -243,6 +246,10 @@ async function handleCommand(runtime, state, message: string, rl?: readline.Inte
       return;
     case "status":
       await printStatus(runtime, state);
+      return;
+    case "sub":
+    case "subagents":
+      await printSubagents(runtime, args);
       return;
     case "mode":
       setPermissionMode(state, args[0]);
@@ -556,8 +563,26 @@ async function printStatus(runtime, state): Promise<void> {
     `messages loaded: ${Array.isArray(session) ? session.length : 0}`,
     health ? `tasks: ${health.pendingTasks} pending, ${health.runningTasks} running, ${health.expiredLeases} expired leases` : "tasks: unavailable",
     health ? `graphs: ${health.openTaskGraphs} open, diagnostics ${health.diagnostics}` : "graphs: unavailable",
+    `subagents: ${formatActiveSubagents(runtime.listSubagents?.() || [])}`,
   ];
   printPanel("Status", lines.join("\n"), "cyan");
+}
+
+async function printSubagents(runtime, args: string[] = []): Promise<void> {
+  printText(await runtime.runCommand("subagents.list", {
+    args,
+    format: "text",
+  }));
+}
+
+function formatActiveSubagents(subagents: unknown): string {
+  if (!Array.isArray(subagents) || !subagents.length) return "(none running)";
+  return subagents.map((item) => {
+    const value = item as { agentId?: string; configuredRole?: string; taskTitle?: string; taskId?: string };
+    const task = value.taskTitle ? ` ${truncate(value.taskTitle, 32)}` : "";
+    const taskId = value.taskId ? `#${String(value.taskId).slice(0, 8)}` : "";
+    return `${value.agentId || value.configuredRole || "subagent"}${taskId}${task}`;
+  }).join("; ");
 }
 
 function setPermissionMode(state, value?: string): void {
@@ -1189,8 +1214,11 @@ function formatProgressEvent(type: string, task, event): string {
   if (type.startsWith("task.")) {
     const status = type.replace(/^task\./, "");
     const role = task?.role ? `${task.role} ` : "";
+    const agentId = task?.assignedAgentId || event?.agentId || "";
+    const agent = agentId ? ` · subagent ${agentId}` : "";
+    const taskId = task?.id ? ` · task ${String(task.id).slice(0, 8)}` : "";
     const title = task?.title ? ` - ${truncate(task.title, 72)}` : "";
-    return `${role}${status}${title}`;
+    return `${role}${status}${agent}${taskId}${title}`;
   }
   if (type.startsWith("task_graph.")) {
     return type.replace(/^task_graph\./, "graph ");

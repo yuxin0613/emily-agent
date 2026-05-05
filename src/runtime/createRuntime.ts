@@ -444,6 +444,7 @@ export async function createRuntime(options: {
     getTimeline: (input) => taskStore.getTimeline(input),
     renderTimeline: (runId) => renderTimeline(taskStore.getTimeline({ runId })),
     getTaskTrace: (taskId) => taskStore.getTaskTrace(taskId),
+    listSubagents: (input = {}) => roleAgentManager.listSubagents(input),
     getTaskMindMap: (runId) => buildTaskMindMap(taskStore, runId),
     listTaskMindMapRoots: (input: TaskMindMapRootListOptions = {}) => listActiveTaskMindMapRoots(taskStore, input),
     getTaskMindMapNode: (runId, selector) => getTaskMindMapNode(taskStore, runId, selector),
@@ -662,6 +663,9 @@ export async function createRuntime(options: {
     },
     getTaskTrace(taskId: string) {
       return taskStore.getTaskTrace(taskId);
+    },
+    listSubagents(input: { includeIdle?: boolean } = {}) {
+      return roleAgentManager.listSubagents(input);
     },
     getTaskMindMap(runId: string) {
       return buildTaskMindMap(taskStore, runId);

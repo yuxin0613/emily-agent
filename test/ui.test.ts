@@ -22,6 +22,7 @@ assert.ok(!html.includes("${undefined}"));
 const tuiHelp = formatTuiHelp();
 assert.match(tuiHelp, /\/mode \[mode\]/);
 assert.match(tuiHelp, /\/status/);
+assert.match(tuiHelp, /\/sub/);
 assert.match(tuiHelp, /\/timeline \[runId\]/);
 assert.match(tuiHelp, /\/graph \[runId\]/);
 assert.match(tuiHelp, /\/dag list/);

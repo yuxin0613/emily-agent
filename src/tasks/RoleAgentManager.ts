@@ -17,6 +17,20 @@ interface RoleState {
   agentId: string;
 }
 
+export interface SubagentSnapshot {
+  agentId: string;
+  configuredRole: string;
+  status: "idle" | "running" | "missing_task";
+  currentTaskId: string;
+  taskId: string;
+  taskTitle: string;
+  taskRole: string;
+  taskStatus: string;
+  runId: string;
+  sessionId: string;
+  graphKey: string;
+}
+
 interface RuntimeEvent {
   taskId: string;
   leaseToken?: string | null;
@@ -255,6 +269,33 @@ export class RoleAgentManager extends EventEmitter {
       });
     }
     return this.roles.get(role)!;
+  }
+
+  listSubagents({ includeIdle = false }: { includeIdle?: boolean } = {}): SubagentSnapshot[] {
+    const roles = new Set([...DEFAULT_ROLES, ...this.roles.keys(), ...this.taskStore.getQueuedRoles()]);
+    const snapshots: SubagentSnapshot[] = [];
+    for (const role of roles) {
+      const roleState = this.getRoleState(role);
+      const task = roleState.activeTaskId ? this.taskStore.getTask(roleState.activeTaskId) : null;
+      if (!task && !includeIdle) continue;
+      snapshots.push({
+        agentId: roleState.agentId,
+        configuredRole: roleState.role,
+        status: task ? "running" : roleState.activeTaskId ? "missing_task" : "idle",
+        currentTaskId: roleState.activeTaskId || "",
+        taskId: task?.id || roleState.activeTaskId || "",
+        taskTitle: task?.title || "",
+        taskRole: task?.role || "",
+        taskStatus: task?.status || "",
+        runId: typeof task?.metadata.runId === "string" ? task.metadata.runId : "",
+        sessionId: typeof task?.metadata.sessionId === "string" ? task.metadata.sessionId : "",
+        graphKey: typeof task?.metadata.graphKey === "string" ? task.metadata.graphKey : "",
+      });
+    }
+    return snapshots.sort((left, right) => {
+      if (left.status !== right.status) return left.status === "running" ? -1 : 1;
+      return left.configuredRole.localeCompare(right.configuredRole);
+    });
   }
 
   drainRole(role: string): void {

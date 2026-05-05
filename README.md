@@ -164,6 +164,7 @@ Useful TUI commands:
 | `/new [title]` | Start a new visible session. |
 | `/clear` | Hide the current session and create a fresh one. |
 | `/status` | Show current session/runtime status. |
+| `/sub` | Show running subagents, their configured roles, task names, and task ids. |
 | `/providers` | List configured providers. |
 | `/tools` | List available tools. |
 | `/skills` | List available skills. |
@@ -176,7 +177,7 @@ Useful TUI commands:
 | `/graph-update <key> <field> <value>` | Edit an unexecuted node field such as `title`, `input`, `role`, or `dependsOn`. |
 | `/mode [mode]` | Show or set permission mode. |
 
-While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/status`, and `/timeline` run immediately, and a normal chat/task message starts as a separate background job.
+While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/sub`, `/status`, and `/timeline` run immediately, and a normal chat/task message starts as a separate background job.
 
 ## Model Setup
 

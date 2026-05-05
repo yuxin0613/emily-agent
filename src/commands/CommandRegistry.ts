@@ -129,6 +129,7 @@ interface CommandRuntime {
   getTimeline: (options: { runId: string }) => unknown;
   renderTimeline: (runId: string) => string;
   getTaskTrace: (taskId: string) => unknown;
+  listSubagents: (options?: { includeIdle?: boolean }) => unknown;
   getTaskMindMap: (runId: string) => unknown;
   listTaskMindMapRoots: (options?: { activeOnly?: boolean; limit?: number }) => unknown;
   getTaskMindMapNode: (runId: string, selector: string) => unknown;
@@ -455,6 +456,21 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         return format === "text" ? runtime.renderTimeline(runId) : runtime.getTimeline({ runId });
       },
       renderText: (result) => typeof result === "string" ? result : JSON.stringify(result, null, 2),
+    },
+    {
+      name: "subagents.list",
+      aliases: ["sub", "subagents", "agents.active"],
+      description: "List subagents and their currently running tasks.",
+      permission: "read",
+      inputSchema: {
+        args: ["[all]"],
+        examples: ["subagents.list", "subagents.list all"],
+        properties: { includeIdle: "boolean" },
+      },
+      run: ({ args, input }) => runtime.listSubagents({
+        includeIdle: input.includeIdle === true || args[0] === "all",
+      }),
+      renderText: renderSubagents,
     },
     {
       name: "task.trace",
@@ -1371,6 +1387,18 @@ function renderProviderUsage(result: unknown): string {
       ["Blocked", "blocked"],
     ]),
   ].join("\n");
+}
+
+function renderSubagents(result: unknown): string {
+  return renderTable("Subagents", result, [
+    ["Subagent", "agentId"],
+    ["Role", "configuredRole"],
+    ["Status", "status"],
+    ["Task", (item) => shortId(item.taskId)],
+    ["Task Role", "taskRole"],
+    ["Title", (item) => truncate(String(item.taskTitle || ""), 48)],
+    ["Run", (item) => shortId(item.runId)],
+  ]);
 }
 
 function renderSessionMessages(result: unknown): string {
