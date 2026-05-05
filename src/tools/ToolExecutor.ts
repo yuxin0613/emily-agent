@@ -83,27 +83,38 @@ export interface ToolExecutionResult {
   error?: string;
 }
 
+export interface ToolExecutionEvent {
+  eventId: number;
+  type: string;
+  request: ToolExecutionRequest;
+  payload: Record<string, unknown>;
+}
+
 export class ToolExecutor {
   workspaceDir: string;
   taskStore: TaskStore | null;
   registry: ToolRegistry;
   toolCallTimeoutMs: number;
+  onEvent: ((event: ToolExecutionEvent) => void) | null;
 
   constructor({
     workspaceDir = process.cwd(),
     taskStore = null,
     registry = createDefaultToolRegistry(),
     toolCallTimeoutMs = DEFAULT_TOOL_CALL_TIMEOUT_MS,
+    onEvent = null,
   }: {
     workspaceDir?: string;
     taskStore?: TaskStore | null;
     registry?: ToolRegistry;
     toolCallTimeoutMs?: number;
+    onEvent?: ((event: ToolExecutionEvent) => void) | null;
   } = {}) {
     this.workspaceDir = path.resolve(workspaceDir);
     this.taskStore = taskStore;
     this.registry = registry;
     this.toolCallTimeoutMs = normalizeToolCallTimeoutMs(toolCallTimeoutMs);
+    this.onEvent = onEvent;
   }
 
   async execute(request: ToolExecutionRequest): Promise<ToolExecutionResult> {
@@ -718,7 +729,7 @@ export class ToolExecutor {
   }
 
   private addEvent(type: string, request: ToolExecutionRequest, payload: Record<string, unknown>): number | null {
-    return this.taskStore?.addEvent({
+    const eventId = this.taskStore?.addEvent({
       type,
       taskId: request.task?.id || null,
       payload: {
@@ -727,6 +738,8 @@ export class ToolExecutor {
         sessionId: request.sessionId || request.task?.metadata.sessionId || "",
       },
     }) ?? null;
+    if (eventId) this.onEvent?.({ eventId, type, request, payload });
+    return eventId;
   }
 }
 

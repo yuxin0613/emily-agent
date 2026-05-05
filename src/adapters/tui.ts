@@ -66,6 +66,12 @@ const BUSY_SAFE_COMMANDS = new Set([
 
 type TuiHelpMode = "common" | "all";
 type TuiHelpSection = [string, string[][]];
+type TuiState = {
+  sessionId: string;
+  lastRunId: string;
+  permissionMode: string;
+  runLog: string[];
+};
 
 const TUI_COMMON_HELP_SECTIONS: TuiHelpSection[] = [
   ["Chat", [
@@ -151,7 +157,8 @@ export async function startTui({ runtime }) {
     sessionId: "tui",
     lastRunId: "",
     permissionMode: "workspace_write",
-  };
+    runLog: [],
+  } satisfies TuiState;
 
   await printBanner(runtime, state);
 
@@ -179,10 +186,7 @@ export async function startTui({ runtime }) {
   }
 }
 
-async function readPromptLine(
-  rl: readline.Interface,
-  state: { sessionId: string; lastRunId: string; permissionMode: string },
-): Promise<string | null> {
+async function readPromptLine(rl: readline.Interface, state: TuiState): Promise<string | null> {
   try {
     const answer = await rl.question(promptFor(state));
     clearSubmittedPromptLine();
@@ -201,16 +205,26 @@ export function isTuiAbortError(error: unknown): boolean {
 }
 
 async function printBanner(runtime, state): Promise<void> {
-  const health = await safeHealth(runtime);
   if (output.isTTY) output.write("\x1Bc");
   else output.write("\n");
-  output.write(formatTuiHome({
+  output.write(formatCurrentTuiHome(runtime, state));
+}
+
+function redrawTuiHome(runtime, state: TuiState): void {
+  if (!output.isTTY) return;
+  output.write("\x1b[2J\x1b[H");
+  output.write(formatCurrentTuiHome(runtime, state));
+}
+
+function formatCurrentTuiHome(runtime, state: TuiState): string {
+  return formatTuiHome({
     state,
-    health,
+    health: safeHealthSync(runtime),
     provider: currentProvider(runtime),
     tools: safeList(runtime, "listTools"),
     skills: safeList(runtime, "listSkills"),
-  }));
+    runLog: state.runLog,
+  });
 }
 
 function printHelp(modeArg?: string): void {
@@ -429,7 +443,10 @@ async function sendChat(runtime, state, message: string, rl?: readline.Interface
       busyReader?.clearReadyPrompt();
       thinking.stop();
     },
-    () => busyReader?.writeReadyPrompt(),
+    () => {
+      redrawTuiHome(runtime, state);
+      busyReader?.writeReadyPrompt();
+    },
   );
   const startedAt = Date.now();
   let response;
@@ -1198,8 +1215,9 @@ function attachProgressReporter(
     if (task?.metadata?.sessionId && task.metadata.sessionId !== state.sessionId) return;
     const line = formatProgressEvent(type, task, event);
     if (line) {
+      appendRunLog(state, line);
       beforePrint();
-      output.write(`${style(TUI_GLYPHS.assistant, "gray")} ${style(line, "gray")}\n`);
+      if (!output.isTTY) output.write(`${style(TUI_GLYPHS.assistant, "gray")} ${style(line, "gray")}\n`);
       afterPrint();
     }
   };
@@ -1230,13 +1248,28 @@ function formatProgressEvent(type: string, task, event): string {
     return type.replace(/^task_graph\./, "graph ");
   }
   if (type.startsWith("tool.execution.")) {
+    const status = type.replace(/^tool\.execution\./, "");
     const tool = event?.payload?.tool || "tool";
-    return `${tool} ${type.replace(/^tool\.execution\./, "")}`;
+    const role = task?.role ? `${task.role} ` : "";
+    const agentId = task?.assignedAgentId || event?.agentId || "";
+    const agent = agentId ? ` · subagent ${agentId}` : "";
+    const taskId = task?.id ? ` · task ${String(task.id).slice(0, 8)}` : "";
+    const duration = typeof event?.payload?.durationMs === "number" ? ` · ${formatDuration(event.payload.durationMs)}` : "";
+    const error = event?.payload?.error ? ` - ${truncate(String(event.payload.error), 56)}` : "";
+    return `${role}tool ${status} · ${tool}${agent}${taskId}${duration}${error}`;
   }
   if (type === "runtime.anomaly") {
     return `anomaly: ${event?.payload?.code || event?.payload?.message || "runtime"}`;
   }
   return type;
+}
+
+function appendRunLog(state: { runLog?: string[] }, line: string): void {
+  const timestamp = new Date().toTimeString().slice(0, 8);
+  const entry = `[${timestamp}] ${stripAnsi(line)}`;
+  const log = Array.isArray(state.runLog) ? state.runLog : [];
+  log.push(entry);
+  state.runLog = log.slice(-80);
 }
 
 function printAssistantMessage(content: string): void {
@@ -1351,17 +1384,21 @@ export function formatTuiHome({
   provider = null,
   tools = [],
   skills = [],
+  runLog = [],
 }: {
-  state?: { sessionId: string; lastRunId: string; permissionMode: string };
+  state?: { sessionId: string; lastRunId: string; permissionMode: string; runLog?: string[] };
   health?: Record<string, number> | null;
   provider?: { id?: string; model?: string; type?: string } | null;
   tools?: Array<{ name?: string; category?: string }>;
   skills?: Array<{ name?: string; title?: string; capabilities?: string[]; source?: string }>;
+  runLog?: string[];
 } = {}): string {
   const width = Math.max(88, terminalWidth());
-  const boxWidth = Math.min(width - 2, 126);
-  const leftWidth = 38;
-  const rightWidth = Math.max(42, boxWidth - leftWidth - 7);
+  const boxWidth = Math.min(width - 2, 160);
+  const wideLayout = boxWidth >= 116;
+  const leftWidth = wideLayout ? 36 : 38;
+  const middleWidth = wideLayout ? Math.max(34, Math.min(52, Math.floor((boxWidth - leftWidth - 10) * 0.52))) : Math.max(42, boxWidth - leftWidth - 7);
+  const logWidth = wideLayout ? Math.max(24, boxWidth - leftWidth - middleWidth - 10) : 0;
   const lines: string[] = [];
   lines.push("");
   for (const line of EMILY_WORDMARK) lines.push(style(line, "yellow"));
@@ -1384,11 +1421,22 @@ export function formatTuiHome({
     "",
     `${tools.length} tools · ${skills.length} skills · /help for commands`,
   ];
-  const rowCount = Math.max(left.length, right.length, 18);
+  const log = formatRunLogLines(runLog.length ? runLog : state.runLog || [], wideLayout ? logWidth : middleWidth).slice(0, 18);
+  const compactRight = wideLayout ? right : [
+    ...right,
+    "",
+    ...log,
+  ];
+  const rowCount = Math.max(left.length, compactRight.length, wideLayout ? log.length : 0, 18);
   for (let index = 0; index < rowCount; index += 1) {
     const leftCell = pad(truncate(left[index] || "", leftWidth), leftWidth);
-    const rightCell = pad(truncate(right[index] || "", rightWidth), rightWidth);
-    lines.push(`│ ${leftCell} │ ${rightCell} │`);
+    const rightCell = pad(truncate(compactRight[index] || "", middleWidth), middleWidth);
+    if (wideLayout) {
+      const logCell = pad(truncate(log[index] || "", logWidth), logWidth);
+      lines.push(`│ ${leftCell} │ ${rightCell} │ ${logCell} │`);
+    } else {
+      lines.push(`│ ${leftCell} │ ${rightCell} │`);
+    }
   }
   lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
   lines.push("");
@@ -1444,6 +1492,21 @@ function formatSkillGroups(skills: Array<{ name?: string; title?: string; capabi
   return [...groups.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([category, names]) => `${category}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""}`);
+}
+
+function formatRunLogLines(runLog: string[], width: number): string[] {
+  const lines = [style("Run Log", "yellow")];
+  const entries = runLog.slice(-16);
+  if (!entries.length) {
+    lines.push(style("waiting for activity", "gray"));
+    lines.push("subagent/task/tool events appear here");
+    return lines;
+  }
+  for (const entry of entries) {
+    const wrapped = wrapBlock(entry, Math.max(20, width));
+    lines.push(...wrapped.slice(0, 2));
+  }
+  return lines;
 }
 
 function currentProvider(runtime): { id?: string; model?: string; type?: string } | null {
@@ -1533,6 +1596,14 @@ async function safeHealth(runtime): Promise<Record<string, number> | null> {
   }
 }
 
+function safeHealthSync(runtime): Record<string, number> | null {
+  try {
+    return runtime.health();
+  } catch {
+    return null;
+  }
+}
+
 function supportsColor(): boolean {
   return Boolean(output.isTTY && !process.env.NO_COLOR);
 }
@@ -1548,7 +1619,7 @@ function stripAnsi(value: string): string {
 }
 
 function terminalWidth(): number {
-  return Math.max(60, Math.min(120, output.columns || 88));
+  return Math.max(60, Math.min(180, output.columns || 88));
 }
 
 function wrapBlock(content: string, width: number): string[] {

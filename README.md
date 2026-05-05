@@ -177,7 +177,7 @@ Useful TUI commands:
 | `/graph-update <key> <field> <value>` | Edit an unexecuted node field such as `title`, `input`, `role`, or `dependsOn`. |
 | `/mode [mode]` | Show or set permission mode. |
 
-While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/sub`, `/status`, and `/timeline` run immediately. A normal chat/task message is added to the main-agent context queue and runs after the current main-agent turn finishes, so the main agent does not process multiple user contexts at the same time.
+While a long-running job is active, the TUI keeps accepting input. Read-only commands such as `/dag list`, `/sub`, `/status`, and `/timeline` run immediately. A normal chat/task message is added to the main-agent context queue and runs after the current main-agent turn finishes, so the main agent does not process multiple user contexts at the same time. The home panel includes a Run Log column showing recent subagent, task, graph, anomaly, and tool execution events.
 
 ## Model Setup
 
