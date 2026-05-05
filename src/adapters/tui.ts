@@ -1494,18 +1494,35 @@ function formatSkillGroups(skills: Array<{ name?: string; title?: string; capabi
     .map(([category, names]) => `${category}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""}`);
 }
 
-function formatRunLogLines(runLog: string[], width: number): string[] {
+function formatRunLogLines(runLog: string[], width: number, maxLines = 18): string[] {
   const lines = [style("Run Log", "yellow")];
-  const entries = runLog.slice(-16);
+  const entries = runLog.slice(-12);
   if (!entries.length) {
     lines.push(style("waiting for activity", "gray"));
     lines.push("subagent/task/tool events appear here");
     return lines;
   }
-  for (const entry of entries) {
-    const wrapped = wrapBlock(entry, Math.max(20, width));
-    lines.push(...wrapped.slice(0, 2));
+  const groups = entries.map((entry) => formatRunLogEntry(entry, Math.max(20, width)));
+  const body: string[] = [];
+  for (let index = groups.length - 1; index >= 0; index -= 1) {
+    const group = groups[index];
+    if (body.length + group.length > maxLines - 1) continue;
+    body.unshift(...group);
   }
+  lines.push(...body);
+  return lines;
+}
+
+function formatRunLogEntry(entry: string, width: number): string[] {
+  const match = /^\[([^\]]+)\]\s*(.*)$/.exec(stripAnsi(entry));
+  const time = match?.[1] || "";
+  const body = match?.[2] || stripAnsi(entry);
+  const splitAt = body.indexOf(" - ");
+  const summary = splitAt >= 0 ? body.slice(0, splitAt) : body;
+  const detail = splitAt >= 0 ? body.slice(splitAt + 3) : "";
+  const prefix = time ? `${time} ` : "";
+  const lines = [truncate(`${prefix}${summary}`, width)];
+  if (detail) lines.push(truncate(`  ${detail}`, width));
   return lines;
 }
 
@@ -1576,12 +1593,15 @@ function requiredArg(value: string | undefined, label: string): string {
 
 function truncate(value: string, maxLength: number): string {
   value = stripAnsi(value);
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+  if (visibleLength(value) <= maxLength) return value;
+  if (maxLength <= 3) return takeVisible(value, maxLength);
+  return `${takeVisible(value, Math.max(0, maxLength - 3))}...`;
 }
 
 function visibleLength(value: string): number {
-  return stripAnsi(value).length;
+  let width = 0;
+  for (const char of stripAnsi(value)) width += charDisplayWidth(char);
+  return width;
 }
 
 function pad(value: string, width: number): string {
@@ -1648,12 +1668,60 @@ function wrapLine(line: string, width: number): string[] {
     if (current.trim()) lines.push(current.trimEnd());
     current = word.trimStart();
     while (visibleLength(current) > width) {
-      lines.push(current.slice(0, width));
-      current = current.slice(width);
+      lines.push(takeVisible(current, width));
+      current = dropVisible(current, width);
     }
   }
   if (current.trim()) lines.push(current.trimEnd());
-  return lines.length ? lines : [line.slice(0, width)];
+  return lines.length ? lines : [takeVisible(line, width)];
+}
+
+function takeVisible(value: string, width: number): string {
+  let result = "";
+  let used = 0;
+  for (const char of stripAnsi(value)) {
+    const next = charDisplayWidth(char);
+    if (used + next > width) break;
+    result += char;
+    used += next;
+  }
+  return result;
+}
+
+function dropVisible(value: string, width: number): string {
+  let used = 0;
+  let index = 0;
+  const plain = stripAnsi(value);
+  for (const char of plain) {
+    const next = charDisplayWidth(char);
+    if (used + next > width) break;
+    used += next;
+    index += char.length;
+  }
+  return plain.slice(index).trimStart();
+}
+
+function charDisplayWidth(char: string): number {
+  const code = char.codePointAt(0) || 0;
+  if (code === 0) return 0;
+  if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0;
+  if (code >= 0x300 && code <= 0x36f) return 0;
+  if (isWideCodePoint(code)) return 2;
+  return 1;
+}
+
+function isWideCodePoint(code: number): boolean {
+  return (code >= 0x1100 && code <= 0x115f)
+    || code === 0x2329
+    || code === 0x232a
+    || (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f)
+    || (code >= 0xac00 && code <= 0xd7a3)
+    || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xfe10 && code <= 0xfe19)
+    || (code >= 0xfe30 && code <= 0xfe6f)
+    || (code >= 0xff00 && code <= 0xff60)
+    || (code >= 0xffe0 && code <= 0xffe6)
+    || (code >= 0x1f300 && code <= 0x1faff);
 }
 
 function shortId(value: string, maxLength = 12): string {

@@ -60,20 +60,23 @@ assert.doesNotMatch(filteredHints, /\/new \[title\]/);
 const filteredAdvancedHints = formatTuiCommandHints(":", "cron-r");
 assert.match(filteredAdvancedHints, /:cron-resume <id>/);
 assert.match(filteredAdvancedHints, /:cron-run <id>/);
+const originalColumns = process.stdout.columns;
+process.stdout.columns = 180;
 const tuiHome = formatTuiHome({
   provider: { id: "deepseek", model: "deepseek-chat", type: "openai" },
   tools: [{ name: "read_file", category: "filesystem" }, { name: "shell", category: "process" }],
   skills: [{ name: "coding", capabilities: ["software-development"], source: "builtin" }],
   runLog: [
-    "[12:00:00] developer running · subagent developer-1 · task abc123 - build",
-    "[12:00:01] developer tool completed · shell · subagent developer-1 · task abc123",
+    "[12:00:00] developer running · subagent dev-1 · task abc123 - build",
+    "[12:00:01] developer tool completed · shell · subagent dev-1 · task abc123",
   ],
 });
+process.stdout.columns = originalColumns;
 assert.match(tuiHome, /Emily AgentOS/);
 assert.match(tuiHome, /Available Tools/);
 assert.match(tuiHome, /Available Skills/);
 assert.match(tuiHome, /Run Log/);
-assert.match(tuiHome, /subagent developer-1/);
+assert.match(tuiHome, /subagent dev-1/);
 assert.match(tuiHome, /tool completed/);
 assert.match(tuiHome, /deepseek-chat/);
 assert.match(tuiHome, /Welcome to Emily Agent! Type your message or \/help for commands\./);
