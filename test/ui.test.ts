@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { flattenDagEditorNodes, formatDagEditorView, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
+import { flattenDagEditorNodes, formatDagEditorView, formatPromptBufferPreview, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -104,6 +104,9 @@ assert.match(submitted, /❯ what can you do for me\?/);
 assert.doesNotMatch(submitted, /─/);
 assert.doesNotMatch(submitted, /Initializing agent\.\.\./);
 assert.ok(!submitted.includes("undefined"));
+const promptPreview = formatPromptBufferPreview("帮我规划一个 Todo 应用 POC，先拆成 DAG：需求范围、数据模型、CLI 命令、持久化、验证\n/dag list", 32);
+assert.doesNotMatch(promptPreview, /\n/);
+assert.match(promptPreview, /\\n|\.\.\./);
 const assistant = formatTranscriptMessage("assistant", "hello from emily", 80);
 assert.match(assistant, /┊ hello from emily/);
 assert.match(formatThinkingFrame(3), /thinking\.\.\./);

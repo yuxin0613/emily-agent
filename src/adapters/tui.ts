@@ -145,7 +145,7 @@ const TUI_ADVANCED_HELP_SECTIONS: TuiHelpSection[] = [
 ];
 
 export async function startTui({ runtime }) {
-  const rl = readline.createInterface({ input, output });
+  const rl = readline.createInterface({ input, output, terminal: false });
   const state = {
     sessionId: "tui",
     lastRunId: "",
@@ -293,12 +293,16 @@ function clearPromptLine(): void {
 function renderPromptLine(state: TuiState, buffer = ""): void {
   focusInputLine();
   const prompt = promptFor(state);
-  output.write(`${prompt}${formatPromptBufferPreview(buffer, terminalWidth() - visibleLength(prompt) - 1)}`);
+  output.write(`${prompt}${formatPromptBufferPreview(buffer, promptPreviewWidth(prompt))}`);
 }
 
-function formatPromptBufferPreview(buffer: string, width: number): string {
+export function formatPromptBufferPreview(buffer: string, width: number): string {
   const normalized = normalizePastedText(buffer).replace(/\n/g, "\\n");
   return truncate(normalized, Math.max(8, width));
+}
+
+function promptPreviewWidth(prompt: string): number {
+  return Math.max(8, Math.min(120, terminalWidth() - visibleLength(prompt) - 8));
 }
 
 function enterRawPromptMode(rl: readline.Interface): () => void {
@@ -351,6 +355,12 @@ function createPromptInputDecoder(handlers: {
       if (text.startsWith("\x1b")) {
         const escapeSequence = text.match(/^\x1b\[[0-9;?]*[A-Za-z~]/)?.[0] || text.slice(0, 1);
         text = text.slice(escapeSequence.length);
+        continue;
+      }
+      const plainText = text.match(/^[^\x00-\x1f\x7f\x1b]+/)?.[0] || "";
+      if (plainText) {
+        handlers.appendText(plainText);
+        text = text.slice(plainText.length);
         continue;
       }
       const char = [...text][0] || "";
