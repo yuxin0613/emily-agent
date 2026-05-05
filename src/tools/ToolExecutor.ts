@@ -10,6 +10,7 @@ import { Readable } from "node:stream";
 import { promisify } from "node:util";
 import type { Metadata, PermissionMode, RoleDefinition, Task, ToolPermission } from "../types.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
+import { getTaskMindMapNode } from "../tasks/TaskMindMap.ts";
 import { parsePermissionMode } from "./PermissionMode.ts";
 import { ToolGateway } from "./ToolGateway.ts";
 import { createDefaultToolRegistry, type ToolRegistry } from "./ToolRegistry.ts";
@@ -605,12 +606,37 @@ export class ToolExecutor {
 
   private inspectTask(args: Record<string, unknown>): unknown {
     if (!this.taskStore) throw new Error("inspect_task requires a TaskStore.");
+    if (typeof args.runId === "string" && typeof args.selector === "string") {
+      return getTaskMindMapNode(this.taskStore, args.runId, args.selector);
+    }
     const taskId = requiredString(args.taskId, "taskId");
     return this.taskStore.getTaskTrace(taskId);
   }
 
   private createTask(args: Record<string, unknown>, request: ToolExecutionRequest): unknown {
     if (!this.taskStore) throw new Error("create_task requires a TaskStore.");
+    const graphKey = typeof args.graphKey === "string" && args.graphKey.trim() ? args.graphKey.trim() : "";
+    const parentGraphKey = typeof args.parentKey === "string" && args.parentKey.trim()
+      ? args.parentKey.trim()
+      : typeof request.task?.metadata.graphKey === "string" ? request.task.metadata.graphKey : "";
+    const inheritedGraph = graphKey ? {
+      graphKey,
+      graphId: typeof request.task?.metadata.graphId === "string" ? request.task.metadata.graphId : "",
+      parentKey: parentGraphKey,
+      graphRole: requiredString(args.role, "role"),
+      acceptanceCriteria: stringArray(args.acceptanceCriteria, "acceptanceCriteria").length
+        ? stringArray(args.acceptanceCriteria, "acceptanceCriteria")
+        : ["Task produces a useful result for the graph."],
+      toolHints: stringArray(args.toolHints, "toolHints"),
+      skillHints: stringArray(args.skillHints, "skillHints"),
+      timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : 30000,
+      maxResultChars: typeof args.maxResultChars === "number" ? args.maxResultChars : 12000,
+      maxMemoryCandidates: typeof args.maxMemoryCandidates === "number" ? args.maxMemoryCandidates : 1,
+      wave: typeof request.task?.metadata.wave === "number" ? request.task.metadata.wave + 1 : 1,
+      expandable: args.expandable === true,
+      expansionGoal: typeof args.expansionGoal === "string" ? args.expansionGoal : "",
+      maxExpansionDepth: typeof args.maxExpansionDepth === "number" ? args.maxExpansionDepth : 0,
+    } : {};
     const task = this.taskStore.createTask({
       role: requiredString(args.role, "role"),
       title: requiredString(args.title, "title"),
@@ -622,8 +648,23 @@ export class ToolExecutor {
         sessionId: request.sessionId || request.task?.metadata.sessionId || "",
         runId: request.runId || request.task?.metadata.runId || "",
         createdByTool: request.tool,
+        ...inheritedGraph,
       },
     });
+    if (graphKey && request.task) {
+      this.taskStore.addTaskDependency(task.id, request.task.id, args.dependencyType === "finished" ? "finished" : "success");
+      this.taskStore.addEvent({
+        type: "task_graph.node_added",
+        taskId: task.id,
+        payload: {
+          runId: request.runId || request.task.metadata.runId || "",
+          graphId: request.task.metadata.graphId || "",
+          key: graphKey,
+          parentKey: parentGraphKey,
+          createdByTool: true,
+        },
+      });
+    }
     return task;
   }
 

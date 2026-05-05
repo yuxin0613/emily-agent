@@ -849,8 +849,14 @@ function formatCurrentModelAnswer(model: ModelProvider): string {
 
 function plannerPrompt(input: string, deliveryLevel: string): string {
   return [
-    "Create a PlanSpec JSON object for an outcome-oriented agent task graph.",
+    "Create a PlanSpec JSON object for an outcome-oriented DAG.",
     "Return only JSON. Do not wrap it in markdown.",
+    "",
+    "DAG model:",
+    "- Treat the DAG like a mind map that decomposes the user's goal from coarse to fine.",
+    "- parentKey is the decomposition parent: goal/root -> module/workstream -> feature slice -> executable leaf.",
+    "- dependsOn is only the execution gate between nodes; do not use it as a substitute for parentKey.",
+    "- Early nodes should map and narrow the problem. Leaf nodes should execute or verify concrete work.",
     "",
     "Required shape:",
     JSON.stringify({
@@ -865,7 +871,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
         role: "developer",
         title: "short task title",
         input: "full task instructions",
-        parentKey: "",
+        parentKey: "parent decomposition key, or empty for the root layer",
         dependsOn: [],
         dependencyType: "success",
         acceptanceCriteria: ["string"],
@@ -890,9 +896,11 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     }, null, 2),
     "",
     "Planning rules:",
-    "- For long product/application work, decompose by outcome -> module -> feature slice -> verification.",
-    "- For rolling mode, keep the initial graph coarse and mark tasks that should expand later with expandable=true.",
-    "- Expandable tasks should describe expansionGoal and maxExpansionDepth.",
+    "- For long product/application work, decompose by goal -> module/workstream -> feature slice -> verification.",
+    "- For rolling mode, keep the initial graph coarse and mark non-leaf nodes that should expand later with expandable=true.",
+    "- Expandable tasks should describe how to expand one level finer in expansionGoal and maxExpansionDepth.",
+    "- Do not flatten a large request directly into implementation tasks; preserve the coarse-to-fine hierarchy.",
+    "- A task with parentKey must be a child of an existing task key in the same PlanSpec.",
     "- Each task must have acceptanceCriteria.",
     "- Use dependencies instead of prose ordering.",
     "- Keep the first wave small enough to execute now; use planningMode=rolling for larger goals.",
@@ -923,7 +931,7 @@ function formatPlan(plan: PlanSpec): string[] {
     "- exitCriteria:",
     ...plan.exitCriteria.map((item) => `  - ${item}`),
     "- tasks:",
-    ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
+    ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] parent=${task.parentKey || "(root)"} wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
   ];
 }
 

@@ -21,6 +21,20 @@ import { SkillCandidateStore } from "../skills/SkillCandidateStore.ts";
 import { defaultSkillDirs, SkillRegistry } from "../skills/SkillRegistry.ts";
 import { RoleAgentManager } from "../tasks/RoleAgentManager.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
+import {
+  addTaskMindMapNode,
+  addTaskMindMapNodeAfter,
+  addTaskMindMapNodeBefore,
+  buildTaskMindMap,
+  deleteTaskMindMapNode,
+  getTaskMindMapNode,
+  listActiveTaskMindMapRoots,
+  updateTaskMindMapNode,
+  type TaskGraphNodeAddInput,
+  type TaskGraphNodeDeleteInput,
+  type TaskGraphNodeMutationInput,
+  type TaskGraphNodeSiblingInput,
+} from "../tasks/TaskMindMap.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
 import { ToolExecutor, type ToolApproval } from "../tools/ToolExecutor.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
@@ -429,6 +443,14 @@ export async function createRuntime(options: {
     getTimeline: (input) => taskStore.getTimeline(input),
     renderTimeline: (runId) => renderTimeline(taskStore.getTimeline({ runId })),
     getTaskTrace: (taskId) => taskStore.getTaskTrace(taskId),
+    getTaskMindMap: (runId) => buildTaskMindMap(taskStore, runId),
+    listTaskMindMapRoots: () => listActiveTaskMindMapRoots(taskStore),
+    getTaskMindMapNode: (runId, selector) => getTaskMindMapNode(taskStore, runId, selector),
+    addTaskMindMapNode: (input: TaskGraphNodeAddInput) => addTaskMindMapNode(taskStore, input),
+    addTaskMindMapNodeBefore: (input: TaskGraphNodeSiblingInput) => addTaskMindMapNodeBefore(taskStore, input),
+    addTaskMindMapNodeAfter: (input: TaskGraphNodeSiblingInput) => addTaskMindMapNodeAfter(taskStore, input),
+    updateTaskMindMapNode: (input: TaskGraphNodeMutationInput) => updateTaskMindMapNode(taskStore, input),
+    deleteTaskMindMapNode: (input: TaskGraphNodeDeleteInput) => deleteTaskMindMapNode(taskStore, input),
     securityAudit,
     buildContext: (input) => contextEngine.build(input),
     routeMessage: (input) => router.route(input),
@@ -639,6 +661,30 @@ export async function createRuntime(options: {
     },
     getTaskTrace(taskId: string) {
       return taskStore.getTaskTrace(taskId);
+    },
+    getTaskMindMap(runId: string) {
+      return buildTaskMindMap(taskStore, runId);
+    },
+    listTaskMindMapRoots() {
+      return listActiveTaskMindMapRoots(taskStore);
+    },
+    getTaskMindMapNode(runId: string, selector: string) {
+      return getTaskMindMapNode(taskStore, runId, selector);
+    },
+    addTaskMindMapNode(input: TaskGraphNodeAddInput) {
+      return addTaskMindMapNode(taskStore, input);
+    },
+    addTaskMindMapNodeBefore(input: TaskGraphNodeSiblingInput) {
+      return addTaskMindMapNodeBefore(taskStore, input);
+    },
+    addTaskMindMapNodeAfter(input: TaskGraphNodeSiblingInput) {
+      return addTaskMindMapNodeAfter(taskStore, input);
+    },
+    updateTaskMindMapNode(input: TaskGraphNodeMutationInput) {
+      return updateTaskMindMapNode(taskStore, input);
+    },
+    deleteTaskMindMapNode(input: TaskGraphNodeDeleteInput) {
+      return deleteTaskMindMapNode(taskStore, input);
     },
     diagnostics,
     securityAudit,

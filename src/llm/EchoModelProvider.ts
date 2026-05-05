@@ -37,7 +37,7 @@ export class EchoModelProvider implements ModelProvider {
             role: "reviewer",
             title: "verification slice",
             input: "Verify the implementation slice against the delivery exit criteria and return pass/fail/needs_user_input.",
-            parentKey,
+            parentKey: "implementation",
             dependsOn: ["implementation"],
             dependencyType: "finished",
             acceptanceCriteria: [

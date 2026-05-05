@@ -796,6 +796,35 @@ export class TaskStore {
     });
   }
 
+  replaceTaskDependencies(taskId: string, dependencies: Array<{
+    dependsOnTaskId: string;
+    dependencyType?: TaskDependency["dependencyType"];
+  }>, {
+    reason = "dependencies replaced",
+  }: {
+    reason?: string;
+  } = {}): void {
+    const task = this.getTaskOrThrow(taskId);
+    if (task.status !== "pending" && task.status !== "blocked") {
+      throw new IllegalTaskTransitionError(`Task dependencies can only be edited before execution; ${taskId} is ${task.status}`);
+    }
+    this.db.prepare("DELETE FROM task_dependencies WHERE task_id = ?").run(taskId);
+    for (const dependency of dependencies) {
+      this.addTaskDependency(taskId, dependency.dependsOnTaskId, dependency.dependencyType || "success");
+    }
+    this.addEvent({
+      type: "task.dependencies.updated",
+      taskId,
+      payload: {
+        reason,
+        dependencies: dependencies.map((dependency) => ({
+          dependsOnTaskId: dependency.dependsOnTaskId,
+          dependencyType: dependency.dependencyType || "success",
+        })),
+      },
+    });
+  }
+
   createTaskGraph({ runId = null }: { runId?: string | null } = {}): TaskGraph {
     const graph: TaskGraph = {
       id: randomUUID(),
@@ -1551,6 +1580,65 @@ export class TaskStore {
       agentId: task.assignedAgentId,
       payload: { reason },
     });
+  }
+
+  updateUnstartedTask(taskId: string, patch: {
+    role?: string;
+    title?: string;
+    input?: string;
+    maxRetries?: number;
+    metadata?: Metadata;
+    reopenBlocked?: boolean;
+  }, {
+    reason = "unstarted task updated",
+  }: {
+    reason?: string;
+  } = {}): Task {
+    const task = this.getTaskOrThrow(taskId);
+    if (task.status !== "pending" && task.status !== "blocked") {
+      throw new IllegalTaskTransitionError(`Task can only be edited before execution; ${taskId} is ${task.status}`);
+    }
+    const nextStatus = task.status === "blocked" && patch.reopenBlocked !== false ? "pending" : task.status;
+    const now = new Date().toISOString();
+    const result = this.db
+      .prepare(`
+        UPDATE tasks
+        SET role = ?,
+            status = ?,
+            title = ?,
+            input = ?,
+            metadata = ?,
+            max_retries = ?,
+            error = ?,
+            updated_at = ?
+        WHERE id = ? AND status = ?
+      `)
+      .run(
+        patch.role ?? task.role,
+        nextStatus,
+        patch.title ?? task.title,
+        patch.input ?? task.input,
+        JSON.stringify(patch.metadata ?? task.metadata),
+        patch.maxRetries ?? task.maxRetries,
+        nextStatus === "pending" ? null : task.error,
+        now,
+        taskId,
+        task.status,
+      );
+    if (result.changes === 0) {
+      throw new TaskTransitionConflictError(`Task update conflict: ${taskId} expected ${task.status}`);
+    }
+    const updated = this.getTaskOrThrow(taskId);
+    this.addEvent({
+      type: "task.updated",
+      taskId,
+      agentId: updated.assignedAgentId,
+      payload: {
+        reason,
+        reopened: task.status === "blocked" && updated.status === "pending",
+      },
+    });
+    return updated;
   }
 
   getTasksForRun(runId: string): Task[] {

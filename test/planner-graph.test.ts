@@ -45,6 +45,8 @@ const implementationTask = timeline.tasks.find((task) => task.metadata.graphKey 
 const verificationTask = timeline.tasks.find((task) => task.metadata.graphKey === "verification");
 assert.ok(implementationTask);
 assert.ok(verificationTask);
+assert.equal(implementationTask.metadata.parentKey, "architecture");
+assert.equal(verificationTask.metadata.parentKey, "implementation");
 assert.ok(timeline.events.some((event) => event.type === "task.dependency.created"
   && event.taskId === verificationTask.id
   && event.payload.dependsOnTaskId === implementationTask.id));
@@ -77,6 +79,28 @@ assert.equal(validateGraphPatchSpec(wrappedPatch, {
   parentKey: "architecture",
   existingKeys: new Set(["scope", "architecture"]),
 }).ok, true);
+
+const invalidParentPatch = parseGraphPatchSpec(JSON.stringify({
+  reason: "invalid parent",
+  parentKey: "architecture",
+  stop: false,
+  needsUserInput: false,
+  questions: [],
+  tasks: [{
+    key: "orphan_slice",
+    role: "developer",
+    title: "orphan slice",
+    input: "This task points at a missing decomposition parent.",
+    parentKey: "missing_module",
+    dependsOn: ["architecture"],
+    acceptanceCriteria: ["The hierarchy is rejected."],
+  }],
+}), { parentKey: "architecture" });
+assert.ok(invalidParentPatch);
+assert.equal(validateGraphPatchSpec(invalidParentPatch, {
+  parentKey: "architecture",
+  existingKeys: new Set(["scope", "architecture"]),
+}).ok, false);
 
 const planPause = await runtime.handleUserMessage("NEEDS_PLAN_CLARIFICATION POC", {
   sessionId: "planner-plan-pause",

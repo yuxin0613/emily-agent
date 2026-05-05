@@ -467,6 +467,62 @@ export async function startWebServer({
         }));
       }
 
+      if (request.method === "GET" && url.pathname === "/dag") {
+        if (url.searchParams.get("format") === "text") {
+          return sendText(response, 200, String(await runCommand("dag.list", {
+            format: "text",
+          })), "text/plain; charset=utf-8");
+        }
+        return sendJson(response, 200, await runCommand("dag.list"));
+      }
+
+      if (request.method === "GET" && url.pathname === "/graph") {
+        const runId = String(url.searchParams.get("runId") || "");
+        if (url.searchParams.get("format") === "text") {
+          return sendText(response, 200, String(await runCommand("graph.view", {
+            input: { runId },
+            format: "text",
+          })), "text/plain; charset=utf-8");
+        }
+        return sendJson(response, 200, await runCommand("graph.view", {
+          input: { runId },
+        }));
+      }
+
+      if (request.method === "GET" && url.pathname === "/graph-node") {
+        return sendJson(response, 200, await runCommand("graph.node", {
+          input: {
+            runId: String(url.searchParams.get("runId") || ""),
+            selector: String(url.searchParams.get("selector") || ""),
+          },
+        }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/graph/add") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runCommand("graph.add", { input: body }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/graph/add-before") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runCommand("graph.add_before", { input: body }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/graph/add-after") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runCommand("graph.add_after", { input: body }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/graph/update") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runCommand("graph.update", { input: body }));
+      }
+
+      if (request.method === "POST" && url.pathname === "/graph/delete") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runCommand("graph.delete", { input: body }));
+      }
+
       if (request.method === "GET" && url.pathname === "/task-trace") {
         return sendJson(response, 200, await runCommand("task.trace", {
           input: { taskId: String(url.searchParams.get("taskId") || "") },
@@ -557,7 +613,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /dag", "GET /graph", "GET /graph-node", "POST /graph/add", "POST /graph/add-before", "POST /graph/add-after", "POST /graph/update", "POST /graph/delete", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.statusCode : error instanceof CommandPermissionError ? 403 : 500;
