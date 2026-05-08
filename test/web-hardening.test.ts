@@ -110,6 +110,22 @@ try {
 
   const health = await fetch(`${server.url}/health`);
   assert.equal(health.status, 200);
+  const healthBody = await health.json() as Record<string, unknown>;
+  assert.deepEqual(healthBody, { ok: true });
+  assert.equal("runtime" in healthBody, false);
+  assert.equal("gateway" in healthBody, false);
+
+  const detailedHealthUnauthorized = await fetch(`${server.url}/health/detail`);
+  assert.equal(detailedHealthUnauthorized.status, 401);
+
+  const detailedHealth = await fetch(`${server.url}/health/detail`, {
+    headers: { "x-emily-token": "test-token" },
+  });
+  assert.equal(detailedHealth.status, 200);
+  const detailedHealthBody = await detailedHealth.json() as Record<string, unknown>;
+  assert.equal(detailedHealthBody.ok, true);
+  assert.equal(typeof detailedHealthBody.runtime, "object");
+  assert.equal(typeof detailedHealthBody.gateway, "object");
 
   const readScopedProviders = await fetch(`${server.url}/providers`, {
     headers: { "x-emily-token": "read-token" },
@@ -236,8 +252,99 @@ try {
     body: JSON.stringify({ name: "diagnostics.repair" }),
   });
   assert.equal(genericWrite.status, 403);
+
+  const ws = await connectWebSocket(`${server.url.replace("http://", "ws://")}/gateway?token=test-token`);
+  try {
+    const ready = await ws.next();
+    assert.equal(ready.type, "event");
+    assert.equal(ready.event, "gateway.ready");
+    let rateLimited = false;
+    for (let index = 0; index < 61; index += 1) {
+      const id = `rate-${index}`;
+      ws.send({ type: "request", id, method: "tools.list", params: {} });
+      const response = await ws.nextResponse(id);
+      if (response.error?.code === "gateway_rate_limited") rateLimited = true;
+    }
+    assert.equal(rateLimited, true);
+  } finally {
+    ws.close();
+  }
 } finally {
   await server.close();
 }
 
+const publicServer = await startWebServer({
+  runtime: runtime as never,
+  port: 0,
+  host: "0.0.0.0",
+  authToken: "test-token",
+});
+try {
+  const queryTokenApp = await fetch(`${publicServer.url}/?token=test-token`);
+  assert.equal(queryTokenApp.status, 400);
+
+  const queryTokenProviders = await fetch(`${publicServer.url}/providers?token=test-token`);
+  assert.equal(queryTokenProviders.status, 401);
+
+  const headerTokenProviders = await fetch(`${publicServer.url}/providers`, {
+    headers: { "x-emily-token": "test-token" },
+  });
+  assert.equal(headerTokenProviders.status, 200);
+} finally {
+  await publicServer.close();
+}
+
 console.log("web hardening test passed");
+
+function connectWebSocket(target: string): Promise<{
+  send: (payload: unknown) => void;
+  next: () => Promise<any>;
+  nextResponse: (id: string) => Promise<any>;
+  close: () => void;
+}> {
+  const socket = new WebSocket(target);
+  const messages: any[] = [];
+  const waiters: Array<(value: any) => void> = [];
+  socket.addEventListener("message", (event) => {
+    const parsed = JSON.parse(String(event.data));
+    const waiter = waiters.shift();
+    if (waiter) waiter(parsed);
+    else messages.push(parsed);
+  });
+
+  const ready = new Promise<void>((resolve, reject) => {
+    socket.addEventListener("open", () => resolve(), { once: true });
+    socket.addEventListener("error", () => reject(new Error("WebSocket connection failed")), { once: true });
+  });
+
+  return withTimeout(ready, 3000, "websocket open").then(() => ({
+    send(payload: unknown) {
+      socket.send(JSON.stringify(payload));
+    },
+    next() {
+      if (messages.length) return Promise.resolve(messages.shift());
+      return withTimeout(new Promise((resolve) => waiters.push(resolve)), 3000, "websocket message");
+    },
+    async nextResponse(id: string) {
+      for (;;) {
+        const message = await this.next();
+        if (message.type === "response" && message.id === id) return message;
+      }
+    },
+    close() {
+      socket.close();
+    },
+  }));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), timeoutMs);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}

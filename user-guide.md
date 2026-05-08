@@ -490,6 +490,17 @@ Events:
 curl 'http://127.0.0.1:3000/events?token=<token>'
 ```
 
+Query token URLs are a loopback-only convenience for local browser flows such as the provider dashboard, EventSource events, and WebSocket gateway setup. When the service is exposed beyond `127.0.0.1` or `localhost`, use `x-emily-token` or `Authorization: Bearer ...` instead so tokens do not land in browser history, Referer headers, or proxy logs.
+
+Public health:
+
+```bash
+curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/health/detail' -H "x-emily-token: <token>"
+```
+
+`/health` is only a liveness check. Use authenticated `/health/detail`, `doctor`, or diagnostics commands for runtime and gateway details.
+
 ## 15. Gateway Examples
 
 Send chat:
@@ -542,7 +553,7 @@ Configure a real provider in `.emily/config.json`.
 
 WebUI says unauthorized:
 
-Open with `?token=<token>` or enter the token when prompted.
+On loopback, open with `?token=<token>` or enter the token when prompted. On non-loopback deployments, configure header-based auth through your client or proxy.
 
 HTTP tool cannot access localhost:
 
@@ -566,12 +577,13 @@ Before production use:
 
 1. Set `EMILY_WEB_TOKEN` to a strong admin secret.
 2. Use `EMILY_WEB_READ_TOKEN` or `EMILY_WEB_WRITE_TOKEN` for non-admin WebSocket/REST clients.
-3. Configure a real model provider.
-4. Keep raw API keys out of config files.
-5. Review role tool permissions.
-6. Keep `EMILY_HTTP_ALLOW_PRIVATE` disabled.
-7. Run `npm run check`.
-8. Run `npm audit --audit-level=moderate`.
-9. Run `node src/index.ts --doctor --deep`.
-10. Run `node src/index.ts --security-audit`.
-11. Verify WebUI, TUI, and Gateway flows against your intended deployment.
+3. Do not use `token=` URLs outside loopback; prefer `x-emily-token` or Bearer auth.
+4. Configure a real model provider.
+5. Keep raw API keys out of config files.
+6. Review role tool permissions.
+7. Keep `EMILY_HTTP_ALLOW_PRIVATE` disabled.
+8. Run `npm run check`.
+9. Run `npm audit --audit-level=moderate`.
+10. Run `node src/index.ts --doctor --deep`.
+11. Run `node src/index.ts --security-audit`.
+12. Verify WebUI, TUI, and Gateway flows against your intended deployment.

@@ -1,11 +1,16 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import type { Socket } from "node:net";
+import { isIP, type Socket } from "node:net";
 import { CommandPermissionError, type CommandPermission } from "../commands/CommandRegistry.ts";
 import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { webAppHtml } from "./webUi.ts";
 import type { Metadata, ToolPermission } from "../types.ts";
+
+const GATEWAY_MAX_IN_FLIGHT = 4;
+const GATEWAY_RATE_WINDOW_MS = 10_000;
+const GATEWAY_MAX_MESSAGES_PER_WINDOW = 60;
+const GATEWAY_IDLE_TIMEOUT_MS = 120_000;
 
 export interface WebServerHandle {
   server: http.Server;
@@ -117,14 +122,19 @@ export async function startWebServer({
       const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
 
       if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) {
+        if (url.searchParams.has("token") && !isLoopbackQueryTokenRequest(request, url)) {
+          return sendJson(response, 400, { error: "Query token authentication is only allowed from loopback. Use x-emily-token or Authorization instead." });
+        }
         return sendHtml(response, 200, webAppHtml());
       }
 
       if (request.method === "GET" && url.pathname === "/health") {
-        return sendJson(response, 200, { ok: true, runtime: runtime.health(), gateway: gatewayProtocolSpec() });
+        return sendJson(response, 200, { ok: true });
       }
 
-      const auth = authenticate(request, url, { authToken: resolvedAuthToken, readAuthToken, writeAuthToken });
+      const auth = authenticate(request, url, { authToken: resolvedAuthToken, readAuthToken, writeAuthToken }, {
+        allowQueryToken: isLoopbackQueryTokenRequest(request, url),
+      });
       if (!auth) {
         return sendJson(response, 401, { error: "Unauthorized" });
       }
@@ -144,6 +154,10 @@ export async function startWebServer({
         ...options,
         maxPermission: minCommandPermission(options.maxPermission, auth.maxPermission),
       });
+
+      if (request.method === "GET" && url.pathname === "/health/detail") {
+        return sendJson(response, 200, { ok: true, runtime: runtime.health(), gateway: gatewayProtocolSpec() });
+      }
 
       if (request.method === "GET" && url.pathname === "/events-snapshot") {
         return sendJson(response, 200, runtime.taskStore.getLatestEvents({
@@ -620,7 +634,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /dag", "GET /graph", "GET /graph-node", "POST /graph/add", "POST /graph/add-before", "POST /graph/add-after", "POST /graph/update", "POST /graph/delete", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /health/detail", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /dag", "GET /graph", "GET /graph-node", "POST /graph/add", "POST /graph/add-before", "POST /graph/add-after", "POST /graph/update", "POST /graph/delete", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.statusCode : error instanceof CommandPermissionError ? 403 : 500;
@@ -637,7 +651,9 @@ export async function startWebServer({
       rejectUpgrade(netSocket, 404, "Not Found");
       return;
     }
-    const auth = authenticate(request, url, { authToken: resolvedAuthToken, readAuthToken, writeAuthToken });
+    const auth = authenticate(request, url, { authToken: resolvedAuthToken, readAuthToken, writeAuthToken }, {
+      allowQueryToken: isLoopbackQueryTokenRequest(request, url),
+    });
     if (!auth) {
       rejectUpgrade(netSocket, 401, "Unauthorized");
       return;
@@ -686,8 +702,9 @@ function authenticate(
   request: IncomingMessage,
   url: URL,
   tokens: { authToken: string; readAuthToken?: string; writeAuthToken?: string },
+  options: { allowQueryToken?: boolean } = {},
 ): AuthContext | null {
-  const presented = authTokenFromRequest(request, url);
+  const presented = authTokenFromRequest(request, url, options);
   if (!presented) return null;
   if (safeTokenEquals(presented, tokens.authToken)) return { maxPermission: "danger" };
   if (tokens.writeAuthToken && safeTokenEquals(presented, tokens.writeAuthToken)) return { maxPermission: "write" };
@@ -695,12 +712,13 @@ function authenticate(
   return null;
 }
 
-function authTokenFromRequest(request: IncomingMessage, url: URL): string {
+function authTokenFromRequest(request: IncomingMessage, url: URL, options: { allowQueryToken?: boolean } = {}): string {
   const headerToken = request.headers["x-emily-token"];
   if (typeof headerToken === "string") return headerToken;
   const authorization = request.headers.authorization || "";
   const bearer = authorization.match(/^Bearer\s+(.+)$/i);
   if (bearer?.[1]) return bearer[1];
+  if (options.allowQueryToken === false) return "";
   return url.searchParams.get("token") || "";
 }
 
@@ -735,6 +753,27 @@ function isAllowedOrigin(request: IncomingMessage, url: URL): boolean {
   const origin = request.headers.origin;
   if (!origin) return true;
   return origin === url.origin;
+}
+
+function isLoopbackQueryTokenRequest(request: IncomingMessage, url: URL): boolean {
+  if (!url.searchParams.has("token")) return true;
+  return isLoopbackHost(request.headers.host || url.host) && isLoopbackAddress(request.socket.remoteAddress || "");
+}
+
+function isLoopbackHost(hostHeader: string): boolean {
+  try {
+    return isLoopbackAddress(new URL(`http://${hostHeader}`).hostname);
+  } catch {
+    return isLoopbackAddress(hostHeader.split(":")[0] || "");
+  }
+}
+
+function isLoopbackAddress(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/^\[|\]$/g, "").replace(/%.+$/, "").replace(/\.+$/, "");
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) return true;
+  if (isIP(normalized) === 4) return normalized.split(".")[0] === "127";
+  if (isIP(normalized) === 6) return normalized === "::1" || normalized.startsWith("::ffff:127.");
+  return false;
 }
 
 function streamEvents({
@@ -815,6 +854,15 @@ function acceptGatewaySocket({
   ].join("\r\n"));
 
   const connection = new WebSocketConnection(socket);
+  const limiter = new GatewayConnectionLimiter();
+  let inFlight = 0;
+  let idleTimer = setTimeout(() => socket.end(), GATEWAY_IDLE_TIMEOUT_MS);
+  idleTimer.unref?.();
+  const refreshIdleTimer = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => socket.end(), GATEWAY_IDLE_TIMEOUT_MS);
+    idleTimer.unref?.();
+  };
   runtime.taskStore.addEvent?.({
     type: "gateway.connected",
     payload: { remoteAddress: socket.remoteAddress || "" },
@@ -825,37 +873,77 @@ function acceptGatewaySocket({
   };
   runtime.roleAgentManager.on("event", onRuntimeEvent);
   socket.on("close", () => {
+    clearTimeout(idleTimer);
     runtime.roleAgentManager.off("event", onRuntimeEvent);
   });
-  connection.onMessage = async (message) => {
+  connection.onMessage = (message) => {
+    refreshIdleTimer();
     let requestId = "";
+    let parsedInput: unknown;
     try {
-      const parsed = parseGatewayRequest(JSON.parse(message));
+      parsedInput = JSON.parse(message);
+      if (parsedInput && typeof parsedInput === "object" && typeof (parsedInput as { id?: unknown }).id === "string") {
+        requestId = (parsedInput as { id: string }).id;
+      }
+      if (!limiter.consume()) {
+        connection.send(gatewayErrorResponse(requestId, "gateway_rate_limited", `Gateway message rate limit exceeded: ${GATEWAY_MAX_MESSAGES_PER_WINDOW} messages per ${GATEWAY_RATE_WINDOW_MS}ms.`));
+        return;
+      }
+      if (inFlight >= GATEWAY_MAX_IN_FLIGHT) {
+        connection.send(gatewayErrorResponse(requestId, "gateway_busy", `Gateway connection already has ${GATEWAY_MAX_IN_FLIGHT} in-flight requests.`));
+        return;
+      }
+      const parsed = parseGatewayRequest(parsedInput);
       requestId = parsed.id;
       runtime.taskStore.addEvent?.({
         type: "gateway.request",
         payload: { id: parsed.id, method: parsed.method },
       });
-      const response = await dispatchGatewayRequest(runtime, parsed, { maxPermission });
-      runtime.taskStore.addEvent?.({
-        type: "gateway.response",
-        payload: { id: response.id, ok: response.ok, method: parsed.method },
-      });
-      connection.send(response);
+      inFlight += 1;
+      void dispatchGatewayRequest(runtime, parsed, { maxPermission })
+        .then((response) => {
+          runtime.taskStore.addEvent?.({
+            type: "gateway.response",
+            payload: { id: response.id, ok: response.ok, method: parsed.method },
+          });
+          connection.send(response);
+        })
+        .catch((error) => {
+          connection.send(gatewayErrorResponse(requestId, "gateway_handler_error", error instanceof Error ? error.message : String(error)));
+        })
+        .finally(() => {
+          inFlight -= 1;
+        });
     } catch (error) {
-      connection.send({
-        type: "response",
-        id: requestId || "unknown",
-        ok: false,
-        error: {
-          code: "invalid_gateway_message",
-          message: error instanceof Error ? error.message : String(error),
-        },
-      });
+      connection.send(gatewayErrorResponse(requestId || "unknown", "invalid_gateway_message", error instanceof Error ? error.message : String(error)));
     }
   };
   if (head.length) connection.push(head);
   connection.send(gatewayEvent("gateway.ready", gatewayProtocolSpec()));
+}
+
+class GatewayConnectionLimiter {
+  private windowStartedAt = Date.now();
+  private messagesInWindow = 0;
+
+  consume(): boolean {
+    const now = Date.now();
+    if (now - this.windowStartedAt >= GATEWAY_RATE_WINDOW_MS) {
+      this.windowStartedAt = now;
+      this.messagesInWindow = 0;
+    }
+    this.messagesInWindow += 1;
+    return this.messagesInWindow <= GATEWAY_MAX_MESSAGES_PER_WINDOW;
+  }
+}
+
+function gatewayErrorResponse(id: string, code: string, message: string) {
+  return {
+    type: "response",
+    id: id || "unknown",
+    ok: false,
+    error: { code, message },
+  };
 }
 
 class WebSocketConnection {

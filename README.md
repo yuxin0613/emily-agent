@@ -493,6 +493,7 @@ Common HTTP endpoints:
 ```bash
 TOKEN=change-me
 curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/health/detail' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/doctor?deep=true' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/commands' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/tools' -H "x-emily-token: $TOKEN"
@@ -501,6 +502,8 @@ curl 'http://127.0.0.1:3000/providers' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/cron' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 ```
+
+`token=` query authentication is accepted only for loopback requests, because browser `EventSource` and local WebSocket clients cannot always send custom headers. For non-loopback access, use `x-emily-token` or `Authorization: Bearer ...` and keep query tokens out of URLs, browser history, and proxy logs.
 
 WebSocket gateway:
 
@@ -594,10 +597,13 @@ Hidden or trashed sessions are not implicitly reactivated. Restores are explicit
 Default protections:
 
 - Web/API/Gateway routes require token auth except `/` and `/health`.
+- Public `/health` returns liveness only; authenticated `/health/detail`, `/doctor`, and diagnostics endpoints expose detailed runtime state.
 - Optional read/write scoped tokens limit REST and Gateway methods by CommandRegistry permission.
+- Query token authentication is limited to loopback requests; shared-network clients should use `x-emily-token` or Bearer auth.
 - Unsafe HTTP methods check origin.
 - WebUI and provider dashboard do not embed the server token.
 - HTTP request bodies and list limits are bounded.
+- WebSocket gateway connections enforce bounded frame sizes, per-connection in-flight limits, message-rate limits, and idle cleanup.
 - HTTP tools reject loopback, private networks, link-local, and cloud metadata addresses by default.
 - Workspace file tools resolve real paths and reject symlink escapes.
 - GitHub raw API calls are classified conservatively; mutating calls require write approval.
@@ -610,10 +616,11 @@ Before exposing the server beyond loopback:
 1. Set a strong `EMILY_WEB_TOKEN`.
 2. Put the service behind TLS and network ACLs.
 3. Use `EMILY_WEB_READ_TOKEN` or `EMILY_WEB_WRITE_TOKEN` for non-admin applications instead of sharing the admin token.
-4. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
-5. Configure a real provider and run `node src/index.ts --security-audit`.
-6. Run `npm run check`.
-7. Review roles that allow network, browser, GitHub, or destructive tools.
+4. Do not use `token=` URLs outside loopback; use header-based auth through your client or proxy.
+5. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
+6. Configure a real provider and run `node src/index.ts --security-audit`.
+7. Run `npm run check`.
+8. Review roles that allow network, browser, GitHub, or destructive tools.
 
 ## Development
 

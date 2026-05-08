@@ -188,6 +188,60 @@ const localNetworkBlocked = await executor.execute({
 assert.equal(localNetworkBlocked.ok, false);
 assert.match(String(localNetworkBlocked.error || ""), /private|local/);
 
+const allowlistServer = http.createServer((request, response) => {
+  if (request.url === "/redirect-localhost") {
+    const address = allowlistServer.address() as AddressInfo;
+    response.writeHead(302, { location: `http://localhost:${address.port}/private` });
+    response.end();
+    return;
+  }
+  response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+  response.end("allowlisted local response");
+});
+await new Promise<void>((resolve) => allowlistServer.listen(0, "127.0.0.1", resolve));
+const allowlistAddress = allowlistServer.address() as AddressInfo;
+const previousEgressAllowlist = process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+try {
+  process.env.EMILY_HTTP_EGRESS_ALLOWLIST = `http://127.0.0.1:${allowlistAddress.port}`;
+  const allowlistedPrivate = await executor.execute({
+    tool: "http_fetch",
+    args: { url: `http://127.0.0.1:${allowlistAddress.port}/` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "explicit allowlist test" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(allowlistedPrivate.ok, true);
+  assert.match(String((allowlistedPrivate.output as { body?: string }).body || ""), /allowlisted local response/);
+
+  const redirectedPrivate = await executor.execute({
+    tool: "http_fetch",
+    args: { url: `http://127.0.0.1:${allowlistAddress.port}/redirect-localhost` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "redirect allowlist test" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(redirectedPrivate.ok, false);
+  assert.match(String(redirectedPrivate.error || ""), /private|local/);
+
+  process.env.EMILY_HTTP_EGRESS_ALLOWLIST = "*.0.0.1";
+  const malformedWildcard = await executor.execute({
+    tool: "http_fetch",
+    args: { url: `http://127.0.0.1:${allowlistAddress.port}/` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "malformed wildcard deny test" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(malformedWildcard.ok, false);
+  assert.match(String(malformedWildcard.error || ""), /private|local/);
+} finally {
+  if (previousEgressAllowlist === undefined) delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  else process.env.EMILY_HTTP_EGRESS_ALLOWLIST = previousEgressAllowlist;
+  await new Promise<void>((resolve, reject) => allowlistServer.close((error) => error ? reject(error) : resolve()));
+}
+
 const mappedLoopbackBlocked = await executor.execute({
   tool: "http_fetch",
   args: { url: "http://[::ffff:7f00:1]:9/" },

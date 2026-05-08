@@ -7,6 +7,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { domainToASCII } from "node:url";
 import { promisify } from "node:util";
 import type { Metadata, PermissionMode, RoleDefinition, Task, ToolPermission } from "../types.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
@@ -1012,14 +1013,9 @@ function multipartToken(value: string): string {
 
 function isHttpEgressAllowedByPolicy(url: URL): boolean {
   if (process.env.EMILY_HTTP_ALLOW_PRIVATE === "true") return true;
-  const hostname = url.hostname.toLowerCase();
-  const origin = url.origin.toLowerCase();
-  return parseCsvEnv("EMILY_HTTP_EGRESS_ALLOWLIST").some((entry) => {
-    const normalized = entry.toLowerCase();
-    if (normalized === hostname || normalized === origin) return true;
-    if (normalized.startsWith("*.")) return hostname.endsWith(normalized.slice(1));
-    return false;
-  });
+  const hostname = canonicalHostname(url.hostname);
+  const origin = canonicalOrigin(url);
+  return parseCsvEnv("EMILY_HTTP_EGRESS_ALLOWLIST").some((entry) => allowlistEntryMatches(entry, hostname, origin));
 }
 
 function parseCsvEnv(name: string): string[] {
@@ -1027,6 +1023,56 @@ function parseCsvEnv(name: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+type HttpEgressAllowlistEntry =
+  | { kind: "host"; hostname: string }
+  | { kind: "origin"; origin: string }
+  | { kind: "wildcard"; suffix: string };
+
+function allowlistEntryMatches(entry: string, hostname: string, origin: string): boolean {
+  const normalized = normalizeAllowlistEntry(entry);
+  if (!normalized) return false;
+  if (normalized.kind === "origin") return normalized.origin === origin;
+  if (normalized.kind === "wildcard") return hostname !== normalized.suffix && hostname.endsWith(`.${normalized.suffix}`);
+  return normalized.hostname === hostname;
+}
+
+function normalizeAllowlistEntry(entry: string): HttpEgressAllowlistEntry | null {
+  const raw = entry.trim().toLowerCase();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return null;
+      return { kind: "origin", origin: canonicalOrigin(url) };
+    } catch {
+      return null;
+    }
+  }
+  if (raw.startsWith("*.")) {
+    const suffix = canonicalHostname(raw.slice(2));
+    if (!suffix || suffix.includes("*") || suffix.includes(":") || !/[a-z]/i.test(suffix)) return null;
+    return { kind: "wildcard", suffix };
+  }
+  const hostname = canonicalHostname(raw);
+  if (!hostname || hostname.includes("*") || hostname.includes(":")) return null;
+  return { kind: "host", hostname };
+}
+
+function canonicalHostname(hostname: string): string {
+  const stripped = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (!stripped) return "";
+  const literalIp = ipAddressFromHost(stripped);
+  if (literalIp) return literalIp.toLowerCase();
+  return (domainToASCII(stripped) || stripped).toLowerCase();
+}
+
+function canonicalOrigin(url: URL): string {
+  const hostname = canonicalHostname(url.hostname);
+  const literalIp = ipAddressFromHost(hostname);
+  const host = literalIp && isIP(literalIp) === 6 ? `[${literalIp}]` : hostname;
+  return `${url.protocol}//${host}${url.port ? `:${url.port}` : ""}`;
 }
 
 function ipAddressFromHost(hostname: string): string | null {
