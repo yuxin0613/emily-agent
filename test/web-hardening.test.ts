@@ -5,6 +5,7 @@ import { CommandPermissionError } from "../src/commands/CommandRegistry.ts";
 let latestEventsLimit = 0;
 let diagnosticsRepair: boolean | null = null;
 let genericCommandMaxPermission = "";
+let settingsUpdateInput: Record<string, unknown> | undefined;
 
 const runtime = {
   handleUserMessage: async () => ({ content: "ok", delegatedTo: [] }),
@@ -69,6 +70,11 @@ const runtime = {
     if (name === "diagnostics.run") return runtime.diagnostics({ repair: false });
     if (name === "diagnostics.repair") return runtime.diagnostics({ repair: true });
     if (name === "maintenance.run") return runtime.maintenance(options.input);
+    if (name === "settings.get") return { defaultProviderId: "echo", fallbackMode: "strict", providers: [] };
+    if (name === "settings.update") {
+      settingsUpdateInput = options.input;
+      return { ok: true };
+    }
     return {};
   },
   roleAgentManager: {
@@ -131,6 +137,34 @@ try {
     headers: { "x-emily-token": "read-token" },
   });
   assert.equal(readScopedProviders.status, 200);
+
+  const readScopedSettings = await fetch(`${server.url}/settings`, {
+    headers: { "x-emily-token": "read-token" },
+  });
+  assert.equal(readScopedSettings.status, 200);
+
+  const readScopedSettingsWrite = await fetch(`${server.url}/settings`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "read-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ fallbackMode: "fallback" }),
+  });
+  assert.equal(readScopedSettingsWrite.status, 403);
+
+  const writeScopedSettingsWrite = await fetch(`${server.url}/settings`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "write-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ fallbackMode: "fallback" }),
+  });
+  assert.equal(writeScopedSettingsWrite.status, 200);
+  assert.deepEqual(settingsUpdateInput, { fallbackMode: "fallback" });
 
   const readScopedDeepProviderHealth = await fetch(`${server.url}/providers/health?deep=true`, {
     headers: { "x-emily-token": "read-token" },

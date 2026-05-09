@@ -9,12 +9,20 @@ import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime
 import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 import type { RoleDefinition } from "../types.ts";
 
-interface ProviderFile {
+export interface RuntimeSettings {
   defaultProviderId: string;
   fallbackMode?: ProviderFallbackMode;
   toolCallTimeoutSeconds: number;
   agents: AgentRuntimeConfig;
   providers: ProviderConfig[];
+}
+
+export interface RuntimeSettingsUpdate {
+  defaultProviderId?: unknown;
+  fallbackMode?: unknown;
+  toolCallTimeoutSeconds?: unknown;
+  agents?: unknown;
+  providers?: unknown;
 }
 
 export const DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 3600;
@@ -35,7 +43,7 @@ export class ProviderRegistry {
   toolCallTimeoutSeconds: number;
   agents: AgentRuntimeConfig;
   usageStore?: ProviderUsageStore;
-  private persistedSnapshot: ProviderFile;
+  private persistedSnapshot: RuntimeSettings;
 
   static async create({
     dataDir,
@@ -82,7 +90,7 @@ export class ProviderRegistry {
     defaultProviderId?: string;
     fallbackMode?: ProviderFallbackMode;
     usageStore?: ProviderUsageStore;
-    persistedSnapshot?: ProviderFile;
+    persistedSnapshot?: RuntimeSettings;
   }) {
     this.providers = new Map(providers.map((provider) => {
       validateProviderConfig(provider);
@@ -230,7 +238,45 @@ export class ProviderRegistry {
     });
   }
 
-  private toProviderFile(): ProviderFile {
+  getSettings(): RuntimeSettings {
+    return cloneProviderFile(this.toProviderFile());
+  }
+
+  updateSettings(input: RuntimeSettingsUpdate = {}): RuntimeSettings {
+    const next = this.toProviderFile();
+    if (Object.prototype.hasOwnProperty.call(input, "defaultProviderId")) {
+      next.defaultProviderId = requiredConfigString(input.defaultProviderId, "defaultProviderId");
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "fallbackMode")) {
+      next.fallbackMode = parseFallbackMode(input.fallbackMode);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "toolCallTimeoutSeconds")) {
+      next.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(input.toolCallTimeoutSeconds);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "agents")) {
+      const agents = input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)
+        ? input.agents as Partial<AgentRuntimeConfig>
+        : {};
+      next.agents = normalizeAgentRuntimeConfig({ ...next.agents, ...agents });
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "providers")) {
+      if (!Array.isArray(input.providers)) throw new Error("Settings providers must be an array.");
+      next.providers = input.providers.map((provider) => {
+        if (!provider || typeof provider !== "object" || Array.isArray(provider)) {
+          throw new Error("Settings providers must contain provider objects.");
+        }
+        validateProviderConfig(provider as ProviderConfig);
+        return cloneProviderConfig(provider as ProviderConfig);
+      });
+    }
+    if (!next.providers.some((provider) => provider.id === next.defaultProviderId)) {
+      throw new Error(`Default provider is not configured: ${next.defaultProviderId}`);
+    }
+    this.applyProviderFile(next);
+    return this.getSettings();
+  }
+
+  private toProviderFile(): RuntimeSettings {
     return {
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
@@ -240,7 +286,7 @@ export class ProviderRegistry {
     };
   }
 
-  private applyProviderFile(file: ProviderFile): void {
+  private applyProviderFile(file: RuntimeSettings): void {
     this.defaultProviderId = file.defaultProviderId;
     this.fallbackMode = file.fallbackMode || "strict";
     this.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds);
@@ -397,10 +443,10 @@ async function fetchWithTimeout(url: string, { headers = {}, timeoutMs }: { head
   }
 }
 
-async function readProviderFile(filePath: string): Promise<ProviderFile | null> {
+async function readProviderFile(filePath: string): Promise<RuntimeSettings | null> {
   try {
     const raw = await readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as Partial<ProviderFile>;
+    const parsed = JSON.parse(raw) as Partial<RuntimeSettings>;
     if (!Array.isArray(parsed.providers)) return null;
     return {
       defaultProviderId: parsed.defaultProviderId || "echo",
@@ -415,13 +461,13 @@ async function readProviderFile(filePath: string): Promise<ProviderFile | null> 
   }
 }
 
-async function readProviderConfig(dataDir: string, defaultProviderId: string): Promise<ProviderFile> {
+async function readProviderConfig(dataDir: string, defaultProviderId: string): Promise<RuntimeSettings> {
   return await readProviderFile(providerConfigPath(dataDir))
     || await readProviderFile(legacyProviderConfigPath(dataDir))
     || defaultProviderFile(defaultProviderId);
 }
 
-async function writeProviderFileUnlocked(dataDir: string, targetPath: string, file: ProviderFile): Promise<void> {
+async function writeProviderFileUnlocked(dataDir: string, targetPath: string, file: RuntimeSettings): Promise<void> {
   const tmpPath = path.join(dataDir, `.config.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   try {
     await writeFile(tmpPath, JSON.stringify(file, null, 2), "utf8");
@@ -437,10 +483,10 @@ function mergeProviderFiles({
   desired,
   disk,
 }: {
-  base: ProviderFile;
-  desired: ProviderFile;
-  disk: ProviderFile;
-}): ProviderFile {
+  base: RuntimeSettings;
+  desired: RuntimeSettings;
+  disk: RuntimeSettings;
+}): RuntimeSettings {
   const baseProviders = providerMap(base.providers);
   const desiredProviders = providerMap(desired.providers);
   const mergedProviders = providerMap(disk.providers);
@@ -492,7 +538,7 @@ function mergeProviderFiles({
     }
   }
 
-  const merged: ProviderFile = {
+  const merged: RuntimeSettings = {
     defaultProviderId,
     fallbackMode: disk.fallbackMode === "fallback" ? "fallback" : "strict",
     toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(disk.toolCallTimeoutSeconds ?? desired.toolCallTimeoutSeconds),
@@ -524,7 +570,7 @@ function sameAgentRuntimeConfig(left: AgentRuntimeConfig, right: AgentRuntimeCon
   return stableJson(normalizeAgentRuntimeConfig(left)) === stableJson(normalizeAgentRuntimeConfig(right));
 }
 
-function cloneProviderFile(file: ProviderFile): ProviderFile {
+function cloneProviderFile(file: RuntimeSettings): RuntimeSettings {
   return {
     defaultProviderId: file.defaultProviderId || "echo",
     fallbackMode: file.fallbackMode === "fallback" ? "fallback" : "strict",
@@ -583,7 +629,7 @@ async function removeLegacyProviderConfig(dataDir: string): Promise<void> {
   });
 }
 
-function defaultProviderFile(defaultProviderId: string): ProviderFile {
+function defaultProviderFile(defaultProviderId: string): RuntimeSettings {
   return {
     defaultProviderId,
     fallbackMode: "strict",
@@ -608,6 +654,18 @@ function defaultAgentRuntimeConfig(): AgentRuntimeConfig {
     subagentIdleTtlSeconds: 60,
     plannerTaskTimeoutSeconds: 600,
   };
+}
+
+function requiredConfigString(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Config ${name} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function parseFallbackMode(value: unknown): ProviderFallbackMode {
+  if (value === "strict" || value === "fallback") return value;
+  throw new Error("Config fallbackMode must be strict or fallback.");
 }
 
 function normalizeToolCallTimeoutSeconds(value: unknown): number {

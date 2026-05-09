@@ -122,6 +122,8 @@ interface CommandRuntime {
   listProviders: () => unknown[];
   checkProviders: (options?: { deep?: boolean }) => Promise<unknown[]>;
   providerUsage: (options?: { since?: Date; until?: Date; providerId?: string; limit?: number }) => unknown;
+  getSettings: () => unknown;
+  updateSettings: (input?: Record<string, unknown>) => Promise<unknown>;
   listRoles: () => Promise<unknown[]>;
   listSessions: (options?: { status?: "active" | "hidden" | "trashed" | "deleted"; includeHidden?: boolean; includeTrashed?: boolean; includeDeleted?: boolean; limit?: number }) => unknown[];
   listSessionMessages: (options: { sessionId: string; limit?: number }) => unknown[];
@@ -411,6 +413,15 @@ function queryCommands(runtime: CommandRuntime): RuntimeCommand[] {
         limit: numberInput(input.limit, undefined, 20),
       }),
       renderText: (result) => renderProviderUsage(result),
+    },
+    {
+      name: "settings.get",
+      aliases: ["settings", "config.get"],
+      description: "Return persisted runtime settings.",
+      permission: "read",
+      inputSchema: { args: [], examples: ["settings.get"] },
+      run: () => runtime.getSettings(),
+      renderText: (result) => renderJson(result),
     },
     {
       name: "roles",
@@ -1104,6 +1115,25 @@ function skillCandidateCommands(runtime: CommandRuntime): RuntimeCommand[] {
 
 function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
   return [
+    {
+      name: "settings.update",
+      aliases: ["config.update"],
+      description: "Update persisted runtime settings.",
+      permission: "write",
+      inputSchema: {
+        args: [],
+        examples: ['settings.update {"fallbackMode":"fallback"}'],
+        properties: {
+          defaultProviderId: "string",
+          fallbackMode: "string",
+          toolCallTimeoutSeconds: "number",
+          agents: "object",
+          providers: "array",
+        },
+      },
+      run: ({ input }) => runtime.updateSettings(input),
+      renderText: (result) => renderJson(result),
+    },
     {
       name: "diagnostics.repair",
       aliases: ["repair-diagnostics"],

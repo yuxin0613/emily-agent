@@ -203,6 +203,15 @@ export async function startWebServer({
         }));
       }
 
+      if (request.method === "GET" && url.pathname === "/settings") {
+        return sendJson(response, 200, await runCommand("settings.get"));
+      }
+
+      if (request.method === "POST" && url.pathname === "/settings") {
+        const body = await readJson(request);
+        return sendJson(response, 200, await runCommand("settings.update", { input: body }));
+      }
+
       if (request.method === "GET" && url.pathname === "/providers/dashboard") {
         return sendHtml(response, 200, providerDashboardHtml());
       }
@@ -234,6 +243,12 @@ export async function startWebServer({
 
       if (request.method === "GET" && url.pathname === "/tools") {
         return sendJson(response, 200, await runCommand("tools"));
+      }
+
+      if (request.method === "GET" && url.pathname === "/subagents") {
+        return sendJson(response, 200, await runCommand("subagents.list", {
+          input: { includeIdle: url.searchParams.get("includeIdle") === "true" },
+        }));
       }
 
       if (request.method === "POST" && url.pathname === "/tools/execute") {
@@ -634,7 +649,7 @@ export async function startWebServer({
 
       sendJson(response, 404, {
         error: "Not found",
-        routes: ["GET /", "GET /health", "GET /health/detail", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /providers/dashboard", "POST /providers", "GET /tools", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /dag", "GET /graph", "GET /graph-node", "POST /graph/add", "POST /graph/add-before", "POST /graph/add-after", "POST /graph/update", "POST /graph/delete", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
+        routes: ["GET /", "GET /health", "GET /health/detail", "GET /doctor", "GET /gateway (websocket upgrade)", "GET /events", "GET /events-snapshot", "GET /providers", "GET /providers/health", "GET /providers/usage", "GET /settings", "POST /settings", "GET /providers/dashboard", "POST /providers", "GET /tools", "GET /subagents", "POST /tools/execute", "GET /skills", "GET /commands", "POST /commands/run", "GET /cron", "POST /cron", "POST /cron/update", "POST /cron/pause", "POST /cron/resume", "POST /cron/run", "DELETE /cron", "GET /skill-candidates", "POST /skill-candidates/build", "POST /skill-candidates/approve", "POST /skill-candidates/reject", "GET /roles", "POST /roles", "POST /roles/defaults", "GET /sessions", "GET /sessions/messages", "GET /sessions/resume-latest", "GET /sessions/export", "GET /sessions/compact-preview", "GET /sessions/usage", "POST /sessions/new", "POST /sessions/clear", "POST /sessions/restore", "POST /sessions/trash", "POST /roles/provider", "GET /experiences", "GET /timeline", "GET /dag", "GET /graph", "GET /graph-node", "POST /graph/add", "POST /graph/add-before", "POST /graph/add-after", "POST /graph/update", "POST /graph/delete", "GET /task-trace", "GET /diagnostics", "GET /security/audit", "GET /context", "GET /route", "POST /diagnostics/repair", "POST /maintenance", "POST /cancel-task", "POST /cancel-run", "POST /experiences/build-daily", "POST /experiences/feedback", "POST /chat"],
       });
     } catch (error) {
       const statusCode = error instanceof HttpError ? error.statusCode : error instanceof CommandPermissionError ? 403 : 500;

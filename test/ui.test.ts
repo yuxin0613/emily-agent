@@ -12,10 +12,15 @@ assert.match(html, /Emily AgentOS/);
 assert.match(html, /id="nav"/);
 assert.match(html, /id="content"/);
 assert.match(html, /Sessions/);
+assert.match(html, /Monitor/);
+assert.match(html, /Settings/);
 assert.match(html, /\/sessions\/clear/);
 assert.match(html, /\/sessions\/messages/);
 assert.match(html, /\/sessions\/restore/);
 assert.match(html, /\/skill-candidates\/build/);
+assert.match(html, /\/settings/);
+assert.match(html, /\/subagents/);
+assert.match(html, /\/cron/);
 assert.match(html, /\/chat/);
 assert.ok(!html.includes("${undefined}"));
 
