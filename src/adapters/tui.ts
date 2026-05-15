@@ -57,6 +57,8 @@ const BUSY_SAFE_COMMANDS = new Set([
 ]);
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const TUI_MIN_FRAME_WIDTH = 88;
+const TUI_FRAME_MARGIN_COLUMNS = 2;
 
 type TuiHelpMode = "common" | "all";
 type TuiHelpSection = [string, string[][]];
@@ -445,10 +447,11 @@ function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRend
   clearPromptBlock(renderState);
   output.write("\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   const prompt = promptFor(state);
-  const bodyWidth = promptPreviewWidth(prompt);
+  const frameWidth = tuiFrameWidth();
+  const bodyWidth = promptPreviewWidth(prompt, frameWidth);
   const bodyLines = formatPromptBufferPreviewLines(buffer, bodyWidth);
   const indent = " ".repeat(visibleLength(prompt));
-  const divider = style("─".repeat(Math.max(20, terminalWidth() - 2)), "yellow");
+  const divider = style("─".repeat(frameWidth), "yellow");
   const renderedLines = [
     divider,
     ...bodyLines.map((line, index) => `${index === 0 ? prompt : indent}${line}`),
@@ -468,8 +471,8 @@ export function formatPromptBufferPreviewLines(buffer: string, width: number): s
   return wrapBlock(normalizePastedText(buffer), Math.max(8, width));
 }
 
-function promptPreviewWidth(prompt: string): number {
-  return Math.max(8, terminalWidth() - visibleLength(prompt) - 4);
+function promptPreviewWidth(prompt: string, frameWidth = tuiFrameWidth()): number {
+  return Math.max(8, frameWidth - visibleLength(prompt));
 }
 
 function enterRawPromptMode(rl: readline.Interface): () => void {
@@ -1960,18 +1963,17 @@ export function formatTuiHome({
   transcript?: TuiTranscriptEntry[];
   contextQueue?: QueuedTuiMessage[];
 } = {}): string {
-  const width = Math.max(88, terminalWidth());
-  const boxWidth = Math.min(width - 2, 178);
-  const wideLayout = boxWidth >= 100;
-  const contentWidth = boxWidth - 4;
-  const leftWidth = wideLayout ? Math.max(48, Math.min(62, Math.floor((boxWidth - 7) * 0.38))) : contentWidth;
-  const logWidth = wideLayout ? Math.max(28, boxWidth - leftWidth - 7) : 0;
+  const frameWidth = tuiFrameWidth();
+  const wideLayout = frameWidth >= 100;
+  const contentWidth = frameWidth - 4;
+  const leftWidth = wideLayout ? Math.max(48, Math.min(62, Math.floor((frameWidth - 7) * 0.38))) : contentWidth;
+  const logWidth = wideLayout ? Math.max(28, frameWidth - leftWidth - 7) : 0;
   const lines: string[] = [];
   lines.push("");
   for (const line of EMILY_WORDMARK) lines.push(style(line, "gray"));
   lines.push("");
-  lines.push(`${"─".repeat(Math.max(2, Math.floor((boxWidth - 36) / 2)))} ${style("Emily AgentOS terminal workspace", "gray")} ${"─".repeat(12)}`);
-  lines.push(`┌${"─".repeat(boxWidth - 2)}┐`);
+  lines.push(formatCenteredDivider("Emily AgentOS terminal workspace", frameWidth));
+  lines.push(`┌${"─".repeat(frameWidth - 2)}┐`);
 
   const workspace = [
     sectionTitle("Available Tools:"),
@@ -1999,15 +2001,15 @@ export function formatTuiHome({
       lines.push(`│ ${cell} │`);
     }
   }
-  lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
-  lines.push(formatTuiStatusLine({ state, health, provider, width: boxWidth }));
+  lines.push(`└${"─".repeat(frameWidth - 2)}┘`);
+  lines.push(formatTuiStatusLine({ state, health, provider, width: frameWidth }));
   lines.push("");
   lines.push(style("Welcome to Emily Agent! Type your message or /help for commands.", "gray"));
-  const transcriptLines = formatTuiTranscript(transcript.length ? transcript : state.transcript || [], boxWidth);
+  const transcriptLines = formatTuiTranscript(transcript.length ? transcript : state.transcript || [], frameWidth);
   if (transcriptLines.length) {
     lines.push(...transcriptLines);
   }
-  const contextQueueLines = formatTuiContextQueue(contextQueue.length ? contextQueue : state.contextQueue || [], boxWidth);
+  const contextQueueLines = formatTuiContextQueue(contextQueue.length ? contextQueue : state.contextQueue || [], frameWidth);
   if (contextQueueLines.length) {
     lines.push(...contextQueueLines);
   }
@@ -2046,8 +2048,7 @@ function appendTranscript(state: TuiState, role: TuiTranscriptEntry["role"], con
 
 function formatTuiTranscript(entries: TuiTranscriptEntry[], width: number, maxLines = 18): string[] {
   if (!entries.length) return [];
-  const contentWidth = Math.max(32, width - 4);
-  const groups = entries.slice(-8).map((entry) => formatTuiTranscriptEntry(entry, contentWidth));
+  const groups = entries.slice(-8).map((entry) => formatTuiTranscriptEntry(entry, width));
   const kept: string[] = [];
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = groups[index];
@@ -2059,7 +2060,7 @@ function formatTuiTranscript(entries: TuiTranscriptEntry[], width: number, maxLi
   }
   return [
     "",
-    style("─".repeat(Math.min(width, 96)), "yellow"),
+    style("─".repeat(width), "yellow"),
     ...kept,
   ];
 }
@@ -2078,13 +2079,29 @@ function formatTuiTranscriptEntry(entry: TuiTranscriptEntry, width: number): str
     ];
   }
   const label = ` ${style("Emily", "yellow")} `;
-  const top = `┌─${label}${"─".repeat(Math.max(4, width - visibleLength(label) - 3))}`;
-  const bottom = `└${"─".repeat(Math.max(4, width - 1))}`;
+  const bodyWidth = Math.max(24, width - 4);
+  const top = formatTopBorder(label, width);
+  const bottom = `└${"─".repeat(width - 2)}┘`;
   return [
     top,
-    ...wrapBlock(entry.content, Math.max(24, width - 4)).map((line) => `│ ${line}`),
+    ...wrapBlock(entry.content, bodyWidth).map((line) => `│ ${pad(line, bodyWidth)} │`),
     bottom,
   ];
+}
+
+function formatTopBorder(label: string, width: number): string {
+  const left = "┌─";
+  const right = "┐";
+  const fill = Math.max(0, width - visibleLength(left) - visibleLength(label) - visibleLength(right));
+  return `${left}${label}${"─".repeat(fill)}${right}`;
+}
+
+function formatCenteredDivider(label: string, width: number): string {
+  const content = ` ${style(label, "gray")} `;
+  const fill = Math.max(0, width - visibleLength(content));
+  const left = Math.floor(fill / 2);
+  const right = fill - left;
+  return `${"─".repeat(left)}${content}${"─".repeat(right)}`;
 }
 
 function formatTuiContextQueue(queue: QueuedTuiMessage[], width: number, maxRows = 5): string[] {
@@ -2299,7 +2316,11 @@ function stripAnsi(value: string): string {
 }
 
 function terminalWidth(): number {
-  return Math.max(60, Math.min(180, output.columns || 88));
+  return Math.max(60, Math.floor(output.columns || TUI_MIN_FRAME_WIDTH));
+}
+
+function tuiFrameWidth(width = terminalWidth()): number {
+  return Math.max(TUI_MIN_FRAME_WIDTH, Math.floor(width) - TUI_FRAME_MARGIN_COLUMNS);
 }
 
 function wrapBlock(content: string, width: number): string[] {

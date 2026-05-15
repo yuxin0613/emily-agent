@@ -6,6 +6,50 @@ import { createPromptInputDecoder, flattenDagEditorNodes, formatDagEditorView, f
 
 const execFileAsync = promisify(execFile);
 
+function stripAnsi(value: string): string {
+  return String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleLength(value: string): number {
+  let width = 0;
+  for (const char of stripAnsi(value)) width += charDisplayWidth(char);
+  return width;
+}
+
+function charDisplayWidth(char: string): number {
+  const code = char.codePointAt(0) || 0;
+  if (code === 0) return 0;
+  if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0;
+  if (code >= 0x300 && code <= 0x36f) return 0;
+  if (isWideCodePoint(code)) return 2;
+  return 1;
+}
+
+function isWideCodePoint(code: number): boolean {
+  return (code >= 0x1100 && code <= 0x115f)
+    || code === 0x2329
+    || code === 0x232a
+    || (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f)
+    || (code >= 0xac00 && code <= 0xd7a3)
+    || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xfe10 && code <= 0xfe19)
+    || (code >= 0xfe30 && code <= 0xfe6f)
+    || (code >= 0xff00 && code <= 0xff60)
+    || (code >= 0xffe0 && code <= 0xffe6)
+    || (code >= 0x1f300 && code <= 0x1faff);
+}
+
+function framedLineWidths(value: string): number[] {
+  return stripAnsi(value)
+    .split("\n")
+    .filter((line) => line.startsWith("┌")
+      || line.startsWith("└")
+      || line.startsWith("│")
+      || /^─+$/.test(line)
+      || /^─+ Emily AgentOS terminal workspace ─+$/.test(line))
+    .map(visibleLength);
+}
+
 const html = webAppHtml();
 
 assert.match(html, /Emily AgentOS/);
@@ -109,6 +153,13 @@ assert.match(tuiHome, /Context Queue/);
 assert.match(tuiHome, /第一条新 context/);
 assert.match(tuiHome, /merge: \/queue merge 2/);
 assert.ok(!tuiHome.includes("undefined"));
+const tuiHomeFrameWidths = framedLineWidths(tuiHome);
+assert.ok(tuiHomeFrameWidths.length > 20);
+assert.deepEqual([...new Set(tuiHomeFrameWidths)], [178]);
+process.stdout.columns = 60;
+const narrowTuiHome = formatTuiHome({ transcript: [{ role: "assistant", content: "narrow frame" }] });
+process.stdout.columns = originalColumns;
+assert.deepEqual([...new Set(framedLineWidths(narrowTuiHome))], [88]);
 const mergedQueue = mergeContextQueueToIndex([
   { id: "ctx-1", content: "第一条", recorded: true },
   { id: "ctx-2", content: "第二条", recorded: true },
