@@ -632,6 +632,14 @@ export class ToolExecutor {
     const parentGraphKey = typeof args.parentKey === "string" && args.parentKey.trim()
       ? args.parentKey.trim()
       : typeof request.task?.metadata.graphKey === "string" ? request.task.metadata.graphKey : "";
+    if (graphKey) {
+      validateCreateTaskGraphNode({
+        taskStore: this.taskStore,
+        requestTask: request.task || null,
+        graphKey,
+        parentGraphKey,
+      });
+    }
     const inheritedGraph: Metadata = graphKey ? {
       graphKey,
       graphId: typeof request.task?.metadata.graphId === "string" ? request.task.metadata.graphId : "",
@@ -731,16 +739,22 @@ export class ToolExecutor {
   }
 
   private addEvent(type: string, request: ToolExecutionRequest, payload: Record<string, unknown>): number | null {
+    const sanitizedPayload = sanitizeEventRecord(payload);
     const eventId = this.taskStore?.addEvent({
       type,
       taskId: request.task?.id || null,
       payload: {
-        ...payload,
+        ...sanitizedPayload,
         runId: request.runId || request.task?.metadata.runId || "",
         sessionId: request.sessionId || request.task?.metadata.sessionId || "",
       },
     }) ?? null;
-    if (eventId) this.onEvent?.({ eventId, type, request, payload });
+    if (eventId) this.onEvent?.({
+      eventId,
+      type,
+      request: sanitizeRequestForEvent(request),
+      payload: sanitizedPayload,
+    });
     return eventId;
   }
 }
@@ -1711,15 +1725,91 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+const GRAPH_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+function validateCreateTaskGraphNode({
+  taskStore,
+  requestTask,
+  graphKey,
+  parentGraphKey,
+}: {
+  taskStore: TaskStore;
+  requestTask: Task | null;
+  graphKey: string;
+  parentGraphKey: string;
+}): void {
+  if (!GRAPH_KEY_PATTERN.test(graphKey)) throw new Error(`invalid graphKey: ${graphKey}`);
+  if (!parentGraphKey) throw new Error("parentKey is required when graphKey is provided.");
+  if (!GRAPH_KEY_PATTERN.test(parentGraphKey)) throw new Error(`invalid parentKey: ${parentGraphKey}`);
+  if (parentGraphKey === graphKey) throw new Error(`task cannot be its own parent: ${graphKey}`);
+
+  const graphId = typeof requestTask?.metadata.graphId === "string" ? requestTask.metadata.graphId : "";
+  if (!graphId) throw new Error("create_task graphKey requires an existing graph task context.");
+
+  const existingKeys = new Set(taskStore.getTasksForGraph(graphId).map(taskGraphKey).filter(Boolean));
+  if (existingKeys.has(graphKey)) throw new Error(`graphKey already exists: ${graphKey}`);
+  if (!existingKeys.has(parentGraphKey)) throw new Error(`unknown parentKey for ${graphKey}: ${parentGraphKey}`);
+}
+
+function taskGraphKey(task: Task): string {
+  return typeof task.metadata.graphKey === "string" ? task.metadata.graphKey : "";
+}
+
+function sanitizeRequestForEvent(request: ToolExecutionRequest): ToolExecutionRequest {
+  return {
+    ...request,
+    args: request.args ? summarizeArgs(request.args) : request.args,
+    approval: request.approval ? sanitizeEventRecord(request.approval as Record<string, unknown>) as ToolApproval : request.approval,
+  };
+}
+
 function summarizeArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeEventRecord(args);
+}
+
+function sanitizeEventRecord(record: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    const normalized = key.toLowerCase();
-    result[key] = normalized.includes("content") || normalized.includes("body")
-      ? `[${String(value).length} chars]`
-      : value;
+  const seen = new WeakSet<object>();
+  for (const [key, value] of Object.entries(record)) {
+    result[key] = sanitizeEventValue(key, value, seen);
   }
   return result;
+}
+
+function sanitizeEventValue(key: string, value: unknown, seen: WeakSet<object>): unknown {
+  if (isSensitiveEventKey(key)) return "[redacted]";
+  if (isLargeEventKey(key)) return `[${String(value).length} chars]`;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeEventValue("", item, seen));
+  }
+  if (isObject(value)) {
+    if (seen.has(value)) return "[circular]";
+    seen.add(value);
+    const result: Record<string, unknown> = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      result[childKey] = sanitizeEventValue(childKey, childValue, seen);
+    }
+    seen.delete(value);
+    return result;
+  }
+  return value;
+}
+
+function isSensitiveEventKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized.includes("token")
+    || normalized.includes("apikey")
+    || normalized.includes("authorization")
+    || normalized.includes("password")
+    || normalized.includes("secret")
+    || normalized.includes("credential")
+    || normalized.includes("privatekey")
+    || normalized.includes("cookie");
+}
+
+function isLargeEventKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return normalized.includes("content") || normalized.includes("body");
 }
 
 function summarizeOutput(output: unknown): unknown {

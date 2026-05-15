@@ -946,6 +946,12 @@ async function renderSettings(content) {
   const toolTimeout = numberInput(settings.toolCallTimeoutSeconds || 3600);
   const mainAgents = numberInput(agents.mainAgents || 1);
   const maxSubagentsPerRole = numberInput(agents.maxSubagentsPerRole || 1);
+  mainAgents.readOnly = true;
+  mainAgents.min = '1';
+  mainAgents.max = '1';
+  maxSubagentsPerRole.readOnly = true;
+  maxSubagentsPerRole.min = '1';
+  maxSubagentsPerRole.max = '1';
   const maxConcurrentSubagents = numberInput(agents.maxConcurrentSubagents || 1);
   const releaseSubagentsAfterTask = el('input', { type: 'checkbox', checked: agents.releaseSubagentsAfterTask !== false });
   const subagentIdleTtlSeconds = numberInput(agents.subagentIdleTtlSeconds || 0);

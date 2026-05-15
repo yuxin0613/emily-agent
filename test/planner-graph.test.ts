@@ -43,6 +43,7 @@ assert.ok(comparisonResponse.delegatedTo.includes("researcher"));
 assert.ok(!comparisonResponse.delegatedTo.includes("developer"));
 assert.doesNotMatch(comparisonResponse.content, /请确认目标等级/);
 
+await runtime.updateSettings({ toolCallTimeoutSeconds: 7 });
 const webServer = http.createServer((_request, response) => {
   response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
   response.end("<html><head><title>Obsidian Features</title></head><body><h1>Obsidian</h1><p>Markdown notes, backlinks, graph view, canvas, plugins, sync.</p></body></html>");
@@ -63,6 +64,8 @@ try {
     && event.payload.code === "planner_clarification_overridden"));
   assert.ok(webTimeline.events.some((event) => event.type === "tool.execution.completed"
     && event.payload.tool === "http_fetch"));
+  assert.equal(webTimeline.events.find((event) => event.type === "tool.execution.started"
+    && event.payload.tool === "http_fetch")?.payload.timeoutMs, 7000);
 } finally {
   await new Promise<void>((resolve, reject) => webServer.close((error) => error ? reject(error) : resolve()));
 }

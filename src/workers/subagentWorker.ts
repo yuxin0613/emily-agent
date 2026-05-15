@@ -202,6 +202,7 @@ async function runRoleTask({
     workspaceDir: process.cwd(),
     taskStore,
     registry: createDefaultToolRegistry(),
+    toolCallTimeoutMs: providerRegistry.toolCallTimeoutSeconds * 1000,
     onEvent: ({ eventId }) => {
       notify("task.changed", { taskId: task.id, eventId, leaseToken: task.leaseToken });
     },

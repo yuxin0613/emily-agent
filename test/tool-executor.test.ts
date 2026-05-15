@@ -4,8 +4,9 @@ import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { ToolExecutor } from "../src/tools/ToolExecutor.ts";
+import { ToolExecutor, type ToolExecutionEvent } from "../src/tools/ToolExecutor.ts";
 import { createDefaultToolRegistry } from "../src/tools/ToolRegistry.ts";
+import { createTaskGraph } from "../src/tasks/TaskGraph.ts";
 import { TaskStore } from "../src/tasks/TaskStore.ts";
 import type { RoleDefinition } from "../src/types.ts";
 
@@ -105,6 +106,49 @@ const llmWikiReadApprovalRequired = await executor.execute({
 });
 assert.equal(llmWikiReadApprovalRequired.ok, false);
 assert.match(String(llmWikiReadApprovalRequired.error || ""), /network_read/);
+
+const auditEvents: ToolExecutionEvent[] = [];
+const auditExecutor = new ToolExecutor({
+  workspaceDir: process.cwd(),
+  taskStore,
+  registry: createDefaultToolRegistry(),
+  onEvent: (event) => auditEvents.push(event),
+});
+const eventsBeforeAudit = taskStore.getLatestEvents({ limit: 1000 });
+const beforeAuditEventId = eventsBeforeAudit.length ? eventsBeforeAudit[eventsBeforeAudit.length - 1].id : 0;
+const secretToken = "super-secret-token-value";
+const llmWikiSecretApprovalRequired = await auditExecutor.execute({
+  tool: "llm_wiki",
+  args: {
+    action: "query",
+    query: "agentos",
+    token: secretToken,
+    headers: {
+      Authorization: `Bearer ${secretToken}`,
+      "X-API-Key": secretToken,
+    },
+    nested: {
+      apiKey: secretToken,
+      body: `hidden ${secretToken}`,
+    },
+  },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(llmWikiSecretApprovalRequired.ok, false);
+const auditStarted = taskStore.getLatestEvents({ afterId: beforeAuditEventId, limit: 20 })
+  .find((event) => event.type === "tool.execution.started" && event.payload.tool === "llm_wiki");
+assert.ok(auditStarted);
+const auditArgs = auditStarted.payload.args as Record<string, unknown>;
+const auditHeaders = auditArgs.headers as Record<string, unknown>;
+const auditNested = auditArgs.nested as Record<string, unknown>;
+assert.equal(auditArgs.token, "[redacted]");
+assert.equal(auditHeaders.Authorization, "[redacted]");
+assert.equal(auditHeaders["X-API-Key"], "[redacted]");
+assert.equal(auditNested.apiKey, "[redacted]");
+assert.doesNotMatch(JSON.stringify(auditStarted.payload), /super-secret-token-value/);
+assert.doesNotMatch(JSON.stringify(auditEvents), /super-secret-token-value/);
 
 const llmWikiWriteApprovalRequired = await executor.execute({
   tool: "llm_wiki",
@@ -270,6 +314,93 @@ const symlinkRead = await symlinkExecutor.execute({
 });
 assert.equal(symlinkRead.ok, false);
 assert.match(String(symlinkRead.error || ""), /symlink|escapes workspace/);
+
+const graphTasks = createTaskGraph({
+  taskStore,
+  baseMetadata: { runId: "tool-create-task", sessionId: "tool-executor" },
+  spec: {
+    tasks: [{
+      key: "root",
+      role: "planner",
+      title: "Root graph task",
+      input: "Root graph task.",
+    }],
+  },
+});
+const createTaskRole: RoleDefinition = {
+  ...role,
+  allowedTools: ["create_task"],
+  forbiddenTools: [],
+};
+const createdGraphTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "child",
+    role: "developer",
+    title: "Child graph task",
+    input: "Implement the child graph task.",
+    acceptanceCriteria: ["Child graph task exists."],
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(createdGraphTask.ok, true);
+assert.equal(((createdGraphTask.output as { metadata?: Record<string, unknown> }).metadata || {}).graphKey, "child");
+
+const duplicateGraphTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "child",
+    role: "developer",
+    title: "Duplicate graph task",
+    input: "This duplicate should be rejected.",
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(duplicateGraphTask.ok, false);
+assert.match(String(duplicateGraphTask.error || ""), /graphKey already exists/);
+
+const missingParentGraphTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "orphan",
+    parentKey: "missing_parent",
+    role: "developer",
+    title: "Orphan graph task",
+    input: "This orphan should be rejected.",
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(missingParentGraphTask.ok, false);
+assert.match(String(missingParentGraphTask.error || ""), /unknown parentKey/);
+
+const invalidGraphKeyTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "bad key",
+    role: "developer",
+    title: "Invalid graph task",
+    input: "This invalid key should be rejected.",
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(invalidGraphKeyTask.ok, false);
+assert.match(String(invalidGraphKeyTask.error || ""), /invalid graphKey/);
 
 const browserServer = http.createServer((request, response) => {
   if (request.url === "/v1/query" && request.method === "POST") {
