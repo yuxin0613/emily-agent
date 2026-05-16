@@ -156,6 +156,44 @@ assert.ok(!tuiHome.includes("undefined"));
 const tuiHomeFrameWidths = framedLineWidths(tuiHome);
 assert.ok(tuiHomeFrameWidths.length > 20);
 assert.deepEqual([...new Set(tuiHomeFrameWidths)], [178]);
+process.stdout.columns = 160;
+const activeNow = Date.now();
+const activeTaskHome = formatTuiHome({
+  state: {
+    sessionId: "active-session",
+    lastRunId: "run_active",
+    permissionMode: "workspace_write",
+    activeTasks: {
+      "task-running": {
+        id: "task-running",
+        role: "developer",
+        status: "running",
+        title: "Implement run log active task summary",
+        assignedAgentId: "developer-12345",
+        queuedAtMs: activeNow - 185000,
+        runningAtMs: activeNow - 125000,
+        updatedAtMs: activeNow - 5000,
+      },
+      "task-queued": {
+        id: "task-queued",
+        role: "reviewer",
+        status: "queued",
+        title: "Verify active task display",
+        assignedAgentId: "reviewer-67890",
+        queuedAtMs: activeNow - 65000,
+        updatedAtMs: activeNow - 4000,
+      },
+    },
+  },
+  runLog: ["[12:00:00] developer running · subagent developer-12345 · task task-run - Implement run log active task summary"],
+});
+process.stdout.columns = originalColumns;
+assert.match(activeTaskHome, /Active: 2 tasks/);
+assert.match(activeTaskHome, /1 running/);
+assert.match(activeTaskHome, /1 queued/);
+assert.match(activeTaskHome, /developer/);
+assert.match(activeTaskHome, /reviewer/);
+assert.match(activeTaskHome, /Implement run log active task summary/);
 process.stdout.columns = 60;
 const narrowTuiHome = formatTuiHome({ transcript: [{ role: "assistant", content: "narrow frame" }] });
 process.stdout.columns = originalColumns;

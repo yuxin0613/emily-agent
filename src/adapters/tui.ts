@@ -71,11 +71,22 @@ type QueuedTuiMessage = {
   content: string;
   recorded?: boolean;
 };
+type TuiActiveTask = {
+  id: string;
+  role: string;
+  status: string;
+  title: string;
+  assignedAgentId?: string;
+  queuedAtMs: number;
+  runningAtMs?: number;
+  updatedAtMs: number;
+};
 type TuiState = {
   sessionId: string;
   lastRunId: string;
   permissionMode: string;
   runLog: string[];
+  activeTasks: Record<string, TuiActiveTask>;
   transcript: TuiTranscriptEntry[];
   contextQueue: QueuedTuiMessage[];
   nextContextQueueId: number;
@@ -122,6 +133,8 @@ type TuiTaskLike = {
   title?: string;
   assignedAgentId?: string;
   error?: string;
+  createdAt?: string;
+  updatedAt?: string;
   metadata?: {
     sessionId?: string;
     lastError?: string;
@@ -259,6 +272,7 @@ export async function startTui({ runtime }: { runtime: TuiRuntime }): Promise<vo
     lastRunId: "",
     permissionMode: "workspace_write",
     runLog: [],
+    activeTasks: {},
     transcript: [],
     contextQueue: [],
     nextContextQueueId: 1,
@@ -1740,7 +1754,14 @@ function attachProgressReporter(
 ): () => void {
   const manager = runtime.roleAgentManager;
   if (!manager?.on || !manager?.off) return () => undefined;
+  state.activeTasks ||= {};
   const seen = new Set<string>();
+  const refreshTimer = output.isTTY ? setInterval(() => {
+    if (!Object.keys(state.activeTasks || {}).length) return;
+    beforePrint();
+    afterPrint();
+  }, 5000) : null;
+  refreshTimer?.unref?.();
   const handler = (envelope: TuiEventEnvelope) => {
     const event = envelope?.event || null;
     const task = envelope?.task || null;
@@ -1750,16 +1771,24 @@ function attachProgressReporter(
     if (seen.has(eventKey)) return;
     seen.add(eventKey);
     if (task?.metadata?.sessionId && task.metadata.sessionId !== state.sessionId) return;
+    const activeChanged = updateActiveTasks(state, type, task, event);
     const line = formatProgressEvent(type, task, event);
     if (line) {
       appendRunLog(state, line);
       beforePrint();
       if (!output.isTTY) output.write(`${style(TUI_GLYPHS.assistant, "gray")} ${style(line, "gray")}\n`);
       afterPrint();
+    } else if (activeChanged && output.isTTY) {
+      beforePrint();
+      afterPrint();
     }
   };
   manager.on("event", handler);
-  return () => manager.off?.("event", handler);
+  return () => {
+    manager.off?.("event", handler);
+    if (refreshTimer) clearInterval(refreshTimer);
+    state.activeTasks = {};
+  };
 }
 
 function shouldShowProgressEvent(type: string): boolean {
@@ -1769,6 +1798,59 @@ function shouldShowProgressEvent(type: string): boolean {
     || type.startsWith("task_graph.")
     || type.startsWith("tool.execution.")
     || type === "runtime.anomaly";
+}
+
+const TUI_ACTIVE_TASK_STATUSES = new Set(["pending", "queued", "running", "blocked", "needs_inspection"]);
+const TUI_TERMINAL_TASK_STATUSES = new Set(["done", "failed", "cancelled", "dead_letter"]);
+
+function updateActiveTasks(
+  state: Pick<TuiState, "activeTasks">,
+  type: string,
+  task?: TuiTaskLike | null,
+  event?: TuiEventLike | null,
+): boolean {
+  if (!type.startsWith("task.") || !task?.id) return false;
+  const status = task.status || type.replace(/^task\./, "");
+  const taskId = String(task.id);
+  const existing = state.activeTasks?.[taskId];
+  if (TUI_TERMINAL_TASK_STATUSES.has(status)) {
+    if (!existing) return false;
+    delete state.activeTasks[taskId];
+    return true;
+  }
+  if (!TUI_ACTIVE_TASK_STATUSES.has(status)) return false;
+
+  const now = Date.now();
+  const timestamp = timestampMs(event?.createdAt, task.updatedAt, task.createdAt) || now;
+  const queuedAtMs = existing?.queuedAtMs || timestamp;
+  const runningAtMs = status === "running" ? existing?.runningAtMs || timestamp : existing?.runningAtMs;
+  const next: TuiActiveTask = {
+    id: taskId,
+    role: task.role || existing?.role || "task",
+    status,
+    title: task.title || existing?.title || "(untitled)",
+    assignedAgentId: task.assignedAgentId || event?.agentId || existing?.assignedAgentId,
+    queuedAtMs,
+    runningAtMs,
+    updatedAtMs: timestamp,
+  };
+  const changed = !existing
+    || existing.status !== next.status
+    || existing.role !== next.role
+    || existing.title !== next.title
+    || existing.assignedAgentId !== next.assignedAgentId
+    || existing.runningAtMs !== next.runningAtMs;
+  state.activeTasks[taskId] = next;
+  return changed;
+}
+
+function timestampMs(...values: Array<string | undefined>): number | null {
+  for (const value of values) {
+    if (!value) continue;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 export function formatProgressEvent(type: string, task?: TuiTaskLike | null, event?: TuiEventLike | null): string {
@@ -1938,7 +2020,7 @@ export function formatTuiCommandHints(prefix = "/", query = ""): string {
 }
 
 export function formatTuiHome({
-  state = { sessionId: "tui", lastRunId: "", permissionMode: "workspace_write" },
+  state = { sessionId: "tui", lastRunId: "", permissionMode: "workspace_write", activeTasks: {} },
   health = null,
   provider = null,
   tools = [],
@@ -1952,6 +2034,7 @@ export function formatTuiHome({
     lastRunId: string;
     permissionMode: string;
     runLog?: string[];
+    activeTasks?: Record<string, TuiActiveTask>;
     transcript?: TuiTranscriptEntry[];
     contextQueue?: QueuedTuiMessage[];
   };
@@ -1982,7 +2065,12 @@ export function formatTuiHome({
     sectionTitle("Available Skills:"),
     ...formatSkillGroups(skills).slice(0, 13),
   ];
-  const log = formatRunLogLines(runLog.length ? runLog : state.runLog || [], wideLayout ? logWidth : contentWidth).slice(0, 18);
+  const log = formatRunLogLines(
+    runLog.length ? runLog : state.runLog || [],
+    wideLayout ? logWidth : contentWidth,
+    18,
+    state.activeTasks || {},
+  );
   const rowCount = Math.max(workspace.length + 3, log.length, 20);
   const summary = `${tools.length} tools · ${skills.length} skills · /help for commands`;
   const leftRows = [...workspace];
@@ -2148,23 +2236,74 @@ function formatSkillGroups(skills: Array<{ name?: string; title?: string; capabi
     .map(([category, names]) => `${category}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""}`);
 }
 
-function formatRunLogLines(runLog: string[], width: number, maxLines = 18): string[] {
+function formatRunLogLines(
+  runLog: string[],
+  width: number,
+  maxLines = 18,
+  activeTasks: Record<string, TuiActiveTask> = {},
+): string[] {
   const lines = [sectionTitle("Run Log:")];
+  const activeLines = formatActiveTaskLines(activeTasks, Math.max(20, width), Math.min(6, Math.max(2, maxLines - 6)));
+  if (activeLines.length) {
+    lines.push(...activeLines);
+    lines.push("");
+  }
   const entries = runLog.slice(-12);
   if (!entries.length) {
-    lines.push(style("waiting for activity", "brightGreen"));
-    lines.push(style("subagent/task/tool events appear here", "brightGreen"));
-    return lines;
+    if (!activeLines.length) {
+      lines.push(style("waiting for activity", "brightGreen"));
+      lines.push(style("subagent/task/tool events appear here", "brightGreen"));
+    }
+    return lines.slice(0, maxLines);
   }
   const groups = entries.map((entry) => formatRunLogEntry(entry, Math.max(20, width)));
   const body: string[] = [];
+  const remainingLines = Math.max(2, maxLines - lines.length);
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = groups[index];
-    if (body.length + group.length > maxLines - 1) continue;
+    if (body.length + group.length > remainingLines) continue;
     body.unshift(...group);
   }
   lines.push(...body);
+  return lines.slice(0, maxLines);
+}
+
+function formatActiveTaskLines(activeTasks: Record<string, TuiActiveTask>, width: number, maxRows = 5): string[] {
+  const tasks = Object.values(activeTasks)
+    .sort((left, right) => activeTaskRank(left) - activeTaskRank(right) || left.updatedAtMs - right.updatedAtMs);
+  if (!tasks.length) return [];
+  const running = tasks.filter((task) => task.status === "running").length;
+  const queued = tasks.filter((task) => task.status === "queued" || task.status === "pending").length;
+  const waiting = tasks.length - running - queued;
+  const summaryParts = [`${running} running`];
+  if (queued) summaryParts.push(`${queued} queued`);
+  if (waiting) summaryParts.push(`${waiting} waiting`);
+  const lines = [style(`Active: ${tasks.length} task${tasks.length === 1 ? "" : "s"} (${summaryParts.join(" · ")})`, "brightGreen")];
+  const now = Date.now();
+  for (const task of tasks.slice(0, maxRows)) {
+    const status = activeTaskStatusLabel(task.status);
+    const elapsedAnchor = task.status === "running" ? task.runningAtMs || task.queuedAtMs : task.queuedAtMs;
+    const elapsed = formatDuration(Math.max(0, now - elapsedAnchor));
+    const agent = task.assignedAgentId ? ` · ${shortId(task.assignedAgentId, 14)}` : "";
+    const prefix = `  ${status.padEnd(8)} ${elapsed.padStart(7)}  ${task.role}${agent} · ${shortId(task.id, 8)}  `;
+    lines.push(truncate(`${prefix}${task.title}`, width));
+  }
+  if (tasks.length > maxRows) lines.push(`  ... ${tasks.length - maxRows} more active tasks`);
   return lines;
+}
+
+function activeTaskRank(task: TuiActiveTask): number {
+  if (task.status === "running") return 0;
+  if (task.status === "queued") return 1;
+  if (task.status === "pending") return 2;
+  if (task.status === "needs_inspection") return 3;
+  if (task.status === "blocked") return 4;
+  return 5;
+}
+
+function activeTaskStatusLabel(status: string): string {
+  if (status === "needs_inspection") return "inspect";
+  return status;
 }
 
 function sectionTitle(label: string): string {
