@@ -928,7 +928,7 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
     return "chat";
   }
 
-  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|规划|计划|拆解|拆成|任务图|思维导图|做一个|搭建|接入|迁移|发布|提交|推送|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|plan|decompose|write|generate|analyze|summarize|search)/i.test(normalized)) {
+  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|规划|计划|拆解|拆成|任务图|思维导图|做一个|搭建|接入|迁移|发布|提交|推送|搜索|搜一下|查找|检索|联网|新闻|最新|动态|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|plan|decompose|write|generate|analyze|summarize|search|latest|news)/i.test(normalized)) {
     return "task";
   }
   if (/(?:帮我|请你|麻烦|能不能|可以帮|需要你|我想要|我要|给我).{0,16}(?:做|写|改|查|看|跑|测|建|实现|修|设计|规划|计划|拆解|生成|分析|总结|创建|配置|部署)/.test(normalized)) {
@@ -938,7 +938,7 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
     return "task";
   }
 
-  if (/[?？]$/.test(normalized) && !/(?:代码|文件|项目|仓库|repo|bug|接口|api|实现|修复|部署|配置|测试|报错)/i.test(normalized)) {
+  if (/[?？]$/.test(normalized) && !/(?:代码|文件|项目|仓库|repo|bug|接口|api|实现|修复|部署|配置|测试|报错|搜索|查找|联网|新闻|最新|动态|search|latest|news)/i.test(normalized)) {
     return "chat";
   }
   if ([...compact].length <= 18) return "chat";

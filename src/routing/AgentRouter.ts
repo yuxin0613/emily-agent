@@ -35,7 +35,7 @@ const ROUTE_RULES: RouteRule[] = [
     role: "researcher",
     reason: "request asks for research, comparison, explanation, or context gathering",
     weight: 3,
-    pattern: /(research|compare|explain|调研|比较|对比|解释|分析|总结|建议|设计|借鉴)/i,
+    pattern: /(research|compare|explain|search|latest|news|调研|比较|对比|解释|分析|总结|建议|设计|借鉴|搜索|搜一下|查找|检索|联网|新闻|最新|动态)/i,
   },
   {
     id: "reviewer-review",

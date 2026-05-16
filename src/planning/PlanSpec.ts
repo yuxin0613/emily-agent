@@ -446,7 +446,7 @@ export function assessTaskComplexity(input: string): TaskComplexityAssessment {
   const normalized = input.trim();
   const lower = normalized.toLowerCase();
   const comparisonIntent = /比较|对比|差异|不同|优缺点|取舍|选型|竞品|功能.*不同|\bcompare\b|\bcomparison\b|\bvs\.?\b|versus|trade[- ]?off/i.test(normalized);
-  const researchIntent = /查找|调研|研究|分析|总结|报告|资料|文档|梳理|了解|\bsearch\b|\bresearch\b|\banaly[sz]e\b|\bsummarize\b|\breport\b/i.test(normalized);
+  const researchIntent = /查找|搜索|搜一下|检索|联网|新闻|最新|动态|调研|研究|分析|总结|报告|资料|文档|梳理|了解|\bsearch\b|\blatest\b|\bnews\b|\bresearch\b|\banaly[sz]e\b|\bsummarize\b|\breport\b/i.test(normalized);
   const fixIntent = /修复|排查|调试|定位|报错|失败|崩溃|\bfix\b|\bdebug\b|\bbug\b|error|exception|stack trace/i.test(normalized);
   const implementationIntent = /做一个|开发|实现|构建|搭建|创建|新增|写一个|接入|迁移|部署|配置|重构|\bbuild\b|\bimplement\b|\bdevelop\b|\bcreate\b|\bdeploy\b|\bconfigure\b|\brefactor\b/i.test(normalized);
   const designIntent = /设计|规划|计划|拆解|架构|\bdesign\b|\bplan\b|\bdecompose\b/i.test(normalized);

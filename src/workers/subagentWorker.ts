@@ -487,6 +487,7 @@ interface PlannedToolRequest {
 function plannedToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
   return dedupeToolRequests([
     ...readToolRequests(task.metadata.toolRequests),
+    ...automaticWebSearchToolRequests(task, toolGateway),
     ...automaticWebToolRequests(task, toolGateway),
   ]);
 }
@@ -524,6 +525,45 @@ function automaticWebToolRequests(task: Task, toolGateway: ToolGateway): Planned
       reason: "explicit URL provided in assigned research task",
     },
   }));
+}
+
+function automaticWebSearchToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
+  if (!toolGateway.canUse("web_search")) return [];
+  const text = [
+    task.input,
+    typeof task.metadata.planGoal === "string" ? task.metadata.planGoal : "",
+    Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
+    readStringArray(task.metadata.skillHints).join(" "),
+    readStringArray(task.metadata.toolHints).join(" "),
+  ].join("\n");
+  if (!shouldAutoSearchWeb(text)) return [];
+  return [{
+    tool: "web_search",
+    args: {
+      query: searchQueryFromTask(task),
+      count: 5,
+      timeoutMs: 15000,
+    },
+    approval: {
+      approved: true,
+      template: "network_read",
+      reason: "explicit web search or current-news request in assigned research task",
+    },
+  }];
+}
+
+function shouldAutoSearchWeb(value: string): boolean {
+  return /(?:web-search|web_search|搜索|搜一下|查找|检索|联网|新闻|最新|动态|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b)/i.test(value);
+}
+
+function searchQueryFromTask(task: Task): string {
+  const input = task.input.replace(/^Goal:\s*/i, "").trim();
+  const firstLine = input.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || input;
+  return firstLine
+    .replace(/^(?:请|帮我|麻烦你|please)\s*/i, "")
+    .replace(/^(?:搜索|搜一下|查找|检索)\s*/i, "")
+    .slice(0, 240)
+    .trim() || input.slice(0, 240).trim() || "current news";
 }
 
 function normalizeToolApproval(value: unknown): ToolApproval | undefined {
