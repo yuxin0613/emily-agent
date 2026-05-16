@@ -73,6 +73,12 @@ interface WebSearchResult {
   siteName?: string;
 }
 
+interface OllamaWebSearchAttempt {
+  baseUrl: URL;
+  path: string;
+  apiKey?: string;
+}
+
 export interface ToolExecutionResult {
   tool: ToolPermission;
   ok: boolean;
@@ -554,27 +560,40 @@ export class ToolExecutor {
     externalContent: { untrusted: boolean; source: string; provider: string };
     results: WebSearchResult[];
   }> {
-    const baseUrl = new URL(String(args.baseUrl || process.env.EMILY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"));
-    const endpoint = new URL("/api/experimental/web_search", baseUrl);
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "User-Agent": "Emily-AgentOS/0.1 web_search",
-    };
-    if (process.env.EMILY_OLLAMA_API_KEY) headers.Authorization = `Bearer ${process.env.EMILY_OLLAMA_API_KEY}`;
-    const response = await fetchWithPinnedEgress(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ query, max_results: count }),
-      signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
-    });
-    if (response.status === 401) throw new Error("Ollama web search authentication failed. Run ollama signin or configure EMILY_OLLAMA_API_KEY.");
-    if (response.status === 403) throw new Error("Ollama web search is unavailable on the configured host.");
-    if (!response.ok) {
-      const detail = await readResponseText(response, 64000);
-      throw new Error(`Ollama web search failed (${response.status}): ${detail.text || ""}`.trim());
+    const baseUrl = parseHttpUrl(String(args.baseUrl || process.env.EMILY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"));
+    const configuredApiKey = firstString(args.apiKey, process.env.EMILY_OLLAMA_API_KEY);
+    const envApiKey = String(process.env.OLLAMA_API_KEY || "").trim() || undefined;
+    const attempts = buildOllamaWebSearchAttempts({ baseUrl, configuredApiKey, envApiKey });
+    const body = JSON.stringify({ query, max_results: count });
+    let lastError: Error | null = null;
+
+    for (const attempt of attempts) {
+      const endpoint = new URL(attempt.path, attempt.baseUrl);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "User-Agent": "Emily-AgentOS/0.1 web_search",
+      };
+      if (attempt.apiKey) headers.Authorization = `Bearer ${attempt.apiKey}`;
+      const response = await fetchWithPinnedEgress(endpoint, {
+        method: "POST",
+        headers,
+        body,
+        signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
+      });
+      if (response.status === 401) throw new Error("Ollama web search authentication failed. Run ollama signin or configure EMILY_OLLAMA_API_KEY/OLLAMA_API_KEY.");
+      if (response.status === 403) throw new Error("Ollama web search is unavailable on the configured host.");
+      if (!response.ok) {
+        const detail = await readResponseText(response, 64000);
+        const message = `Ollama web search failed (${response.status}): ${detail.text || ""}`.trim();
+        lastError = new Error(message);
+        if (response.status === 404) continue;
+        throw lastError;
+      }
+      const payload = parseJsonPayload((await readResponseText(response, 256000)).text, "Ollama web search response");
+      return webSearchResponse(query, "ollama", normalizeWebSearchPayload(payload, count), startedAt);
     }
-    const payload = parseJsonPayload((await readResponseText(response, 256000)).text, "Ollama web search response");
-    return webSearchResponse(query, "ollama", normalizeWebSearchPayload(payload, count), startedAt);
+
+    throw lastError || new Error("Ollama web search failed");
   }
 
   private async duckDuckGoWebSearch(query: string, count: number, startedAt: number): Promise<{
@@ -1284,11 +1303,58 @@ function llmWikiActionCategory(args: Record<string, unknown>): "read" | "write" 
 }
 
 function parseWebSearchProvider(value: unknown): "endpoint" | "ollama" | "duckduckgo" {
-  const raw = String(value || process.env.EMILY_WEB_SEARCH_PROVIDER || (process.env.EMILY_WEB_SEARCH_ENDPOINT ? "endpoint" : "duckduckgo")).trim().toLowerCase();
+  const raw = String(value || process.env.EMILY_WEB_SEARCH_PROVIDER || (process.env.EMILY_WEB_SEARCH_ENDPOINT ? "endpoint" : "ollama")).trim().toLowerCase();
   if (raw === "endpoint" || raw === "custom") return "endpoint";
   if (raw === "ollama") return "ollama";
   if (raw === "duckduckgo" || raw === "ddg") return "duckduckgo";
   throw new Error(`Unsupported web_search provider: ${raw}`);
+}
+
+const OLLAMA_HOSTED_WEB_SEARCH_PATH = "/api/web_search";
+const OLLAMA_LOCAL_WEB_SEARCH_PROXY_PATH = "/api/experimental/web_search";
+const OLLAMA_CLOUD_BASE_URL = "https://ollama.com";
+
+function buildOllamaWebSearchAttempts({
+  baseUrl,
+  configuredApiKey,
+  envApiKey,
+}: {
+  baseUrl: URL;
+  configuredApiKey?: string;
+  envApiKey?: string;
+}): OllamaWebSearchAttempt[] {
+  if (isOllamaCloudBaseUrl(baseUrl)) {
+    return [{
+      baseUrl,
+      path: OLLAMA_HOSTED_WEB_SEARCH_PATH,
+      apiKey: configuredApiKey || envApiKey,
+    }];
+  }
+
+  const attempts: OllamaWebSearchAttempt[] = [
+    {
+      baseUrl,
+      path: OLLAMA_LOCAL_WEB_SEARCH_PROXY_PATH,
+      apiKey: configuredApiKey,
+    },
+    {
+      baseUrl,
+      path: OLLAMA_HOSTED_WEB_SEARCH_PATH,
+      apiKey: configuredApiKey,
+    },
+  ];
+  if (envApiKey) {
+    attempts.push({
+      baseUrl: new URL(OLLAMA_CLOUD_BASE_URL),
+      path: OLLAMA_HOSTED_WEB_SEARCH_PATH,
+      apiKey: envApiKey,
+    });
+  }
+  return attempts;
+}
+
+function isOllamaCloudBaseUrl(baseUrl: URL): boolean {
+  return baseUrl.protocol === "https:" && canonicalHostname(baseUrl.hostname) === "ollama.com";
 }
 
 function webSearchResponse(

@@ -380,9 +380,9 @@ The builtin `web-search` skill uses `web_search` for discovery and `http_fetch` 
 
 Providers:
 
-- `duckduckgo`: default lightweight search.
+- `ollama`: default Ollama web search endpoint.
+- `duckduckgo`: lightweight fallback search.
 - `endpoint`: custom endpoint via `EMILY_WEB_SEARCH_ENDPOINT`.
-- `ollama`: Ollama experimental web search endpoint.
 
 All search output is marked as untrusted external content. Treat snippets as leads, not facts.
 

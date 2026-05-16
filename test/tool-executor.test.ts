@@ -402,7 +402,38 @@ const invalidGraphKeyTask = await executor.execute({
 assert.equal(invalidGraphKeyTask.ok, false);
 assert.match(String(invalidGraphKeyTask.error || ""), /invalid graphKey/);
 
+const ollamaSearchPaths: string[] = [];
+let ollamaExperimentalSearchAvailable = true;
 const browserServer = http.createServer((request, response) => {
+  if (request.url === "/api/experimental/web_search" && request.method === "POST") {
+    ollamaSearchPaths.push(request.url);
+    if (!ollamaExperimentalSearchAvailable) {
+      response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "experimental endpoint unavailable" }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      results: [{
+        title: "Ollama local search",
+        url: "https://example.com/ollama-local",
+        content: "Local Ollama proxy result.",
+      }],
+    }));
+    return;
+  }
+  if (request.url === "/api/web_search" && request.method === "POST") {
+    ollamaSearchPaths.push(request.url);
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      results: [{
+        title: "Ollama hosted-compatible search",
+        url: "https://example.com/ollama-hosted",
+        content: "Hosted-compatible Ollama search result.",
+      }],
+    }));
+    return;
+  }
   if (request.url === "/v1/query" && request.method === "POST") {
     response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({
@@ -444,6 +475,9 @@ const browserServer = http.createServer((request, response) => {
 await new Promise<void>((resolve) => browserServer.listen(0, "127.0.0.1", resolve));
 const address = browserServer.address() as AddressInfo;
 const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
+const previousWebSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
+const previousWebSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
+const previousOllamaBaseUrl = process.env.EMILY_OLLAMA_BASE_URL;
 process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 try {
   const webSearch = await executor.execute({
@@ -459,6 +493,52 @@ try {
   assert.equal(webSearchOutput.count, 1);
   assert.equal(webSearchOutput.results?.[0]?.title, "AgentOS launch notes");
   assert.equal(webSearchOutput.results?.[0]?.snippet, "Bounded external search result for launch readiness.");
+
+  const ollamaSearch = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "ollama", baseUrl: `http://127.0.0.1:${address.port}`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test ollama search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(ollamaSearch.ok, true);
+  const ollamaSearchOutput = ollamaSearch.output as { count?: number; results?: Array<{ title?: string; snippet?: string }> };
+  assert.equal(ollamaSearchOutput.count, 1);
+  assert.equal(ollamaSearchOutput.results?.[0]?.title, "Ollama local search");
+  assert.equal(ollamaSearchOutput.results?.[0]?.snippet, "Local Ollama proxy result.");
+  assert.equal(ollamaSearchPaths.at(-1), "/api/experimental/web_search");
+
+  delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+  delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  process.env.EMILY_OLLAMA_BASE_URL = `http://127.0.0.1:${address.port}`;
+  const defaultOllamaSearch = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos default search", count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test default ollama search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(defaultOllamaSearch.ok, true);
+  const defaultOllamaSearchOutput = defaultOllamaSearch.output as { provider?: string; results?: Array<{ title?: string }> };
+  assert.equal(defaultOllamaSearchOutput.provider, "ollama");
+  assert.equal(defaultOllamaSearchOutput.results?.[0]?.title, "Ollama local search");
+
+  ollamaExperimentalSearchAvailable = false;
+  const ollamaHostedFallback = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "ollama", baseUrl: `http://127.0.0.1:${address.port}`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test ollama hosted fallback" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(ollamaHostedFallback.ok, true);
+  const ollamaHostedFallbackOutput = ollamaHostedFallback.output as { count?: number; results?: Array<{ title?: string; snippet?: string }> };
+  assert.equal(ollamaHostedFallbackOutput.count, 1);
+  assert.equal(ollamaHostedFallbackOutput.results?.[0]?.title, "Ollama hosted-compatible search");
+  assert.deepEqual(ollamaSearchPaths.slice(-2), ["/api/experimental/web_search", "/api/web_search"]);
 
   const wikiQuery = await executor.execute({
     tool: "llm_wiki",
@@ -497,6 +577,12 @@ try {
 } finally {
   if (previousPrivateEgress === undefined) delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
   else process.env.EMILY_HTTP_ALLOW_PRIVATE = previousPrivateEgress;
+  if (previousWebSearchProvider === undefined) delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+  else process.env.EMILY_WEB_SEARCH_PROVIDER = previousWebSearchProvider;
+  if (previousWebSearchEndpoint === undefined) delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousWebSearchEndpoint;
+  if (previousOllamaBaseUrl === undefined) delete process.env.EMILY_OLLAMA_BASE_URL;
+  else process.env.EMILY_OLLAMA_BASE_URL = previousOllamaBaseUrl;
   await new Promise<void>((resolve, reject) => browserServer.close((error) => error ? reject(error) : resolve()));
 }
 

@@ -291,8 +291,11 @@ Useful environment variables:
 | `EMILY_SKILL_DIRS` | Add one or more external skill roots, separated by the platform path separator (`:` on macOS/Linux, `;` on Windows). |
 | `EMILY_HTTP_EGRESS_ALLOWLIST` | Comma-separated HTTP egress allowlist for private/local destinations. |
 | `EMILY_HTTP_ALLOW_PRIVATE` | Set to `true` only for local development that must access private hosts. |
-| `EMILY_WEB_SEARCH_PROVIDER` | `duckduckgo`, `endpoint`, or `ollama`. |
+| `EMILY_WEB_SEARCH_PROVIDER` | `ollama` (default), `duckduckgo`, or `endpoint`. |
 | `EMILY_WEB_SEARCH_ENDPOINT` | Custom web search endpoint for `provider=endpoint`. |
+| `EMILY_OLLAMA_BASE_URL` / `OLLAMA_HOST` | Ollama host used by `web_search` when `provider=ollama`; defaults to `http://127.0.0.1:11434`. |
+| `EMILY_OLLAMA_API_KEY` | Optional bearer token for the configured Ollama host. |
+| `OLLAMA_API_KEY` | Optional hosted Ollama API key used for `https://ollama.com/api/web_search` fallback. |
 | `EMILY_LLM_WIKI_BASE_URL` | Base URL for the separately deployed LLM Wiki API, for example `http://127.0.0.1:6081`. |
 | `EMILY_LLM_WIKI_TOKEN` | Shared API token for LLM Wiki. Falls back to `LLM_WIKI_API_TOKEN` or `API_ACCESS_TOKEN`. |
 | `EMILY_VECTOR_STORE` | `file`, `chroma`, `qdrant`, `milvus`, or `pgvector`. |
@@ -454,7 +457,7 @@ Builtin tools:
 | `run_tests` | Run approved test commands. |
 | `create_task` | Create follow-up tasks. |
 | `inspect_task` | Inspect task state and trace. |
-| `web_search` | Bounded web search via DuckDuckGo, custom endpoint, or Ollama. |
+| `web_search` | Bounded web search via Ollama, DuckDuckGo, or a custom endpoint. |
 | `http_fetch` | Bounded HTTP/HTTPS fetch. |
 | `browser` | Lightweight browser-style page actions. |
 | `github` | Structured GitHub PR/issue actions and restricted `gh` allowlist. |
@@ -469,7 +472,7 @@ Permission mode is an additional guard:
 | Mode | Allowed by mode |
 | --- | --- |
 | `read_only` | `read_file`, `inspect_task` |
-| `workspace_write` | `read_file`, `write_file`, `run_tests`, `create_task`, `inspect_task` |
+| `workspace_write` | `read_file`, `write_file`, `run_tests`, `create_task`, `inspect_task`, `http_fetch`, `web_search`, `browser` |
 | `danger_full_access` | role-defined tools, still constrained by forbidden tools and approvals |
 
 Final permission is always:
@@ -735,7 +738,7 @@ Emily AgentOS keeps third-party references explicit so downstream agent applicat
 
 Design references:
 
-- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model.
+- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model. The Ollama `web_search` provider follows OpenClaw's local `/api/experimental/web_search`, hosted `/api/web_search`, and `https://ollama.com/api/web_search` fallback shape.
 - [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics, local agent runtime packaging conventions, `hermes model`-style provider setup, and terminal transcript/composer interaction patterns. Hermes Agent is MIT-licensed; Emily AgentOS keeps its own runtime architecture and does not vendor Hermes source.
 
 Optional integrations:
