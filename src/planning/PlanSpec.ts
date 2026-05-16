@@ -938,14 +938,17 @@ export function sanitizePlannerMetadata(value: unknown): Metadata | undefined {
 
 const PLANNER_METADATA_ALLOWLIST = new Set([
   "area",
+  "artifactOutputDirectory",
   "category",
   "component",
   "feature",
+  "materializationTask",
   "module",
   "notes",
   "owner",
   "priority",
   "references",
+  "requiredFiles",
   "risk",
   "slice",
   "tags",

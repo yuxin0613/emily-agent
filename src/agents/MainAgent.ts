@@ -15,6 +15,7 @@ import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
 import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts";
 import { TaskGraphExecutor, type TaskGraphPause } from "../tasks/TaskGraphExecutor.ts";
 import { taskResultSummary } from "../tasks/TaskResult.ts";
+import { ensureArtifactMaterializationPlan } from "../planning/ArtifactMaterialization.ts";
 import {
   createFallbackPlanSpec,
   createPlanningOnlyPlanSpec,
@@ -642,6 +643,7 @@ export class MainAgent {
       };
     }
 
+    plan = ensureArtifactMaterializationPlan(plan, input);
     const executionTasks = createTaskGraphFromPlan({
       taskStore: this.taskStore,
       plan,
@@ -1091,7 +1093,7 @@ function plannerPrompt(input: string, deliveryLevel: string, roleTaskTimeoutMs =
     "- If the user provides a URL or local source path for research_comparison/research work, do not ask the user to paste feature lists just because a website must be fetched. Create researcher tasks with http_fetch/web_search/browser hints and let execution gather evidence.",
     "- If the user explicitly asks to search, get news, get latest/current information, or use the internet, do not ask whether web_search is allowed. Treat that wording as the user's network-read intent and create researcher tasks with web_search hints.",
     "- For single_long_operation, separate preparation, execution/monitoring, timeout handling, and verification only when those are real work products; do not pretend one blocking wait is many implementation nodes.",
-    "- If the user asks to create, write, generate, or save code/files to a path, include one explicit developer leaf that names the target file path(s), requests write_file, and materializes the final artifact. Design-only or setup subtasks should not claim file creation.",
+    "- If the user asks to create, write, generate, or save code/files to a path, include one explicit final_materialization developer leaf that depends on implementation work, names the target file path(s), requests write_file, and materializes the final artifact. Design-only or setup subtasks should not claim file creation.",
     "- task.permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when a task needs a narrower or explicit guardrail.",
     "",
     "Task assessment:",

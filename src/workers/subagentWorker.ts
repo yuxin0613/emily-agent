@@ -1,3 +1,6 @@
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import path from "node:path";
 import { SubAgent } from "../agents/SubAgent.ts";
 import { createAgentProfile, renderAgentProfile } from "../agents/AgentProfile.ts";
 import { buildRoleWorkProduct } from "../agents/RoleWorkProduct.ts";
@@ -788,6 +791,23 @@ function requiredMaterializationError({
     return "Developer task requires creating or editing files, but write_file is not allowed for this role or permission mode.";
   }
   const writeResults = toolExecutionResults.filter((result) => result.tool === "write_file");
+  const requiredFiles = readStringArray(task.metadata.requiredFiles);
+  if (requiredFiles.length) {
+    const okWritePaths = new Set(writeResults
+      .filter((result) => result.ok)
+      .map((result) => outputPath(result.output))
+      .filter(Boolean)
+      .map(normalizeMaterializedPath));
+    const missingWrites = requiredFiles.filter((file) => !okWritePaths.has(normalizeMaterializedPath(file)));
+    const missingOnDisk = requiredFiles.filter((file) => !materializedFileExists(file));
+    if (!missingWrites.length && !missingOnDisk.length) return "";
+    return [
+      "Developer task requires final artifact materialization, but required files were not all written and present.",
+      missingWrites.length ? `Missing successful write_file execution for: ${missingWrites.join(", ")}` : "",
+      missingOnDisk.length ? `Missing on disk: ${missingOnDisk.join(", ")}` : "",
+      ...writeResults.map((result) => result.error ? `${result.tool}: ${result.error}` : `${result.tool}: ${result.ok ? "ok" : "failed"}`),
+    ].filter(Boolean).join(" ");
+  }
   if (writeResults.some((result) => result.ok)) return "";
   if (!writeResults.length) {
     return [
@@ -813,7 +833,31 @@ function taskMaterializationText(task: Task): string {
     task.title,
     task.input,
     Array.isArray(task.metadata.acceptanceCriteria) ? task.metadata.acceptanceCriteria.join("\n") : "",
+    Array.isArray(task.metadata.requiredFiles) ? task.metadata.requiredFiles.join("\n") : "",
   ].join("\n");
+}
+
+function outputPath(value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const pathValue = (value as { path?: unknown }).path;
+    return typeof pathValue === "string" ? pathValue : "";
+  }
+  return "";
+}
+
+function materializedFileExists(filePath: string): boolean {
+  const resolved = normalizeMaterializedPath(filePath);
+  if (!existsSync(resolved)) return false;
+  try {
+    return statSync(resolved).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function normalizeMaterializedPath(filePath: string): string {
+  const expanded = filePath.startsWith("~/") ? path.join(homedir(), filePath.slice(2)) : filePath;
+  return path.resolve(process.cwd(), expanded);
 }
 
 function toMetadata(input: Record<string, unknown>): Metadata {

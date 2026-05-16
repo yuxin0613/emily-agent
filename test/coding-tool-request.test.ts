@@ -3,6 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
+import { artifactRequirementForInput, ensureArtifactMaterializationPlan } from "../src/planning/ArtifactMaterialization.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
 const repoRoot = process.cwd();
@@ -27,6 +28,7 @@ try {
       maxMemoryCandidates: 0,
       skillHints: ["coding"],
       toolHints: ["write_file"],
+      requiredFiles: ["generated/coding-tool-request.txt"],
     },
   });
 
@@ -43,6 +45,74 @@ try {
   assert.ok(trace.events.some((event) => event.type === "tool.execution.completed"
     && event.payload.tool === "write_file"
     && event.payload.ok === true));
+
+  const materialized = ensureArtifactMaterializationPlan({
+    goal: "Build FocusForge",
+    deliveryLevel: "uat",
+    exitCriteria: ["Artifacts are runnable."],
+    planningMode: "single_wave",
+    maxWaves: 1,
+    failureStrategy: "block_dependents",
+    tasks: [{
+      key: "implementation",
+      role: "developer",
+      title: "implementation",
+      input: "Implement the app.",
+      parentKey: "",
+      dependsOn: [],
+      dependencyType: "success",
+      acceptanceCriteria: ["Implementation exists."],
+      toolHints: ["write_file"],
+      skillHints: ["coding"],
+      timeoutMs: 30000,
+      maxRetries: 1,
+      maxResultChars: 12000,
+      maxMemoryCandidates: 1,
+      wave: 1,
+      expandable: false,
+      expansionGoal: "",
+      maxExpansionDepth: 0,
+    }, {
+      key: "validation",
+      role: "reviewer",
+      title: "validation",
+      input: "Review the app.",
+      parentKey: "implementation",
+      dependsOn: ["implementation"],
+      dependencyType: "finished",
+      acceptanceCriteria: ["Artifacts are reviewed."],
+      toolHints: [],
+      skillHints: ["review"],
+      timeoutMs: 30000,
+      maxRetries: 1,
+      maxResultChars: 12000,
+      maxMemoryCandidates: 1,
+      wave: 2,
+      expandable: false,
+      expansionGoal: "",
+      maxExpansionDepth: 0,
+    }],
+    review: { required: true, criteria: ["Artifacts are runnable."] },
+    clarificationRequired: false,
+    clarificationQuestions: [],
+  }, "生成纯前端 Web 应用，保存到 ~/2_project/focusforge_demo。目录中至少包含 index.html、styles.css、app.js、README.md。");
+  const finalTask = materialized.tasks.find((item) => item.key === "final_materialization");
+  assert.ok(finalTask);
+  assert.equal(finalTask.role, "developer");
+  assert.deepEqual(finalTask.metadata?.requiredFiles, [
+    "~/2_project/focusforge_demo/index.html",
+    "~/2_project/focusforge_demo/styles.css",
+    "~/2_project/focusforge_demo/app.js",
+    "~/2_project/focusforge_demo/README.md",
+  ]);
+  assert.ok(finalTask.dependsOn.includes("implementation"));
+  assert.ok(materialized.tasks.find((item) => item.key === "validation")?.dependsOn.includes("final_materialization"));
+  assert.deepEqual(artifactRequirementForInput("写一个 HTML 页面保存到 ./demo")?.requiredFiles, [
+    "./demo/index.html",
+    "./demo/styles.css",
+    "./demo/app.js",
+    "./demo/README.md",
+  ]);
 
   const inheritedGoalTask = runtime.taskStore.createTask({
     role: "developer",
@@ -78,6 +148,24 @@ try {
   const html = await readFile(path.join(workspaceDir, "web-demo", "index.html"), "utf8");
   assert.equal(codeFenceFinished.status, "done");
   assert.match(html, /snakeReady/);
+
+  const missingRequiredTask = runtime.taskStore.createTask({
+    role: "developer",
+    title: "coding partial materialization",
+    input: "EMIT_WRITE_FILE_TOOL_REQUEST 创建两个文件并保存结果。",
+    metadata: {
+      sessionId: "coding-tool-request",
+      maxMemoryCandidates: 0,
+      skillHints: ["coding"],
+      toolHints: ["write_file"],
+      requiredFiles: ["generated/coding-tool-request.txt", "generated/missing-required.txt"],
+    },
+  });
+  const missingRequiredFinished = await runtime.roleAgentManager.runTask(missingRequiredTask, {
+    timeoutMs: 10000,
+  });
+  assert.equal(missingRequiredFinished.status, "failed");
+  assert.match(String(missingRequiredFinished.error || ""), /Missing successful write_file execution/);
 
   const noWriteTask = runtime.taskStore.createTask({
     role: "developer",
