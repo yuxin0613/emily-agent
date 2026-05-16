@@ -14,6 +14,8 @@ import {
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-graph-"));
 const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
+const previousSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
+const previousSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
 process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 const runtime = await createRuntime({ dataDir });
 
@@ -68,6 +70,42 @@ try {
     && event.payload.tool === "http_fetch")?.payload.timeoutMs, 7000);
 } finally {
   await new Promise<void>((resolve, reject) => webServer.close((error) => error ? reject(error) : resolve()));
+}
+
+const searchServer = http.createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify({
+    results: [{
+      title: "NVIDIA model news",
+      url: "https://example.com/nvidia-model-news",
+      content: "NVIDIA announced a new model update.",
+    }],
+  }));
+});
+await new Promise<void>((resolve) => searchServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = searchServer.address() as AddressInfo;
+  process.env.EMILY_WEB_SEARCH_PROVIDER = "endpoint";
+  process.env.EMILY_WEB_SEARCH_ENDPOINT = `http://127.0.0.1:${address.port}/search`;
+  const explicitSearch = await runtime.handleUserMessage("NEEDS_WEB_PLAN_CLARIFICATION 搜索nvidia最新大模型的新闻", {
+    sessionId: "planner-explicit-web-search",
+    source: "test",
+  });
+  assert.equal(runtime.taskStore.getRun(explicitSearch.runId!)?.status, "done");
+  assert.ok(!explicitSearch.needsUserInput);
+  assert.ok(explicitSearch.delegatedTo.includes("researcher"));
+  const searchTimeline = runtime.getTimeline({ runId: explicitSearch.runId! });
+  assert.ok(searchTimeline.events.some((event) => event.type === "runtime.anomaly"
+    && event.payload.code === "planner_clarification_overridden"));
+  assert.ok(searchTimeline.events.some((event) => event.type === "tool.execution.completed"
+    && event.payload.tool === "web_search"
+    && event.payload.ok === true));
+} finally {
+  await new Promise<void>((resolve, reject) => searchServer.close((error) => error ? reject(error) : resolve()));
+  if (previousSearchProvider === undefined) delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+  else process.env.EMILY_WEB_SEARCH_PROVIDER = previousSearchProvider;
+  if (previousSearchEndpoint === undefined) delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousSearchEndpoint;
 }
 
 const response = await runtime.handleUserMessage("我要做一个应用，支持用户注册登录，先达到 POC，跑通核心链路即可", {
@@ -218,5 +256,9 @@ assert.notEqual(failedExpansionPlanner.metadata.graphId, fallbackExpanded.payloa
 await runtime.shutdown();
 if (previousPrivateEgress === undefined) delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
 else process.env.EMILY_HTTP_ALLOW_PRIVATE = previousPrivateEgress;
+if (previousSearchProvider === undefined) delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+else process.env.EMILY_WEB_SEARCH_PROVIDER = previousSearchProvider;
+if (previousSearchEndpoint === undefined) delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousSearchEndpoint;
 
 console.log("planner graph test passed");

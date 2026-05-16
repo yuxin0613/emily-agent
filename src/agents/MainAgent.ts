@@ -581,7 +581,7 @@ export class MainAgent {
         payload: {
           severity: "warning",
           code: "planner_clarification_overridden",
-          message: "Planner asked the user to provide source data even though the request already included actionable research sources; fallback execution plan was used.",
+          message: "Planner asked for source or web-search confirmation even though the request already gave an actionable research/search instruction; fallback execution plan was used.",
           questions: plan.clarificationQuestions,
           runId,
           repaired: true,
@@ -957,15 +957,19 @@ function shouldOverridePlannerClarification(input: string, plan: PlanSpec): bool
   if (!plan.clarificationRequired) return false;
   const assessment = assessTaskComplexity(input);
   if (assessment.kind !== "research_comparison" && assessment.kind !== "research") return false;
-  if (!hasActionableResearchSource(input)) return false;
+  if (!hasActionableResearchSource(input) && !isExplicitWebSearchRequest(input)) return false;
   const questions = plan.clarificationQuestions.join("\n");
-  return /无法直接访问|提供.*功能列表|通过其他方式获取信息|本地代码|深入分析|feature list|cannot access|provide.*features/i.test(questions);
+  return /无法直接访问|提供.*功能列表|通过其他方式获取信息|本地代码|深入分析|当前工具限制|搜索互联网|新闻来源|允许使用.*web[_-]?search|web[_-]?search|feature list|cannot access|provide.*features|search the internet|use web[_-]?search/i.test(questions);
 }
 
 function hasActionableResearchSource(input: string): boolean {
   return /https?:\/\/[^\s`"'<>]+/i.test(input)
     || /(?:^|[\s`'"])(?:\/[A-Za-z0-9._-][^\s`'"]+|~\/[^\s`'"]+)/.test(input)
     || /(?:^|[\s`'"])\.{1,2}\/[^\s`'"]+/.test(input);
+}
+
+function isExplicitWebSearchRequest(input: string): boolean {
+  return /(?:搜索|搜一下|查找|检索|联网|新闻|最新|动态|互联网|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b|\binternet\b|\bweb\b)/i.test(input);
 }
 
 function isModelIdentityQuestion(input: string): boolean {
@@ -1049,6 +1053,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "- Use the task assessment before choosing a decomposition. Long tasks are not only software builds; research comparisons can also be long when they require multiple evidence-gathering and synthesis nodes.",
     "- For research_comparison, do not ask for POC/UAT/production as user-facing standards. Decompose into comparison scope, source inventory, per-subject facts, comparison matrix, synthesis, and validation.",
     "- If the user provides a URL or local source path for research_comparison/research work, do not ask the user to paste feature lists just because a website must be fetched. Create researcher tasks with http_fetch/web_search/browser hints and let execution gather evidence.",
+    "- If the user explicitly asks to search, get news, get latest/current information, or use the internet, do not ask whether web_search is allowed. Treat that wording as the user's network-read intent and create researcher tasks with web_search hints.",
     "- For single_long_operation, separate preparation, execution/monitoring, timeout handling, and verification only when those are real work products; do not pretend one blocking wait is many implementation nodes.",
     "- task.permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when a task needs a narrower or explicit guardrail.",
     "",
