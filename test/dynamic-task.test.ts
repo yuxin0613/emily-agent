@@ -117,6 +117,60 @@ async function runPermissionClampTest(): Promise<void> {
   store.close();
 }
 
+async function runMaterializationWaitsForDynamicExpansionTest(): Promise<void> {
+  const { store, plan, tasksByKey } = await createDynamicFixture("dynamic-materialization");
+  plan.tasks.push(planTask({
+    key: "final_materialization",
+    role: "developer",
+    title: "final materialization",
+    input: "Write the final application artifact.",
+    parentKey: "architecture",
+    dependsOn: ["architecture"],
+    acceptanceCriteria: ["Final artifacts are written after implementation leaves."],
+    wave: 4,
+    metadata: {
+      materializationTask: true,
+      requiredFiles: ["./demo/index.html"],
+    },
+  }));
+  const materialization = store.createTask({
+    role: "developer",
+    title: "final materialization",
+    input: "Write the final application artifact.",
+    metadata: {
+      ...tasksByKey.architecture.metadata,
+      graphKey: "final_materialization",
+      graphRole: "developer",
+      parentKey: "architecture",
+      acceptanceCriteria: ["Final artifacts are written after implementation leaves."],
+      materializationTask: true,
+      requiredFiles: ["./demo/index.html"],
+    },
+  });
+  tasksByKey.final_materialization = materialization;
+  store.addTaskDependency(materialization.id, tasksByKey.architecture.id, "success");
+
+  const manager = new FakeRoleAgentManager(store, "forward_reference");
+  const executor = new TaskGraphExecutor({
+    taskStore: store,
+    roleAgentManager: manager as unknown as RoleAgentManager,
+    plan,
+  });
+
+  const result = await executor.execute(tasksByKey);
+  const graphId = result.graphId!;
+  const graphTasks = store.getTasksForGraph(graphId);
+  const implementation = findGraphTask(graphTasks, "implement_slice");
+  const finalTask = findGraphTask(graphTasks, "final_materialization");
+  const dependencies = store.getDependencies(finalTask.id);
+
+  assert.equal(result.pause, null);
+  assert.equal(finalTask.status, "done");
+  assert.ok(dependencies.some((dependency) => dependency.dependsOnTaskId === implementation.id));
+  assert.ok(manager.finishedOrder.indexOf("implement_slice") < manager.finishedOrder.indexOf("final_materialization"));
+  store.close();
+}
+
 async function createDynamicFixture(runId: string): Promise<{
   store: TaskStore;
   plan: PlanSpec;
@@ -197,6 +251,7 @@ function findGraphTask(tasks: Task[], graphKey: string): Task {
 class FakeRoleAgentManager {
   private readonly store: TaskStore;
   private readonly mode: "forward_reference" | "planner_failure" | "needs_user_input";
+  readonly finishedOrder: string[] = [];
 
   constructor(store: TaskStore, mode: "forward_reference" | "planner_failure" | "needs_user_input") {
     this.store = store;
@@ -224,6 +279,7 @@ class FakeRoleAgentManager {
       agentId,
       leaseToken: claimed.leaseToken,
     });
+    this.finishedOrder.push(String(task.metadata.graphKey || task.title));
     return this.store.getTaskOrThrow(task.id);
   }
 
@@ -281,5 +337,6 @@ await runForwardReferenceDependencyTest();
 await runFallbackClosureTest();
 await runUserInputPauseTest();
 await runPermissionClampTest();
+await runMaterializationWaitsForDynamicExpansionTest();
 
 console.log("dynamic task test passed");

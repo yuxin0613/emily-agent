@@ -171,6 +171,7 @@ export class TaskGraphExecutor {
           return status === "pending" || status === "queued";
         })
         .filter((task) => this.taskStore.dependenciesSatisfied(task.id))
+        .filter((task) => this.materializationReady(task, tasksByKey))
         .slice(0, effectiveParallelTasks);
 
       if (!ready.length) {
@@ -918,7 +919,34 @@ export class TaskGraphExecutor {
       }
     }
 
+    this.linkDynamicTasksToMaterialization(created.map((item) => item.task), tasksByKey);
+
     return created.map((item) => this.taskStore.getTaskOrThrow(item.task.id));
+  }
+
+  private materializationReady(task: Task, tasksByKey: Record<string, Task>): boolean {
+    if (!isMaterializationTask(task)) return true;
+    for (const candidate of Object.values(tasksByKey)) {
+      if (candidate.id === task.id) continue;
+      if (isMaterializationTask(candidate)) continue;
+      if (candidate.role === "reviewer") continue;
+      const current = this.taskStore.getTask(candidate.id) || candidate;
+      if (isReplanSupersededTerminal(current)) continue;
+      if (current.status !== "done") return false;
+    }
+    return true;
+  }
+
+  private linkDynamicTasksToMaterialization(dynamicTasks: Task[], tasksByKey: Record<string, Task>): void {
+    const materializationTasks = Object.values(tasksByKey).filter(isMaterializationTask);
+    if (!materializationTasks.length) return;
+    for (const dynamicTask of dynamicTasks) {
+      if (isMaterializationTask(dynamicTask) || dynamicTask.role === "reviewer") continue;
+      for (const materializationTask of materializationTasks) {
+        if (dynamicTask.id === materializationTask.id) continue;
+        this.taskStore.addTaskDependency(materializationTask.id, dynamicTask.id, "success");
+      }
+    }
   }
 
   private adaptiveParallelLimit({
@@ -1064,6 +1092,10 @@ function emptyExpansion(): ExpansionResult {
     created: [],
     pause: null,
   };
+}
+
+function isMaterializationTask(task: Task): boolean {
+  return task.metadata.materializationTask === true;
 }
 
 function assessGraphQuality({
