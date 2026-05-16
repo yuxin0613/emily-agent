@@ -37,9 +37,10 @@ export function ensureMinimumTaskNodePlan(plan: PlanSpec, input: string): PlanSp
       role: "developer",
       title: `任务节点 ${index + 1}: ${label}`,
       input: [
-        `Goal: ${plan.goal}`,
+        "Supplemental task-count node.",
         `Slice: ${label}`,
         "Return a concise implementation note for this slice so the final delivery node can incorporate the decision.",
+        "Do not create or edit files in this supplemental node; the final materialization node writes the deliverable files.",
         "Return text only for this node.",
         "Include user-visible behavior, state impact, edge cases, and one verification check.",
       ].join("\n"),
@@ -64,6 +65,7 @@ export function ensureMinimumTaskNodePlan(plan: PlanSpec, input: string): PlanSp
       metadata: {
         generatedForMinimumTaskNodes: true,
         requestedMinimumTaskNodes: minimum,
+        skipFileMaterialization: true,
         slice: label,
       },
     });

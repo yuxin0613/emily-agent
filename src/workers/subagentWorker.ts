@@ -901,6 +901,7 @@ function requiredMaterializationError({
 }
 
 function requiresFileMaterialization(task: Task): boolean {
+  if (task.metadata.skipFileMaterialization === true) return false;
   const text = taskMaterializationText(task);
   if (/(?:^|[\s`'"])(?:~\/|\/|\.{1,2}\/)?[A-Za-z0-9_./-]+\.(?:html|css|js|jsx|ts|tsx|json|md|txt)(?:[:\s`'",)]|$)/i.test(text)) return true;
   return /(?:保存|保存到|输出到|写入|落盘|生成|编写|写一个|写代码|创建|新建|修改|更新|编辑).{0,40}(?:文件|代码|源码|网页|页面|HTML|html|index|artifact|file|code|source)/i.test(text)

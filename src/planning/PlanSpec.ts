@@ -950,6 +950,7 @@ const PLANNER_METADATA_ALLOWLIST = new Set([
   "references",
   "requiredFiles",
   "risk",
+  "skipFileMaterialization",
   "slice",
   "tags",
   "target",

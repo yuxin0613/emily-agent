@@ -5,6 +5,7 @@ import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { artifactRequirementForInput, ensureArtifactMaterializationPlan } from "../src/planning/ArtifactMaterialization.ts";
 import { ensureMinimumTaskNodePlan, requestedMinimumTaskNodes } from "../src/planning/MinimumTaskNodes.ts";
+import { sanitizePlannerMetadata } from "../src/planning/PlanSpec.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
 const repoRoot = process.cwd();
@@ -179,7 +180,32 @@ try {
   }, longTaskPrompt);
   assert.ok(minimumExpanded.tasks.length >= 15);
   assert.ok(minimumExpanded.tasks.every((item) => item.acceptanceCriteria.length > 0));
-  assert.ok(minimumExpanded.tasks.some((item) => item.metadata?.generatedForMinimumTaskNodes === true));
+  const supplementalTask = minimumExpanded.tasks.find((item) => item.metadata?.generatedForMinimumTaskNodes === true);
+  assert.ok(supplementalTask);
+  assert.equal(supplementalTask.metadata?.skipFileMaterialization, true);
+  assert.doesNotMatch(supplementalTask.input, /~\/2_project|index\.html|write_file/);
+  assert.equal(sanitizePlannerMetadata(supplementalTask.metadata)?.skipFileMaterialization, true);
+
+  const supplementalRuntimeTask = runtime.taskStore.createTask({
+    role: "developer",
+    title: "任务节点 10: 今日计划: 单独显示今天截止或手动加入今日计划的任务。",
+    input: [
+      "Goal: 生成文件并保存到 ~/2_project/focusforge_demo，目录中至少包含 index.html、styles.css、app.js、README.md。",
+      "Slice: 今日计划: 单独显示今天截止或手动加入今日计划的任务。",
+      "Return text only for this supplemental node.",
+    ].join("\n"),
+    metadata: {
+      sessionId: "coding-tool-request",
+      maxMemoryCandidates: 0,
+      skillHints: ["coding"],
+      toolHints: ["read_file"],
+      skipFileMaterialization: true,
+    },
+  });
+  const supplementalRuntimeFinished = await runtime.roleAgentManager.runTask(supplementalRuntimeTask, {
+    timeoutMs: 10000,
+  });
+  assert.equal(supplementalRuntimeFinished.status, "done");
 
   const inheritedGoalTask = runtime.taskStore.createTask({
     role: "developer",

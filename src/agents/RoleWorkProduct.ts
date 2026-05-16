@@ -507,6 +507,7 @@ function readStringArray(value: unknown): string[] {
 }
 
 function requiresFileMaterialization(task: Task): boolean {
+  if (task.metadata.skipFileMaterialization === true) return false;
   const text = [
     task.title,
     task.input,
