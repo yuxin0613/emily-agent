@@ -274,6 +274,7 @@ async function runRoleTask({
     relevantMemory,
     toolResolution,
     skillResolution,
+    toolExecutionResults,
     canReadFiles: toolGateway.canUse("read_file"),
   });
   const memoryContent = workProduct;
@@ -533,8 +534,6 @@ function automaticWebSearchToolRequests(task: Task, toolGateway: ToolGateway): P
     task.input,
     typeof task.metadata.planGoal === "string" ? task.metadata.planGoal : "",
     Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
-    readStringArray(task.metadata.skillHints).join(" "),
-    readStringArray(task.metadata.toolHints).join(" "),
   ].join("\n");
   if (!shouldAutoSearchWeb(text)) return [];
   return [{

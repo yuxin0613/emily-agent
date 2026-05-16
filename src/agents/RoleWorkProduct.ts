@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { MemoryRecallResult, Metadata, SkillHintResolution, Task, ToolHintResolution } from "../types.ts";
 import { assessTaskComplexity, inferDeliveryLevel } from "../planning/PlanSpec.ts";
+import type { ToolExecutionResult } from "../tools/ToolExecutor.ts";
 
 export interface RoleWorkProductInput {
   role: string;
@@ -10,6 +11,7 @@ export interface RoleWorkProductInput {
   relevantMemory: MemoryRecallResult;
   toolResolution: ToolHintResolution;
   skillResolution: SkillHintResolution;
+  toolExecutionResults?: ToolExecutionResult[];
   workspaceDir?: string;
   canReadFiles?: boolean;
 }
@@ -21,6 +23,7 @@ export function buildRoleWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
+  toolExecutionResults = [],
   workspaceDir = process.cwd(),
   canReadFiles = true,
 }: RoleWorkProductInput): string {
@@ -28,7 +31,7 @@ export function buildRoleWorkProduct({
     return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
   }
   if (role === "researcher") {
-    return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
+    return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, toolExecutionResults, workspaceDir, canReadFiles });
   }
   if (role === "reviewer") {
     return buildReviewerWorkProduct({ task, providerContent });
@@ -90,6 +93,7 @@ function buildResearcherWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
+  toolExecutionResults = [],
   workspaceDir = process.cwd(),
   canReadFiles = true,
 }: Omit<RoleWorkProductInput, "role">): string {
@@ -111,6 +115,7 @@ function buildResearcherWorkProduct({
     "",
     "## Decision-Relevant Context",
     ...(memoryHighlights.length ? memoryHighlights.map((item) => `- Memory: ${item}`) : ["- No relevant memory was found."]),
+    ...formatToolExecutionContext(toolExecutionResults),
     ...formatFileContexts(fileRefs),
     "",
     "## Open Questions",
@@ -341,6 +346,42 @@ function formatFileContexts(files: FileContext[]): string[] {
   });
 }
 
+function formatToolExecutionContext(results: ToolExecutionResult[]): string[] {
+  if (!results.length) return ["- Tool execution results: none."];
+  const lines = ["- Tool execution results:"];
+  for (const result of results.slice(0, 5)) {
+    if (!result.ok) {
+      lines.push(`  - ${result.tool}: failed${result.error ? ` (${truncate(result.error, 180)})` : ""}`);
+      continue;
+    }
+    if (result.tool === "web_search") {
+      lines.push(...formatWebSearchToolResult(result));
+      continue;
+    }
+    lines.push(`  - ${result.tool}: ok${result.output === undefined ? "" : ` - ${truncate(JSON.stringify(result.output), 300)}`}`);
+  }
+  return lines;
+}
+
+function formatWebSearchToolResult(result: ToolExecutionResult): string[] {
+  const output = isRecord(result.output) ? result.output : {};
+  const query = typeof output.query === "string" ? output.query : "";
+  const provider = typeof output.provider === "string" ? output.provider : "";
+  const rawResults = Array.isArray(output.results) ? output.results : [];
+  const lines = [
+    `  - web_search: ok${provider ? `, provider=${provider}` : ""}${query ? `, query="${truncate(query, 120)}"` : ""}, results=${rawResults.length}`,
+  ];
+  for (const item of rawResults.slice(0, 5)) {
+    if (!isRecord(item)) continue;
+    const title = typeof item.title === "string" ? item.title : "(untitled)";
+    const url = typeof item.url === "string" ? item.url : "";
+    const siteName = typeof item.siteName === "string" ? item.siteName : "";
+    const snippet = typeof item.snippet === "string" ? item.snippet : "";
+    lines.push(`    - ${truncate(title, 180)}${siteName ? ` (${siteName})` : ""}${url ? `: ${url}` : ""}${snippet ? ` - ${truncate(snippet, 260)}` : ""}`);
+  }
+  return lines;
+}
+
 function implementationStrategy(input: string, fileRefs: FileContext[]): string[] {
   const lower = input.toLowerCase();
   const steps = [
@@ -444,6 +485,10 @@ function stringMetadata(metadata: Metadata, key: string): string {
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function collectMatches(text: string, pattern: RegExp, limit: number): string[] {

@@ -64,6 +64,7 @@ try {
   const metadata = result?.artifacts[0]?.metadata;
   assert.equal(finished.status, "done");
   assert.equal(result?.status, "success");
+  assert.match(result?.summary || "", /NVIDIA news/);
   assert.ok(searchRequests.length >= 1);
   assert.ok(searchRequests[0]?.url.includes("nvidia"));
   assert.ok(Array.isArray(metadata?.skills?.matched) && metadata.skills.matched.includes("web-search"));

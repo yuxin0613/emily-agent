@@ -969,7 +969,10 @@ function hasActionableResearchSource(input: string): boolean {
 }
 
 function isModelIdentityQuestion(input: string): boolean {
-  return /(?:现在|当前|正在|用的|使用的)?.{0,8}(?:哪个|那个|什么|啥)?.{0,6}(?:模型|model|provider)|(?:模型|model|provider).{0,8}(?:哪个|那个|什么|啥)/i.test(input);
+  const normalized = input.trim();
+  if (/(?:搜索|搜一下|查找|检索|联网|新闻|最新|动态|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b)/i.test(normalized)) return false;
+  if (!/(?:模型|model|provider)/i.test(normalized)) return false;
+  return /(?:现在|当前|正在|你|系统|主模型|使用|用的|用的是|哪个|哪一个|什么|啥).{0,20}(?:模型|model|provider)|(?:模型|model|provider).{0,20}(?:哪个|哪一个|什么|啥|版本|名称|名字|provider)/i.test(normalized);
 }
 
 function formatCurrentModelAnswer(model: ModelProvider): string {
