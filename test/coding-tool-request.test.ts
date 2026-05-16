@@ -101,6 +101,7 @@ try {
   const finalTask = materialized.tasks.find((item) => item.key === "final_materialization");
   assert.ok(finalTask);
   assert.equal(finalTask.role, "developer");
+  assert.equal(finalTask.dependencyType, "finished");
   assert.ok(materialized.maxWaves >= finalTask.wave);
   assert.deepEqual(finalTask.metadata?.requiredFiles, [
     "~/2_project/focusforge_demo/index.html",

@@ -932,7 +932,7 @@ export class TaskGraphExecutor {
       if (candidate.role === "reviewer") continue;
       const current = this.taskStore.getTask(candidate.id) || candidate;
       if (isReplanSupersededTerminal(current)) continue;
-      if (current.status !== "done") return false;
+      if (!TERMINAL_STATUSES.has(current.status)) return false;
     }
     return true;
   }
@@ -944,7 +944,7 @@ export class TaskGraphExecutor {
       if (isMaterializationTask(dynamicTask) || dynamicTask.role === "reviewer") continue;
       for (const materializationTask of materializationTasks) {
         if (dynamicTask.id === materializationTask.id) continue;
-        this.taskStore.addTaskDependency(materializationTask.id, dynamicTask.id, "success");
+        this.taskStore.addTaskDependency(materializationTask.id, dynamicTask.id, "finished");
       }
     }
   }

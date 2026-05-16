@@ -117,7 +117,7 @@ function materializationTask({
     ].join("\n"),
     parentKey,
     dependsOn,
-    dependencyType: "success",
+    dependencyType: "finished",
     acceptanceCriteria: [
       "Every required artifact file is written by a successful write_file tool execution.",
       "Every required artifact file exists on disk after execution.",
