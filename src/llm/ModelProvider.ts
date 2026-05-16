@@ -72,6 +72,11 @@ export interface ProviderConfig {
     baseUrl?: string;
     apiKeyEnv?: string;
     temperature?: number;
+    timeoutSeconds?: number;
+    retryBaseSeconds?: number;
+    retryMaxSeconds?: number;
+    circuitBreakerCooldownSeconds?: number;
+    // Legacy config keys accepted on read and migrated to second-based keys on write.
     timeoutMs?: number;
     maxRetries?: number;
     retryBaseMs?: number;

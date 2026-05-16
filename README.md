@@ -259,6 +259,8 @@ Runtime settings in `.emily/config.json`:
 | `agents.plannerTaskTimeoutSeconds` | Maximum time to wait for the planner subagent to produce the initial DAG. Default: `600`. |
 | `agents.roleTaskTimeoutSeconds` | Default wait budget for role subagent tasks such as developer, researcher, and reviewer. Default: `3600`. |
 
+All timeout and duration settings in `.emily/config.json` use seconds. Legacy provider keys ending in `Ms` are accepted on read and migrated to `...Seconds` when the config is written.
+
 Example:
 
 ```json
@@ -322,6 +324,7 @@ Example OpenAI-compatible provider:
         "baseUrl": "https://api.openai.com/v1",
         "apiKeyEnv": "OPENAI_API_KEY",
         "strictJson": true,
+        "timeoutSeconds": 600,
         "maxRetries": 2
       }
     }

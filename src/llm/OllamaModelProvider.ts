@@ -2,6 +2,7 @@ import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderCo
 import { ProviderCallError } from "./ModelProvider.ts";
 import { readJsonResponse, readResponseText } from "./HttpResponse.ts";
 import { classifyHttpStatus } from "./ProviderRuntime.ts";
+import { providerTimeoutMs } from "./ProviderTiming.ts";
 
 export class OllamaModelProvider implements ModelProvider {
   id: string;
@@ -16,7 +17,7 @@ export class OllamaModelProvider implements ModelProvider {
     this.model = config.model || "llama3.1";
     this.baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
     this.temperature = config.config?.temperature;
-    this.timeoutMs = config.config?.timeoutMs || 60000;
+    this.timeoutMs = providerTimeoutMs(config);
     this.strictJson = config.config?.strictJson !== false;
   }
 

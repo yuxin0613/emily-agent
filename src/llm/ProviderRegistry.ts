@@ -6,6 +6,9 @@ import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealt
 import { OllamaModelProvider } from "./OllamaModelProvider.ts";
 import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
 import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
+import {
+  providerTimeoutMs,
+} from "./ProviderTiming.ts";
 import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 import type { RoleDefinition } from "../types.ts";
 import { DEFAULT_ROLE_TASK_TIMEOUT_SECONDS, MAX_ROLE_TASK_TIMEOUT_SECONDS } from "../runtime/RoleTaskTimeout.ts";
@@ -95,8 +98,9 @@ export class ProviderRegistry {
     persistedSnapshot?: RuntimeSettings;
   }) {
     this.providers = new Map(providers.map((provider) => {
-      validateProviderConfig(provider);
-      return [provider.id, cloneProviderConfig(provider)];
+      const normalized = normalizeProviderConfig(provider);
+      validateProviderConfig(normalized);
+      return [normalized.id, cloneProviderConfig(normalized)];
     }));
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
@@ -187,25 +191,28 @@ export class ProviderRegistry {
   }
 
   add(config: ProviderConfig): void {
-    validateProviderConfig(config);
-    this.providers.set(config.id, cloneProviderConfig(config));
+    const normalized = normalizeProviderConfig(config);
+    validateProviderConfig(normalized);
+    this.providers.set(normalized.id, cloneProviderConfig(normalized));
   }
 
   enable(providerId: string): ProviderConfig {
     const config = this.getConfigIncludingDisabled(providerId);
     config.enabled = true;
-    validateProviderConfig(config);
-    this.providers.set(providerId, cloneProviderConfig(config));
-    return cloneProviderConfig(config);
+    const normalized = normalizeProviderConfig(config);
+    validateProviderConfig(normalized);
+    this.providers.set(providerId, cloneProviderConfig(normalized));
+    return cloneProviderConfig(normalized);
   }
 
   disable(providerId: string, { referencedBy = [] }: { referencedBy?: string[] } = {}): ProviderConfig {
     this.assertProviderCanBeRemovedOrDisabled(providerId, referencedBy, "disable");
     const config = this.getConfigIncludingDisabled(providerId);
     config.enabled = false;
-    validateProviderConfig(config);
-    this.providers.set(providerId, cloneProviderConfig(config));
-    return cloneProviderConfig(config);
+    const normalized = normalizeProviderConfig(config);
+    validateProviderConfig(normalized);
+    this.providers.set(providerId, cloneProviderConfig(normalized));
+    return cloneProviderConfig(normalized);
   }
 
   remove(providerId: string, { referencedBy = [] }: { referencedBy?: string[] } = {}): ProviderConfig {
@@ -267,8 +274,9 @@ export class ProviderRegistry {
         if (!provider || typeof provider !== "object" || Array.isArray(provider)) {
           throw new Error("Settings providers must contain provider objects.");
         }
-        validateProviderConfig(provider as ProviderConfig);
-        return cloneProviderConfig(provider as ProviderConfig);
+        const normalized = normalizeProviderConfig(provider as ProviderConfig);
+        validateProviderConfig(normalized);
+        return cloneProviderConfig(normalized);
       });
     }
     if (!next.providers.some((provider) => provider.id === next.defaultProviderId)) {
@@ -294,8 +302,9 @@ export class ProviderRegistry {
     this.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds);
     this.agents = normalizeAgentRuntimeConfig(file.agents);
     this.providers = new Map(file.providers.map((provider) => {
-      validateProviderConfig(provider);
-      return [provider.id, cloneProviderConfig(provider)];
+      const normalized = normalizeProviderConfig(provider);
+      validateProviderConfig(normalized);
+      return [normalized.id, cloneProviderConfig(normalized)];
     }));
   }
 
@@ -358,7 +367,7 @@ export class ProviderRegistry {
         headers: {
           authorization: `Bearer ${process.env[apiKeyEnv]}`,
         },
-        timeoutMs: config.config?.timeoutMs || 60000,
+        timeoutMs: providerTimeoutMs(config),
       });
       return {
         id: config.id,
@@ -389,7 +398,7 @@ export class ProviderRegistry {
     try {
       const baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
       const response = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/api/tags`, {
-        timeoutMs: config.config?.timeoutMs || 60000,
+        timeoutMs: providerTimeoutMs(config),
       });
       return {
         id: config.id,
@@ -455,7 +464,7 @@ async function readProviderFile(filePath: string): Promise<RuntimeSettings | nul
       fallbackMode: parsed.fallbackMode === "fallback" ? "fallback" : "strict",
       toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(parsed.toolCallTimeoutSeconds),
       agents: normalizeAgentRuntimeConfig(parsed.agents),
-      providers: parsed.providers,
+      providers: parsed.providers.map((provider) => normalizeProviderConfig(provider as ProviderConfig)),
     };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
@@ -703,6 +712,7 @@ function numberConfig(value: unknown, fallback: number, name: string, min: numbe
 }
 
 export function validateProviderConfig(config: ProviderConfig): void {
+  config = normalizeProviderConfig(config);
   if (!/^[A-Za-z0-9._-]+$/.test(config.id || "")) {
     throw new Error("Provider id must be non-empty and contain only letters, numbers, dot, underscore, or dash.");
   }
@@ -730,12 +740,12 @@ function validateProviderConfigObject(config: ProviderConfig): void {
     "baseUrl",
     "apiKeyEnv",
     "temperature",
-    "timeoutMs",
+    "timeoutSeconds",
     "maxRetries",
-    "retryBaseMs",
-    "retryMaxMs",
+    "retryBaseSeconds",
+    "retryMaxSeconds",
     "circuitBreakerFailureThreshold",
-    "circuitBreakerCooldownMs",
+    "circuitBreakerCooldownSeconds",
     "strictJson",
     "costPer1KInputTokens",
     "costPer1KOutputTokens",
@@ -752,12 +762,12 @@ function validateProviderConfigObject(config: ProviderConfig): void {
     throw new Error("Provider apiKeyEnv must be a valid environment variable name.");
   }
   assertNumberRange(value.temperature, "temperature", 0, 2);
-  assertNumberRange(value.timeoutMs, "timeoutMs", 1, 10 * 60 * 1000);
+  assertNumberRange(value.timeoutSeconds, "timeoutSeconds", 1, 24 * 60 * 60);
   assertNumberRange(value.maxRetries, "maxRetries", 0, 5);
-  assertNumberRange(value.retryBaseMs, "retryBaseMs", 1, 60000);
-  assertNumberRange(value.retryMaxMs, "retryMaxMs", 1, 120000);
+  assertNumberRange(value.retryBaseSeconds, "retryBaseSeconds", 0.001, 60);
+  assertNumberRange(value.retryMaxSeconds, "retryMaxSeconds", 0.001, 120);
   assertNumberRange(value.circuitBreakerFailureThreshold, "circuitBreakerFailureThreshold", 1, 100);
-  assertNumberRange(value.circuitBreakerCooldownMs, "circuitBreakerCooldownMs", 1000, 60 * 60 * 1000);
+  assertNumberRange(value.circuitBreakerCooldownSeconds, "circuitBreakerCooldownSeconds", 1, 60 * 60);
   if (value.strictJson !== undefined && typeof value.strictJson !== "boolean") {
     throw new Error("Provider strictJson must be a boolean when provided.");
   }
@@ -795,10 +805,32 @@ function hasUnsafeSecretField(config: Record<string, unknown>): boolean {
   return Object.keys(config).some((key) => /^(apiKey|authorization|token|secret)$/i.test(key));
 }
 
-function cloneProviderConfig(config: ProviderConfig): ProviderConfig {
-  return {
+function normalizeProviderConfig(config: ProviderConfig): ProviderConfig {
+  const next: ProviderConfig = {
     ...config,
     config: config.config ? { ...config.config } : undefined,
+  };
+  if (!next.config) return next;
+  const value = next.config as ProviderConfig["config"] & Record<string, unknown>;
+  migrateMillisecondsConfig(value, "timeoutMs", "timeoutSeconds");
+  migrateMillisecondsConfig(value, "retryBaseMs", "retryBaseSeconds");
+  migrateMillisecondsConfig(value, "retryMaxMs", "retryMaxSeconds");
+  migrateMillisecondsConfig(value, "circuitBreakerCooldownMs", "circuitBreakerCooldownSeconds");
+  return next;
+}
+
+function migrateMillisecondsConfig(config: Record<string, unknown>, legacyKey: string, secondsKey: string): void {
+  if (config[secondsKey] === undefined && typeof config[legacyKey] === "number" && Number.isFinite(config[legacyKey])) {
+    config[secondsKey] = config[legacyKey] / 1000;
+  }
+  delete config[legacyKey];
+}
+
+function cloneProviderConfig(config: ProviderConfig): ProviderConfig {
+  const normalized = normalizeProviderConfig(config);
+  return {
+    ...normalized,
+    config: normalized.config ? { ...normalized.config } : undefined,
   };
 }
 

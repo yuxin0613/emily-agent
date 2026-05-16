@@ -2,6 +2,7 @@ import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderCo
 import { ProviderCallError } from "./ModelProvider.ts";
 import { readJsonResponse, readResponseText } from "./HttpResponse.ts";
 import { classifyHttpStatus } from "./ProviderRuntime.ts";
+import { providerTimeoutMs } from "./ProviderTiming.ts";
 
 export class OpenAIModelProvider implements ModelProvider {
   id: string;
@@ -18,7 +19,7 @@ export class OpenAIModelProvider implements ModelProvider {
     this.baseUrl = config.config?.baseUrl || "https://api.openai.com/v1";
     this.apiKeyEnv = config.config?.apiKeyEnv || "OPENAI_API_KEY";
     this.temperature = config.config?.temperature;
-    this.timeoutMs = config.config?.timeoutMs || 60000;
+    this.timeoutMs = providerTimeoutMs(config);
     this.strictJson = config.config?.strictJson !== false;
   }
 

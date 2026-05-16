@@ -125,6 +125,35 @@ assert.equal(timeoutRegistry.agents.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TI
 const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number };
 assert.equal(timeoutConfig.toolCallTimeoutSeconds, 42);
 
+const providerTimeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-timeout-config-"));
+await mkdir(providerTimeoutConfigDir, { recursive: true });
+await writeFile(providerConfigPath(providerTimeoutConfigDir), JSON.stringify({
+  defaultProviderId: "openai-seconds",
+  providers: [{
+    id: "openai-seconds",
+    type: "openai",
+    model: "gpt-test",
+    config: {
+      baseUrl: "https://api.openai.com/v1",
+      apiKeyEnv: "OPENAI_API_KEY",
+      timeoutMs: 600000,
+      retryBaseMs: 250,
+      retryMaxMs: 5000,
+      circuitBreakerCooldownMs: 30000,
+    },
+  }],
+}, null, 2), "utf8");
+const providerTimeoutRegistry = await ProviderRegistry.create({ dataDir: providerTimeoutConfigDir });
+const providerTimeoutConfig = providerTimeoutRegistry.getConfigIncludingDisabled("openai-seconds").config || {};
+assert.equal(providerTimeoutConfig.timeoutSeconds, 600);
+assert.equal(providerTimeoutConfig.retryBaseSeconds, 0.25);
+assert.equal(providerTimeoutConfig.retryMaxSeconds, 5);
+assert.equal(providerTimeoutConfig.circuitBreakerCooldownSeconds, 30);
+assert.equal(providerTimeoutConfig.timeoutMs, undefined);
+const providerTimeoutFile = JSON.parse(await readFile(providerConfigPath(providerTimeoutConfigDir), "utf8")) as { providers: ProviderConfig[] };
+assert.equal(providerTimeoutFile.providers[0].config?.timeoutSeconds, 600);
+assert.equal(providerTimeoutFile.providers[0].config?.timeoutMs, undefined);
+
 const roleTimeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-role-timeout-config-"));
 await mkdir(roleTimeoutConfigDir, { recursive: true });
 await writeFile(providerConfigPath(roleTimeoutConfigDir), JSON.stringify({
@@ -349,8 +378,8 @@ const retryModel = new ResilientModelProvider(flakyProvider, {
   model: flakyProvider.model,
   config: {
     maxRetries: 1,
-    retryBaseMs: 1,
-    retryMaxMs: 1,
+    retryBaseSeconds: 0.001,
+    retryMaxSeconds: 0.001,
   },
 });
 const retryResult = normalizeModelCompleteResult(await retryModel.complete({
@@ -371,7 +400,7 @@ const circuitModel = new ResilientModelProvider(failingProvider, {
   config: {
     maxRetries: 0,
     circuitBreakerFailureThreshold: 1,
-    circuitBreakerCooldownMs: 1000,
+    circuitBreakerCooldownSeconds: 1,
   },
 });
 await assert.rejects(() => circuitModel.complete({
