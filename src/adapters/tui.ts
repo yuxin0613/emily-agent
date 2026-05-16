@@ -2243,7 +2243,7 @@ function formatRunLogLines(
   activeTasks: Record<string, TuiActiveTask> = {},
 ): string[] {
   const lines = [sectionTitle("Run Log:")];
-  const activeLines = formatActiveTaskLines(activeTasks, Math.max(20, width), Math.min(6, Math.max(2, maxLines - 6)));
+  const activeLines = formatActiveTaskLines(activeTasks, Math.max(20, width), Math.min(7, Math.max(2, maxLines - 6)));
   if (activeLines.length) {
     lines.push(...activeLines);
     lines.push("");
@@ -2268,7 +2268,7 @@ function formatRunLogLines(
   return lines.slice(0, maxLines);
 }
 
-function formatActiveTaskLines(activeTasks: Record<string, TuiActiveTask>, width: number, maxRows = 5): string[] {
+function formatActiveTaskLines(activeTasks: Record<string, TuiActiveTask>, width: number, maxLines = 6): string[] {
   const tasks = Object.values(activeTasks)
     .sort((left, right) => activeTaskRank(left) - activeTaskRank(right) || left.updatedAtMs - right.updatedAtMs);
   if (!tasks.length) return [];
@@ -2280,15 +2280,32 @@ function formatActiveTaskLines(activeTasks: Record<string, TuiActiveTask>, width
   if (waiting) summaryParts.push(`${waiting} waiting`);
   const lines = [style(`Active: ${tasks.length} task${tasks.length === 1 ? "" : "s"} (${summaryParts.join(" · ")})`, "brightGreen")];
   const now = Date.now();
-  for (const task of tasks.slice(0, maxRows)) {
-    const status = activeTaskStatusLabel(task.status);
-    const elapsedAnchor = task.status === "running" ? task.runningAtMs || task.queuedAtMs : task.queuedAtMs;
-    const elapsed = formatDuration(Math.max(0, now - elapsedAnchor));
-    const agent = task.assignedAgentId ? ` · ${shortId(task.assignedAgentId, 14)}` : "";
-    const prefix = `  ${status.padEnd(8)} ${elapsed.padStart(7)}  ${task.role}${agent} · ${shortId(task.id, 8)}  `;
-    lines.push(truncate(`${prefix}${task.title}`, width));
+  let shownTasks = 0;
+  for (const task of tasks) {
+    const entry = formatActiveTaskEntry(task, width, now);
+    if (lines.length + entry.length > maxLines) break;
+    lines.push(...entry);
+    shownTasks += 1;
   }
-  if (tasks.length > maxRows) lines.push(`  ... ${tasks.length - maxRows} more active tasks`);
+  if (shownTasks < tasks.length && lines.length < maxLines) {
+    lines.push(`  ... ${tasks.length - shownTasks} more active tasks`);
+  }
+  return lines;
+}
+
+function formatActiveTaskEntry(task: TuiActiveTask, width: number, now: number): string[] {
+  const status = activeTaskStatusLabel(task.status);
+  const elapsedAnchor = task.status === "running" ? task.runningAtMs || task.queuedAtMs : task.queuedAtMs;
+  const elapsed = formatDuration(Math.max(0, now - elapsedAnchor));
+  const agent = task.assignedAgentId ? ` · subagent ${shortId(task.assignedAgentId, 16)}` : "";
+  const meta = `  ${status.padEnd(8)} ${elapsed.padStart(7)}  ${task.role}${agent} · task ${shortId(task.id, 8)}`;
+  const lines = [truncate(meta, width)];
+  const title = task.title.replace(/\s+/g, " ").trim();
+  if (!title) return lines;
+  const detailWidth = Math.max(18, width - 4);
+  const wrapped = wrapBlock(title, detailWidth);
+  for (const line of wrapped.slice(0, 2)) lines.push(`    ${line}`);
+  if (wrapped.length > 2) lines[lines.length - 1] = truncate(`${lines[lines.length - 1]} ...`, width);
   return lines;
 }
 
