@@ -221,18 +221,21 @@ async function runRoleTask({
     },
   });
   const toolExecutionResults: ToolExecutionResult[] = [];
-  for (const request of plannedToolRequests(task, toolGateway)) {
-    toolExecutionResults.push(await toolExecutor.execute({
-      tool: request.tool,
-      args: request.args,
-      approval: request.approval,
-      roleDefinition: definition,
-      permissionMode,
-      task,
-      runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
-      sessionId: String(task.metadata.sessionId || "default"),
-    }));
-  }
+  const executeRequests = async (requests: PlannedToolRequest[]) => {
+    for (const request of requests) {
+      toolExecutionResults.push(await toolExecutor.execute({
+        tool: request.tool,
+        args: request.args,
+        approval: request.approval,
+        roleDefinition: definition,
+        permissionMode,
+        task,
+        runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
+        sessionId: String(task.metadata.sessionId || "default"),
+      }));
+    }
+  };
+  await executeRequests(plannedToolRequests(task, toolGateway));
   if (typeof task.metadata.forceDelayMs === "number") {
     await sleep(task.metadata.forceDelayMs);
   }
@@ -285,19 +288,40 @@ async function runRoleTask({
     source: "subagent-worker",
   });
   throwIfCancelled(task.id);
-  for (const request of providerToolRequests(response.content, task, toolGateway)) {
-    toolExecutionResults.push(await toolExecutor.execute({
-      tool: request.tool,
-      args: request.args,
-      approval: request.approval,
-      roleDefinition: definition,
-      permissionMode,
-      task,
-      runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
-      sessionId: String(task.metadata.sessionId || "default"),
-    }));
-  }
+  let providerContent = response.content;
+  await executeRequests(providerToolRequests(response.content, task, toolGateway));
   throwIfCancelled(task.id);
+
+  const firstMaterializationError = requiredMaterializationError({
+    role,
+    task,
+    toolGateway,
+    toolExecutionResults,
+  });
+  if (firstMaterializationError && toolGateway.canUse("write_file")) {
+    const repairResponse = await agent.run({
+      input: materializationRepairPrompt({
+        task,
+        previousResponse: response.content,
+        toolExecutionResults,
+        materializationError: firstMaterializationError,
+      }),
+      sessionId: profile.sessionScope,
+      relevantMemory,
+      taskId: task.id,
+      runId: typeof task.metadata.runId === "string" ? task.metadata.runId : undefined,
+      source: "subagent-worker:materialization-repair",
+    });
+    throwIfCancelled(task.id);
+    providerContent = [
+      providerContent,
+      "",
+      "Materialization repair response:",
+      repairResponse.content,
+    ].join("\n");
+    await executeRequests(providerToolRequests(repairResponse.content, task, toolGateway));
+    throwIfCancelled(task.id);
+  }
 
   const materializationError = requiredMaterializationError({
     role,
@@ -310,7 +334,7 @@ async function runRoleTask({
   const workProduct = buildRoleWorkProduct({
     role,
     task,
-    providerContent: response.content,
+    providerContent,
     relevantMemory,
     toolResolution,
     skillResolution,
@@ -549,6 +573,61 @@ function providerToolRequests(content: string, task: Task, toolGateway: ToolGate
     ...codeFenceWriteRequests(content, task),
   ].filter((request) => toolGateway.canUse(request.tool));
   return dedupeToolRequests(requests).slice(0, 12);
+}
+
+function materializationRepairPrompt({
+  task,
+  previousResponse,
+  toolExecutionResults,
+  materializationError,
+}: {
+  task: Task;
+  previousResponse: string;
+  toolExecutionResults: ToolExecutionResult[];
+  materializationError: string;
+}): string {
+  const requiredFiles = readStringArray(task.metadata.requiredFiles);
+  return [
+    "MATERIALIZATION_REPAIR_REQUEST",
+    "The previous developer response did not successfully materialize the required files.",
+    "Return only one JSON object. Do not include markdown, prose, shell commands, or explanations.",
+    "The JSON object must have a top-level toolRequests array.",
+    "Use write_file once for each missing or required artifact file.",
+    "Each write_file args object must include path and complete content.",
+    "Do not claim success in text; success is determined only by write_file execution.",
+    "",
+    "Required JSON shape:",
+    JSON.stringify({
+      toolRequests: (requiredFiles.length ? requiredFiles : ["path/to/file.ext"]).map((file) => ({
+        tool: "write_file",
+        args: {
+          path: file,
+          content: "complete file content",
+        },
+      })),
+    }, null, 2),
+    "",
+    "Missing or required files:",
+    ...(requiredFiles.length ? requiredFiles.map((file) => `- ${file}`) : ["- infer the target file path from the task and acceptance criteria"]),
+    "",
+    "Materialization error:",
+    materializationError,
+    "",
+    "Tool execution results so far:",
+    ...renderToolExecutionResults(toolExecutionResults),
+    "",
+    "Task title:",
+    task.title,
+    "",
+    "Task input:",
+    task.input,
+    "",
+    "Acceptance criteria:",
+    ...(Array.isArray(task.metadata.acceptanceCriteria) ? task.metadata.acceptanceCriteria.map((item) => `- ${String(item)}`) : ["- (none)"]),
+    "",
+    "Previous response:",
+    previousResponse.slice(0, 12000),
+  ].join("\n");
 }
 
 function readToolRequests(value: unknown): PlannedToolRequest[] {

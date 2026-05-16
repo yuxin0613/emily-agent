@@ -164,8 +164,28 @@ try {
   const missingRequiredFinished = await runtime.roleAgentManager.runTask(missingRequiredTask, {
     timeoutMs: 10000,
   });
-  assert.equal(missingRequiredFinished.status, "failed");
-  assert.match(String(missingRequiredFinished.error || ""), /Missing successful write_file execution/);
+  const repairedMissingRequired = await readFile(path.join(workspaceDir, "generated", "missing-required.txt"), "utf8");
+  assert.equal(missingRequiredFinished.status, "done");
+  assert.match(repairedMissingRequired, /materialized generated\/missing-required\.txt/);
+
+  const repairRequiredTask = runtime.taskStore.createTask({
+    role: "developer",
+    title: "coding materialization repair",
+    input: "创建最终文件并保存结果，但第一次模型没有发出工具请求。",
+    metadata: {
+      sessionId: "coding-tool-request",
+      maxMemoryCandidates: 0,
+      skillHints: ["coding"],
+      toolHints: ["write_file"],
+      requiredFiles: ["generated/repaired-required.txt"],
+    },
+  });
+  const repairRequiredFinished = await runtime.roleAgentManager.runTask(repairRequiredTask, {
+    timeoutMs: 10000,
+  });
+  const repairedRequired = await readFile(path.join(workspaceDir, "generated", "repaired-required.txt"), "utf8");
+  assert.equal(repairRequiredFinished.status, "done");
+  assert.match(repairedRequired, /materialized generated\/repaired-required\.txt/);
 
   const noWriteTask = runtime.taskStore.createTask({
     role: "developer",
