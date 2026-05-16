@@ -13,6 +13,7 @@ import type { Metadata, Task, TaskDependency, TaskStatus } from "../types.ts";
 import type { RoleAgentManager } from "./RoleAgentManager.ts";
 import type { TaskStore } from "./TaskStore.ts";
 import { clampPermissionMode } from "../tools/PermissionMode.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs, roleTaskExecutionTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "cancelled", "dead_letter"]);
 
@@ -69,6 +70,7 @@ export class TaskGraphExecutor {
   maxDynamicTasks: number;
   maxReplanAttempts: number;
   plan: PlanSpec | null;
+  roleTaskTimeoutMs: number;
 
   constructor({
     taskStore,
@@ -77,6 +79,7 @@ export class TaskGraphExecutor {
     maxDynamicTasks = 200,
     maxReplanAttempts = 2,
     plan = null,
+    roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS,
   }: {
     taskStore: TaskStore;
     roleAgentManager: RoleAgentManager;
@@ -84,6 +87,7 @@ export class TaskGraphExecutor {
     maxDynamicTasks?: number;
     maxReplanAttempts?: number;
     plan?: PlanSpec | null;
+    roleTaskTimeoutMs?: number;
   }) {
     this.taskStore = taskStore;
     this.roleAgentManager = roleAgentManager;
@@ -91,6 +95,7 @@ export class TaskGraphExecutor {
     this.maxDynamicTasks = maxDynamicTasks;
     this.maxReplanAttempts = maxReplanAttempts;
     this.plan = plan;
+    this.roleTaskTimeoutMs = normalizeRoleTaskTimeoutMs(roleTaskTimeoutMs);
   }
 
   async execute(tasksByKey: Record<string, Task>): Promise<TaskGraphExecutionResult> {
@@ -251,7 +256,7 @@ export class TaskGraphExecutor {
   private async runOne(task: Task): Promise<Task> {
     try {
       return await this.roleAgentManager.runTask(task, {
-        timeoutMs: readPositiveNumber(task.metadata.timeoutMs, 60000),
+        timeoutMs: this.executionTimeoutMs(task.metadata.timeoutMs),
       });
     } catch {
       return this.taskStore.getTask(task.id) || task;
@@ -632,7 +637,7 @@ export class TaskGraphExecutor {
       expandsTaskId: parentTask.id,
       expansionDepth: currentDepth,
       maxExpansionDepth: maxDepth,
-      timeoutMs: readPositiveNumber(parentTask.metadata.timeoutMs, 30000),
+      timeoutMs: this.executionTimeoutMs(parentTask.metadata.timeoutMs),
       maxResultChars: 20000,
       maxMemoryCandidates: 0,
       acceptanceCriteria: [
@@ -700,7 +705,7 @@ export class TaskGraphExecutor {
           acceptanceCriteria: ["string"],
           toolHints: [],
           skillHints: [],
-          timeoutMs: 30000,
+          timeoutMs: this.roleTaskTimeoutMs,
           maxRetries: 1,
           maxResultChars: 12000,
           maxMemoryCandidates: 1,
@@ -798,7 +803,7 @@ export class TaskGraphExecutor {
       parentKey,
       replansTaskId: failedTask.id,
       replanAttempt: attempt,
-      timeoutMs: readPositiveNumber(failedTask.metadata.timeoutMs, 30000),
+      timeoutMs: this.executionTimeoutMs(failedTask.metadata.timeoutMs),
       maxResultChars: 20000,
       maxMemoryCandidates: 0,
       acceptanceCriteria: [
@@ -850,7 +855,7 @@ export class TaskGraphExecutor {
           acceptanceCriteria: ["Recovery task produces a usable result or a concrete blocker."],
           toolHints: [],
           skillHints: [],
-          timeoutMs: 30000,
+          timeoutMs: this.roleTaskTimeoutMs,
           maxRetries: 1,
           maxResultChars: 12000,
           maxMemoryCandidates: 1,
@@ -1007,7 +1012,7 @@ export class TaskGraphExecutor {
       toolHints: spec.toolHints,
       skillHints: spec.skillHints,
       permissionMode: clampPermissionMode(spec.permissionMode, parentTask.metadata.permissionMode),
-      timeoutMs: spec.timeoutMs,
+      timeoutMs: this.executionTimeoutMs(spec.timeoutMs),
       maxResultChars: spec.maxResultChars,
       maxMemoryCandidates: spec.maxMemoryCandidates,
       wave: spec.wave,
@@ -1024,6 +1029,10 @@ export class TaskGraphExecutor {
       metadata,
     });
     return this.taskStore.getTaskOrThrow(created.id);
+  }
+
+  private executionTimeoutMs(value: unknown): number {
+    return roleTaskExecutionTimeoutMs(value, this.roleTaskTimeoutMs);
   }
 }
 
@@ -1043,10 +1052,6 @@ function runIdFrom(tasksByKey: Record<string, Task>): string | null {
 
 function keyFor(tasksByKey: Record<string, Task>, taskId: string): string {
   return Object.entries(tasksByKey).find(([, task]) => task.id === taskId)?.[0] || "";
-}
-
-function readPositiveNumber(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function readNonNegativeNumber(value: unknown, fallback: number): number {

@@ -26,6 +26,7 @@ import {
   validatePlanSpec,
   type PlanSpec,
 } from "../planning/PlanSpec.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 
 const DEFAULT_PLANNER_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -77,6 +78,7 @@ export class MainAgent {
   hooks: LifecycleHooks | null;
   router: AgentRouter | null;
   plannerTaskTimeoutMs: number;
+  roleTaskTimeoutMs: number;
 
   constructor({
     name,
@@ -89,6 +91,7 @@ export class MainAgent {
     hooks = null,
     router = null,
     plannerTaskTimeoutMs = DEFAULT_PLANNER_TASK_TIMEOUT_MS,
+    roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS,
   }: {
     name: string;
     model: ModelProvider;
@@ -100,6 +103,7 @@ export class MainAgent {
     hooks?: LifecycleHooks | null;
     router?: AgentRouter | null;
     plannerTaskTimeoutMs?: number;
+    roleTaskTimeoutMs?: number;
   }) {
     this.name = name;
     this.model = model;
@@ -112,6 +116,7 @@ export class MainAgent {
     this.hooks = hooks;
     this.router = router;
     this.plannerTaskTimeoutMs = Math.max(1000, Math.floor(plannerTaskTimeoutMs));
+    this.roleTaskTimeoutMs = normalizeRoleTaskTimeoutMs(roleTaskTimeoutMs);
   }
 
   async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}): Promise<MainAgentResult> {
@@ -515,7 +520,7 @@ export class MainAgent {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
 
-    const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc");
+    const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc", this.roleTaskTimeoutMs);
     const planningGraph = createTaskGraph({
       taskStore: this.taskStore,
       baseMetadata: {
@@ -623,6 +628,7 @@ export class MainAgent {
           executionState: "draft",
           ...runtimeWebSearchMetadata(),
         },
+        roleTaskTimeoutMs: this.roleTaskTimeoutMs,
       });
       const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
       this.taskStore.refreshTaskGraphStatuses();
@@ -648,11 +654,13 @@ export class MainAgent {
         permissionMode: permissionMode || "workspace_write",
         ...runtimeWebSearchMetadata(),
       },
+      roleTaskTimeoutMs: this.roleTaskTimeoutMs,
     });
     const executor = new TaskGraphExecutor({
       taskStore: this.taskStore,
       roleAgentManager: this.roleAgentManager,
       plan,
+      roleTaskTimeoutMs: this.roleTaskTimeoutMs,
     });
     const execution = await executor.execute(executionTasks);
     for (const task of execution.completed) {
@@ -688,6 +696,7 @@ export class MainAgent {
       if (explicitReview) {
         reviewerVerdict = parseReviewerVerdict(explicitReview.content);
       } else if (plan.review.required) {
+        const reviewInputs = results.filter((result) => result.role !== "planner");
         const reviewTask = this.taskStore.createTask({
           role: "reviewer",
           title: `reviewer: ${input.slice(0, 60)}`,
@@ -698,7 +707,7 @@ export class MainAgent {
             "Exit criteria:",
             ...plan.exitCriteria.map((item) => `- ${item}`),
             "Sub-results:",
-            ...results.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
+            ...reviewInputs.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
           ].join("\n"),
           metadata: {
             sessionId,
@@ -709,9 +718,10 @@ export class MainAgent {
             graphId: execution.graphId || "",
             acceptanceCriteria: plan.review.criteria,
             permissionMode: permissionMode || "workspace_write",
+            timeoutMs: this.roleTaskTimeoutMs,
           },
         });
-        for (const result of results.filter((item) => item.role !== "planner")) {
+        for (const result of reviewInputs) {
           this.taskStore.addTaskDependency(reviewTask.id, result.taskId, "finished");
         }
         const finishedReview = await this.roleAgentManager.runTask(reviewTask);
@@ -1012,7 +1022,7 @@ function formatCurrentModelAnswer(model: ModelProvider): string {
   ].join("\n");
 }
 
-function plannerPrompt(input: string, deliveryLevel: string): string {
+function plannerPrompt(input: string, deliveryLevel: string, roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS): string {
   const assessment = assessTaskComplexity(input);
   return [
     "Create a PlanSpec JSON object for an outcome-oriented DAG.",
@@ -1045,7 +1055,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
         acceptanceCriteria: ["string"],
         toolHints: [],
         skillHints: [],
-        timeoutMs: 30000,
+        timeoutMs: roleTaskTimeoutMs,
         maxRetries: 1,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,

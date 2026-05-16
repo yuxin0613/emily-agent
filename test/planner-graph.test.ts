@@ -11,6 +11,7 @@ import {
   requiresDeliveryLevelClarification,
   validateGraphPatchSpec,
 } from "../src/planning/PlanSpec.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS } from "../src/runtime/RoleTaskTimeout.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-graph-"));
 const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
@@ -138,7 +139,9 @@ const verificationTask = timeline.tasks.find((task) => task.metadata.graphKey ==
 assert.ok(implementationTask);
 assert.ok(verificationTask);
 assert.equal(implementationTask.metadata.parentKey, "architecture");
+assert.equal(implementationTask.metadata.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS);
 assert.equal(verificationTask.metadata.parentKey, "implementation");
+assert.equal(verificationTask.metadata.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS);
 assert.ok(timeline.events.some((event) => event.type === "task.dependency.created"
   && event.taskId === verificationTask.id
   && event.payload.dependsOnTaskId === implementationTask.id));

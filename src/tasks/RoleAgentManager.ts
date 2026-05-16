@@ -6,6 +6,7 @@ import type { TaskStore } from "./TaskStore.ts";
 import { RecoveryPolicy } from "../recovery/RecoveryPolicy.ts";
 import type { LifecycleHooks } from "../runtime/LifecycleHooks.ts";
 import { defaultSkillDirs } from "../skills/SkillRegistry.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 
 const DEFAULT_ROLES = ["planner", "developer", "researcher", "reviewer", "inspector", "memory-curator"];
 
@@ -53,6 +54,7 @@ export class RoleAgentManager extends EventEmitter {
   maxConcurrentSubagents: number;
   releaseSubagentsAfterTask: boolean;
   subagentIdleTtlMs: number;
+  roleTaskTimeoutMs: number;
   recoveryPolicy: RecoveryPolicy;
   hooks: LifecycleHooks | null;
   roles: Map<string, RoleState>;
@@ -74,6 +76,7 @@ export class RoleAgentManager extends EventEmitter {
     maxConcurrentSubagents = 4,
     releaseSubagentsAfterTask = true,
     subagentIdleTtlMs = 60000,
+    roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS,
     hooks = null,
   }: {
     dataDir: string;
@@ -88,6 +91,7 @@ export class RoleAgentManager extends EventEmitter {
     maxConcurrentSubagents?: number;
     releaseSubagentsAfterTask?: boolean;
     subagentIdleTtlMs?: number;
+    roleTaskTimeoutMs?: number;
     hooks?: LifecycleHooks | null;
   }) {
     super();
@@ -109,6 +113,7 @@ export class RoleAgentManager extends EventEmitter {
     this.maxConcurrentSubagents = maxConcurrentSubagents;
     this.releaseSubagentsAfterTask = releaseSubagentsAfterTask;
     this.subagentIdleTtlMs = Math.max(0, Math.floor(subagentIdleTtlMs));
+    this.roleTaskTimeoutMs = normalizeRoleTaskTimeoutMs(roleTaskTimeoutMs);
     this.recoveryPolicy = new RecoveryPolicy();
     this.hooks = hooks;
     this.roles = new Map();
@@ -139,13 +144,14 @@ export class RoleAgentManager extends EventEmitter {
     this.drainRole(task.role);
   }
 
-  async runTask(task: Task, { timeoutMs = 60000 }: { timeoutMs?: number } = {}): Promise<Task> {
-    const finished = this.waitForTask(task.id, { timeoutMs });
+  async runTask(task: Task, { timeoutMs }: { timeoutMs?: number } = {}): Promise<Task> {
+    const waitTimeoutMs = normalizeRoleTaskTimeoutMs(timeoutMs, this.roleTaskTimeoutMs);
+    const finished = this.waitForTask(task.id, { timeoutMs: waitTimeoutMs });
     await this.enqueue(task);
     try {
       return await finished;
     } catch (error) {
-      await this.cancelTask(task.id, `main agent timed out after ${timeoutMs}ms`);
+      await this.cancelTask(task.id, `main agent timed out after ${waitTimeoutMs}ms`);
       throw error;
     }
   }
@@ -361,6 +367,7 @@ export class RoleAgentManager extends EventEmitter {
         dataDir: this.dataDir,
         leaseMs: this.leaseMs,
         leaseToken: task.leaseToken,
+        roleTaskTimeoutMs: this.roleTaskTimeoutMs,
       });
     } catch (error) {
       roleState.activeTaskId = null;
@@ -394,6 +401,7 @@ export class RoleAgentManager extends EventEmitter {
         EMILY_ROLE_DIR: this.roleDir,
         EMILY_SKILL_DIR: this.skillDir,
         EMILY_SKILL_DIRS: this.skillDirs.join(path.delimiter),
+        EMILY_ROLE_TASK_TIMEOUT_SECONDS: String(Math.ceil(this.roleTaskTimeoutMs / 1000)),
       },
     });
 

@@ -8,6 +8,7 @@ import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
 import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
 import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 import type { RoleDefinition } from "../types.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_SECONDS, MAX_ROLE_TASK_TIMEOUT_SECONDS } from "../runtime/RoleTaskTimeout.ts";
 
 export interface RuntimeSettings {
   defaultProviderId: string;
@@ -34,6 +35,7 @@ export interface AgentRuntimeConfig {
   releaseSubagentsAfterTask: boolean;
   subagentIdleTtlSeconds: number;
   plannerTaskTimeoutSeconds: number;
+  roleTaskTimeoutSeconds: number;
 }
 
 export class ProviderRegistry {
@@ -653,6 +655,7 @@ function defaultAgentRuntimeConfig(): AgentRuntimeConfig {
     releaseSubagentsAfterTask: true,
     subagentIdleTtlSeconds: 60,
     plannerTaskTimeoutSeconds: 600,
+    roleTaskTimeoutSeconds: DEFAULT_ROLE_TASK_TIMEOUT_SECONDS,
   };
 }
 
@@ -686,6 +689,7 @@ export function normalizeAgentRuntimeConfig(value: unknown): AgentRuntimeConfig 
     releaseSubagentsAfterTask: typeof input.releaseSubagentsAfterTask === "boolean" ? input.releaseSubagentsAfterTask : defaults.releaseSubagentsAfterTask,
     subagentIdleTtlSeconds: numberConfig(input.subagentIdleTtlSeconds, defaults.subagentIdleTtlSeconds, "agents.subagentIdleTtlSeconds", 0, 24 * 60 * 60),
     plannerTaskTimeoutSeconds: numberConfig(input.plannerTaskTimeoutSeconds, defaults.plannerTaskTimeoutSeconds, "agents.plannerTaskTimeoutSeconds", 1, 24 * 60 * 60),
+    roleTaskTimeoutSeconds: numberConfig(input.roleTaskTimeoutSeconds, defaults.roleTaskTimeoutSeconds, "agents.roleTaskTimeoutSeconds", 1, MAX_ROLE_TASK_TIMEOUT_SECONDS),
   };
   return config;
 }

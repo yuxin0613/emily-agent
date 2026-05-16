@@ -8,6 +8,7 @@ import { normalizeProviderJsonOutput } from "../src/llm/ProviderJson.ts";
 import { normalizeModelCompleteResult, resetProviderCircuit, ResilientModelProvider } from "../src/llm/ProviderRuntime.ts";
 import { DEFAULT_TOOL_CALL_TIMEOUT_SECONDS, legacyProviderConfigPath, ProviderRegistry, providerConfigPath } from "../src/llm/ProviderRegistry.ts";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_SECONDS } from "../src/runtime/RoleTaskTimeout.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
 class FlakyProvider implements ModelProvider {
@@ -88,9 +89,10 @@ const runtime = await createRuntime({
 });
 
 assert.deepEqual(runtime.listProviders().map((provider) => provider.id).sort(), ["main-echo", "qa-echo"]);
-const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number };
+const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number; agents?: { roleTaskTimeoutSeconds?: number } };
 assert.equal(providerFile.defaultProviderId, "main-echo");
 assert.equal(providerFile.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
+assert.equal(providerFile.agents?.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
 await assert.rejects(() => access(legacyProviderConfigPath(dataDir)), /ENOENT/);
 
 const legacyConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-legacy-provider-config-"));
@@ -119,8 +121,19 @@ await writeFile(providerConfigPath(timeoutConfigDir), JSON.stringify({
 }, null, 2), "utf8");
 const timeoutRegistry = await ProviderRegistry.create({ dataDir: timeoutConfigDir });
 assert.equal(timeoutRegistry.toolCallTimeoutSeconds, 42);
+assert.equal(timeoutRegistry.agents.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
 const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number };
 assert.equal(timeoutConfig.toolCallTimeoutSeconds, 42);
+
+const roleTimeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-role-timeout-config-"));
+await mkdir(roleTimeoutConfigDir, { recursive: true });
+await writeFile(providerConfigPath(roleTimeoutConfigDir), JSON.stringify({
+  defaultProviderId: "echo",
+  agents: { roleTaskTimeoutSeconds: 42 },
+  providers: [{ id: "echo", type: "echo", model: "echo-local" }],
+}, null, 2), "utf8");
+const roleTimeoutRegistry = await ProviderRegistry.create({ dataDir: roleTimeoutConfigDir });
+assert.equal(roleTimeoutRegistry.agents.roleTaskTimeoutSeconds, 42);
 
 const envConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-env-provider-config-"));
 const previousEnvFileKey = process.env.EMILY_TEST_ENV_FILE_KEY;

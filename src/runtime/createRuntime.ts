@@ -146,6 +146,7 @@ export async function createRuntime(options: {
     maxConcurrentSubagents: agentRuntimeConfig.maxConcurrentSubagents,
     releaseSubagentsAfterTask: agentRuntimeConfig.releaseSubagentsAfterTask,
     subagentIdleTtlMs: agentRuntimeConfig.subagentIdleTtlSeconds * 1000,
+    roleTaskTimeoutMs: agentRuntimeConfig.roleTaskTimeoutSeconds * 1000,
   });
   await roleAgentManager.start();
 
@@ -160,7 +161,17 @@ export async function createRuntime(options: {
     hooks,
     router,
     plannerTaskTimeoutMs: agentRuntimeConfig.plannerTaskTimeoutSeconds * 1000,
+    roleTaskTimeoutMs: agentRuntimeConfig.roleTaskTimeoutSeconds * 1000,
   });
+
+  function applyAgentRuntimeConfig(config: AgentRuntimeConfig): void {
+    roleAgentManager.maxConcurrentSubagents = config.maxConcurrentSubagents;
+    roleAgentManager.releaseSubagentsAfterTask = config.releaseSubagentsAfterTask;
+    roleAgentManager.subagentIdleTtlMs = config.subagentIdleTtlSeconds * 1000;
+    roleAgentManager.roleTaskTimeoutMs = config.roleTaskTimeoutSeconds * 1000;
+    mainAgent.plannerTaskTimeoutMs = config.plannerTaskTimeoutSeconds * 1000;
+    mainAgent.roleTaskTimeoutMs = config.roleTaskTimeoutSeconds * 1000;
+  }
 
   async function approvePendingMemoryCandidates({ runId }: { runId?: string } = {}): Promise<{
     approved: number;
@@ -442,6 +453,7 @@ export async function createRuntime(options: {
     getSettings: () => providerRegistry.getSettings(),
     updateSettings: async (input: RuntimeSettingsUpdate = {}) => {
       providerRegistry.updateSettings(input);
+      applyAgentRuntimeConfig(providerRegistry.agents);
       await providerRegistry.write(dataDir);
       return providerRegistry.getSettings();
     },
@@ -591,6 +603,7 @@ export async function createRuntime(options: {
     },
     async updateSettings(input: RuntimeSettingsUpdate = {}) {
       providerRegistry.updateSettings(input);
+      applyAgentRuntimeConfig(providerRegistry.agents);
       await providerRegistry.write(dataDir);
       return providerRegistry.getSettings();
     },

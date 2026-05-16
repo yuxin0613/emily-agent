@@ -1,10 +1,14 @@
 import type { Metadata, PermissionMode, TaskDependency } from "../types.ts";
+import { MAX_ROLE_TASK_TIMEOUT_MS } from "../runtime/RoleTaskTimeout.ts";
 
 export type DeliveryLevel = "poc" | "uat" | "production";
 export type PlanningMode = "single_wave" | "rolling";
+
 export type GraphFailureStrategy = "fail_graph" | "block_dependents" | "replan";
 export type TaskKind = "software_delivery" | "research_comparison" | "research" | "fix" | "general_execution";
 export type TaskComplexityClass = "simple" | "many_nodes" | "single_long_operation";
+
+const DEFAULT_PLAN_TASK_TIMEOUT_MS = 30000;
 
 export interface PlanTaskSpec {
   key: string;
@@ -360,7 +364,7 @@ export function validatePlanSpec(spec: PlanSpec): PlanValidationResult {
     if (!task.title.trim()) errors.push(`title is required for ${task.key}`);
     if (!task.input.trim()) errors.push(`input is required for ${task.key}`);
     if (!task.acceptanceCriteria.length) errors.push(`acceptanceCriteria is required for ${task.key}`);
-    if (task.timeoutMs < 1000 || task.timeoutMs > 10 * 60 * 1000) errors.push(`timeoutMs out of range for ${task.key}`);
+    if (task.timeoutMs < 1000 || task.timeoutMs > MAX_ROLE_TASK_TIMEOUT_MS) errors.push(`timeoutMs out of range for ${task.key}`);
     if (task.maxRetries < 0 || task.maxRetries > 5) errors.push(`maxRetries out of range for ${task.key}`);
     if (task.maxResultChars < 1000 || task.maxResultChars > 100000) errors.push(`maxResultChars out of range for ${task.key}`);
     if (task.maxMemoryCandidates < 0 || task.maxMemoryCandidates > 20) errors.push(`maxMemoryCandidates out of range for ${task.key}`);
@@ -412,7 +416,7 @@ export function validateGraphPatchSpec(
     if (!task.title.trim()) errors.push(`title is required for ${task.key}`);
     if (!task.input.trim()) errors.push(`input is required for ${task.key}`);
     if (!task.acceptanceCriteria.length) errors.push(`acceptanceCriteria is required for ${task.key}`);
-    if (task.timeoutMs < 1000 || task.timeoutMs > 10 * 60 * 1000) errors.push(`timeoutMs out of range for ${task.key}`);
+    if (task.timeoutMs < 1000 || task.timeoutMs > MAX_ROLE_TASK_TIMEOUT_MS) errors.push(`timeoutMs out of range for ${task.key}`);
     if (task.maxRetries < 0 || task.maxRetries > 5) errors.push(`maxRetries out of range for ${task.key}`);
     if (task.maxResultChars < 1000 || task.maxResultChars > 100000) errors.push(`maxResultChars out of range for ${task.key}`);
     if (task.maxMemoryCandidates < 0 || task.maxMemoryCandidates > 20) errors.push(`maxMemoryCandidates out of range for ${task.key}`);
@@ -616,7 +620,7 @@ function normalizeTaskSpec(item: unknown, index: number, defaultParentKey?: stri
     acceptanceCriteria: listValue(item.acceptanceCriteria, ["Task produces a useful result for the graph."]),
     toolHints: listValue(item.toolHints, []),
     skillHints: listValue(item.skillHints, []),
-    timeoutMs: boundedInteger(item.timeoutMs, 30000, 1000, 10 * 60 * 1000),
+    timeoutMs: boundedInteger(item.timeoutMs, DEFAULT_PLAN_TASK_TIMEOUT_MS, 1000, MAX_ROLE_TASK_TIMEOUT_MS),
     maxRetries: boundedInteger(item.maxRetries, 1, 0, 5),
     maxResultChars: boundedInteger(item.maxResultChars, 12000, 1000, 100000),
     maxMemoryCandidates: boundedInteger(item.maxMemoryCandidates, 1, 0, 20),
@@ -646,7 +650,7 @@ function planTask(input: Partial<PlanTaskSpec> & {
     acceptanceCriteria: input.acceptanceCriteria || ["Task produces a useful result for the graph."],
     toolHints: input.toolHints || [],
     skillHints: input.skillHints || [],
-    timeoutMs: input.timeoutMs || 30000,
+    timeoutMs: input.timeoutMs || DEFAULT_PLAN_TASK_TIMEOUT_MS,
     maxRetries: input.maxRetries ?? 1,
     maxResultChars: input.maxResultChars || 12000,
     maxMemoryCandidates: input.maxMemoryCandidates ?? 1,

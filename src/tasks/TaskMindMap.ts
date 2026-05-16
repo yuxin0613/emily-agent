@@ -1,5 +1,6 @@
 import type { Metadata, Task, TaskDependency, TaskStatus } from "../types.ts";
 import type { TaskStore } from "./TaskStore.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, MAX_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 
 export interface TaskMindMapNode {
   id: string;
@@ -339,6 +340,7 @@ export function addTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNodeAdd
   assertNoDependencyCycle(map, key, dependencyTasks.map((dependency) => dependency.key));
   const inheritedPermissionMode = typeof parent.metadata.permissionMode === "string" ? parent.metadata.permissionMode : "";
   const permissionMode = input.permissionMode || inheritedPermissionMode;
+  const inheritedTimeoutMs = normalizeRoleTaskTimeoutMs(parentTask.metadata.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS);
   const metadata: Metadata = {
     ...inheritedGraphMetadata(parentTask.metadata),
     ...(input.metadata || {}),
@@ -349,7 +351,7 @@ export function addTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNodeAdd
     acceptanceCriteria: stringList(input.acceptanceCriteria, ["The task produces a useful result for this branch."]),
     toolHints: stringList(input.toolHints, []),
     skillHints: stringList(input.skillHints, []),
-    timeoutMs: boundedNumber(input.timeoutMs, 30000, 1000, 10 * 60 * 1000),
+    timeoutMs: boundedNumber(input.timeoutMs, inheritedTimeoutMs, 1000, MAX_ROLE_TASK_TIMEOUT_MS),
     maxResultChars: boundedNumber(input.maxResultChars, 12000, 1000, 100000),
     maxMemoryCandidates: boundedNumber(input.maxMemoryCandidates, 1, 0, 20),
     wave: nextWave(parent),
@@ -472,7 +474,7 @@ export function updateTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNode
       : stringList(input.acceptanceCriteria, ["The task produces a useful result for this branch."]),
     toolHints: input.toolHints === undefined ? task.metadata.toolHints : stringList(input.toolHints, []),
     skillHints: input.skillHints === undefined ? task.metadata.skillHints : stringList(input.skillHints, []),
-    timeoutMs: input.timeoutMs === undefined ? task.metadata.timeoutMs : boundedNumber(input.timeoutMs, 30000, 1000, 10 * 60 * 1000),
+    timeoutMs: input.timeoutMs === undefined ? task.metadata.timeoutMs : boundedNumber(input.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS, 1000, MAX_ROLE_TASK_TIMEOUT_MS),
     maxResultChars: input.maxResultChars === undefined ? task.metadata.maxResultChars : boundedNumber(input.maxResultChars, 12000, 1000, 100000),
     maxMemoryCandidates: input.maxMemoryCandidates === undefined ? task.metadata.maxMemoryCandidates : boundedNumber(input.maxMemoryCandidates, 1, 0, 20),
     expandable: input.expandable === undefined ? task.metadata.expandable : input.expandable === true,

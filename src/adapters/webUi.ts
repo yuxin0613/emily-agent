@@ -956,6 +956,7 @@ async function renderSettings(content) {
   const releaseSubagentsAfterTask = el('input', { type: 'checkbox', checked: agents.releaseSubagentsAfterTask !== false });
   const subagentIdleTtlSeconds = numberInput(agents.subagentIdleTtlSeconds || 0);
   const plannerTaskTimeoutSeconds = numberInput(agents.plannerTaskTimeoutSeconds || 600);
+  const roleTaskTimeoutSeconds = numberInput(agents.roleTaskTimeoutSeconds || 3600);
   const saveRuntime = async () => {
     const result = await api.post('/settings', {
       defaultProviderId: defaultProvider.value,
@@ -967,7 +968,8 @@ async function renderSettings(content) {
         maxConcurrentSubagents: requiredNumber(maxConcurrentSubagents, 'agents.maxConcurrentSubagents'),
         releaseSubagentsAfterTask: releaseSubagentsAfterTask.checked,
         subagentIdleTtlSeconds: requiredNumber(subagentIdleTtlSeconds, 'agents.subagentIdleTtlSeconds'),
-        plannerTaskTimeoutSeconds: requiredNumber(plannerTaskTimeoutSeconds, 'agents.plannerTaskTimeoutSeconds')
+        plannerTaskTimeoutSeconds: requiredNumber(plannerTaskTimeoutSeconds, 'agents.plannerTaskTimeoutSeconds'),
+        roleTaskTimeoutSeconds: requiredNumber(roleTaskTimeoutSeconds, 'agents.roleTaskTimeoutSeconds')
       }
     });
     notifyJson(result);
@@ -984,7 +986,8 @@ async function renderSettings(content) {
       formField('Max Concurrent Subagents', maxConcurrentSubagents),
       formField('Release Subagents', el('label', { className: 'check-row' }, releaseSubagentsAfterTask, 'enabled')),
       formField('Subagent Idle TTL Seconds', subagentIdleTtlSeconds),
-      formField('Planner Timeout Seconds', plannerTaskTimeoutSeconds)
+      formField('Planner Timeout Seconds', plannerTaskTimeoutSeconds),
+      formField('Role Task Timeout Seconds', roleTaskTimeoutSeconds)
     )),
     createProviderEditor(providers, reload),
     createRoleEditor({ roles, providers, tools, skills, reload }),

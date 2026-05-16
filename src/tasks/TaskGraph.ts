@@ -1,5 +1,6 @@
 import type { Metadata, Task, TaskDependency } from "../types.ts";
 import { sanitizePlannerMetadata, type PlanSpec } from "../planning/PlanSpec.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, roleTaskExecutionTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 import type { TaskStore } from "./TaskStore.ts";
 import { clampPermissionMode } from "../tools/PermissionMode.ts";
 
@@ -63,10 +64,12 @@ export function createTaskGraphFromPlan({
   taskStore,
   plan,
   baseMetadata = {},
+  roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS,
 }: {
   taskStore: TaskStore;
   plan: PlanSpec;
   baseMetadata?: Metadata;
+  roleTaskTimeoutMs?: number;
 }): Record<string, Task> {
   return createTaskGraph({
     taskStore,
@@ -96,7 +99,7 @@ export function createTaskGraphFromPlan({
           skillHints: task.skillHints,
           parentKey: task.parentKey || "",
           permissionMode: clampPermissionMode(task.permissionMode, baseMetadata.permissionMode),
-          timeoutMs: task.timeoutMs,
+          timeoutMs: roleTaskExecutionTimeoutMs(task.timeoutMs, roleTaskTimeoutMs),
           maxResultChars: task.maxResultChars,
           maxMemoryCandidates: task.maxMemoryCandidates,
           wave: task.wave,

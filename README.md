@@ -257,6 +257,7 @@ Runtime settings in `.emily/config.json`:
 | `agents.releaseSubagentsAfterTask` | Whether idle subagent worker processes are released after they finish work. Default: `true`. |
 | `agents.subagentIdleTtlSeconds` | Idle time before releasing a finished subagent. Use `0` to release immediately. Default: `60`. |
 | `agents.plannerTaskTimeoutSeconds` | Maximum time to wait for the planner subagent to produce the initial DAG. Default: `600`. |
+| `agents.roleTaskTimeoutSeconds` | Default wait budget for role subagent tasks such as developer, researcher, and reviewer. Default: `3600`. |
 
 Example:
 
@@ -271,7 +272,8 @@ Example:
     "maxConcurrentSubagents": 4,
     "releaseSubagentsAfterTask": true,
     "subagentIdleTtlSeconds": 60,
-    "plannerTaskTimeoutSeconds": 600
+    "plannerTaskTimeoutSeconds": 600,
+    "roleTaskTimeoutSeconds": 3600
   },
   "providers": []
 }

@@ -8,6 +8,7 @@ import { MemorySystem } from "../memory/MemorySystem.ts";
 import { readRoleDefinition } from "../roles/RoleDefinitionLoader.ts";
 import { SkillRegistry } from "../skills/SkillRegistry.ts";
 import { parsePermissionMode } from "../tools/PermissionMode.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 import { IllegalTaskTransitionError, TaskTransitionConflictError } from "../tasks/errors.ts";
 import { TaskStore } from "../tasks/TaskStore.ts";
 import { createTaskResult, serializeTaskResult } from "../tasks/TaskResult.ts";
@@ -24,6 +25,7 @@ interface StartMessage {
   dataDir: string;
   leaseMs?: number;
   leaseToken?: string | null;
+  roleTaskTimeoutMs?: number;
 }
 
 const cancelledTasks = new Map<string, string>();
@@ -40,7 +42,15 @@ process.on("message", (message: unknown) => {
   });
 });
 
-async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000, leaseToken = null }: StartMessage): Promise<void> {
+async function runTask({
+  taskId,
+  role,
+  agentId,
+  dataDir,
+  leaseMs = 30000,
+  leaseToken = null,
+  roleTaskTimeoutMs = configuredRoleTaskTimeoutMs(),
+}: StartMessage): Promise<void> {
   const taskStore = await TaskStore.create({ dataDir });
   const memory = await MemorySystem.create({ dataDir });
   const providerUsageStore = await ProviderUsageStore.create({ dataDir });
@@ -68,8 +78,8 @@ async function runTask({ taskId, role, agentId, dataDir, leaseMs = 30000, leaseT
       process.exit(70);
     }
     const result = role === "inspector"
-      ? await withTimeout(inspectTask({ task, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId)
-      : await withTimeout(runRoleTask({ role, task, memory, providerRegistry, taskStore }), readNumber(task.metadata.timeoutMs, leaseMs * 2), taskId);
+      ? await withTimeout(inspectTask({ task, taskStore }), taskTimeoutMs(task.metadata.timeoutMs, roleTaskTimeoutMs), taskId)
+      : await withTimeout(runRoleTask({ role, task, memory, providerRegistry, taskStore }), taskTimeoutMs(task.metadata.timeoutMs, roleTaskTimeoutMs), taskId);
     throwIfCancelled(taskId);
 
     eventId = taskStore.finishTask(taskId, {
@@ -494,6 +504,16 @@ async function withTimeout<T>(work: Promise<T>, timeoutMs: number, taskId: strin
 
 function readNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function taskTimeoutMs(value: unknown, fallbackMs: number): number {
+  return normalizeRoleTaskTimeoutMs(value, fallbackMs);
+}
+
+function configuredRoleTaskTimeoutMs(): number {
+  const seconds = Number(process.env.EMILY_ROLE_TASK_TIMEOUT_SECONDS);
+  if (Number.isFinite(seconds) && seconds > 0) return normalizeRoleTaskTimeoutMs(seconds * 1000, DEFAULT_ROLE_TASK_TIMEOUT_MS);
+  return DEFAULT_ROLE_TASK_TIMEOUT_MS;
 }
 
 function readNonNegativeNumber(value: unknown, fallback: number): number {
