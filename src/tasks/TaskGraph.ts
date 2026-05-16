@@ -2,7 +2,8 @@ import type { Metadata, Task, TaskDependency } from "../types.ts";
 import { sanitizePlannerMetadata, type PlanSpec } from "../planning/PlanSpec.ts";
 import { DEFAULT_ROLE_TASK_TIMEOUT_MS, roleTaskExecutionTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 import type { TaskStore } from "./TaskStore.ts";
-import { clampPermissionMode } from "../tools/PermissionMode.ts";
+import { parsePermissionMode } from "../tools/PermissionMode.ts";
+import { graphTaskPermissionMode } from "./TaskPermissions.ts";
 
 export interface TaskGraphSpec {
   tasks: Array<{
@@ -81,6 +82,7 @@ export function createTaskGraphFromPlan({
       failureStrategy: plan.failureStrategy,
       exitCriteria: plan.exitCriteria,
       maxWaves: plan.maxWaves,
+      runPermissionMode: parsePermissionMode(baseMetadata.runPermissionMode ?? baseMetadata.permissionMode),
     },
     spec: {
       tasks: plan.tasks.map((task) => ({
@@ -98,7 +100,14 @@ export function createTaskGraphFromPlan({
           toolHints: task.toolHints,
           skillHints: task.skillHints,
           parentKey: task.parentKey || "",
-          permissionMode: clampPermissionMode(task.permissionMode, baseMetadata.permissionMode),
+          permissionMode: graphTaskPermissionMode({
+            role: task.role,
+            title: task.title,
+            input: task.input,
+            acceptanceCriteria: task.acceptanceCriteria,
+            toolHints: task.toolHints,
+            metadata: sanitizePlannerMetadata(task.metadata) || {},
+          }, task.permissionMode, baseMetadata.permissionMode),
           timeoutMs: roleTaskExecutionTimeoutMs(task.timeoutMs, roleTaskTimeoutMs),
           maxResultChars: task.maxResultChars,
           maxMemoryCandidates: task.maxMemoryCandidates,

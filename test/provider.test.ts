@@ -89,9 +89,10 @@ const runtime = await createRuntime({
 });
 
 assert.deepEqual(runtime.listProviders().map((provider) => provider.id).sort(), ["main-echo", "qa-echo"]);
-const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number; agents?: { roleTaskTimeoutSeconds?: number } };
+const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number; providerTimeoutSeconds: number; agents?: { roleTaskTimeoutSeconds?: number } };
 assert.equal(providerFile.defaultProviderId, "main-echo");
 assert.equal(providerFile.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
+assert.equal(providerFile.providerTimeoutSeconds, 3600);
 assert.equal(providerFile.agents?.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
 await assert.rejects(() => access(legacyProviderConfigPath(dataDir)), /ENOENT/);
 
@@ -107,9 +108,10 @@ await writeFile(legacyProviderConfigPath(legacyConfigDir), JSON.stringify({
 const migratedRegistry = await ProviderRegistry.create({ dataDir: legacyConfigDir });
 assert.equal(migratedRegistry.defaultProviderId, "legacy-main");
 assert.equal(migratedRegistry.getConfig("legacy-main").model, "legacy-model");
-const migratedConfig = JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number };
+const migratedConfig = JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number; providerTimeoutSeconds: number };
 assert.equal(migratedConfig.defaultProviderId, "legacy-main");
 assert.equal(migratedConfig.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
+assert.equal(migratedConfig.providerTimeoutSeconds, 3600);
 await assert.rejects(() => access(legacyProviderConfigPath(legacyConfigDir)), /ENOENT/);
 
 const timeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-timeout-config-"));
@@ -117,13 +119,16 @@ await mkdir(timeoutConfigDir, { recursive: true });
 await writeFile(providerConfigPath(timeoutConfigDir), JSON.stringify({
   defaultProviderId: "echo",
   toolCallTimeoutSeconds: 42,
+  providerTimeoutSeconds: 43,
   providers: [{ id: "echo", type: "echo", model: "echo-local" }],
 }, null, 2), "utf8");
 const timeoutRegistry = await ProviderRegistry.create({ dataDir: timeoutConfigDir });
 assert.equal(timeoutRegistry.toolCallTimeoutSeconds, 42);
+assert.equal(timeoutRegistry.providerTimeoutSeconds, 43);
 assert.equal(timeoutRegistry.agents.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
-const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number };
+const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number; providerTimeoutSeconds: number };
 assert.equal(timeoutConfig.toolCallTimeoutSeconds, 42);
+assert.equal(timeoutConfig.providerTimeoutSeconds, 43);
 
 const providerTimeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-timeout-config-"));
 await mkdir(providerTimeoutConfigDir, { recursive: true });

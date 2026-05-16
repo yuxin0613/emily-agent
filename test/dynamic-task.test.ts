@@ -171,6 +171,36 @@ async function runMaterializationWaitsForDynamicExpansionTest(): Promise<void> {
   store.close();
 }
 
+async function runDynamicDeveloperWritePermissionPromotionTest(): Promise<void> {
+  const { store, plan, tasksByKey } = await createDynamicFixture("dynamic-write-permission");
+  plan.tasks[0] = {
+    ...plan.tasks[0],
+    permissionMode: "read_only",
+  };
+  const architecture = tasksByKey.architecture;
+  store.updateTaskMetadata(architecture.id, {
+    ...architecture.metadata,
+    permissionMode: "read_only",
+    runPermissionMode: "workspace_write",
+  }, { reason: "simulate read-only planning node in writable run" });
+  tasksByKey.architecture = store.getTaskOrThrow(architecture.id);
+
+  const manager = new FakeRoleAgentManager(store, "forward_reference");
+  const executor = new TaskGraphExecutor({
+    taskStore: store,
+    roleAgentManager: manager as unknown as RoleAgentManager,
+    plan,
+  });
+
+  const result = await executor.execute(tasksByKey);
+  const implementation = findGraphTask(store.getTasksForGraph(result.graphId!), "implement_slice");
+
+  assert.equal(result.pause, null);
+  assert.equal(implementation.status, "done");
+  assert.equal(implementation.metadata.permissionMode, "workspace_write");
+  store.close();
+}
+
 async function createDynamicFixture(runId: string): Promise<{
   store: TaskStore;
   plan: PlanSpec;
@@ -338,5 +368,6 @@ await runFallbackClosureTest();
 await runUserInputPauseTest();
 await runPermissionClampTest();
 await runMaterializationWaitsForDynamicExpansionTest();
+await runDynamicDeveloperWritePermissionPromotionTest();
 
 console.log("dynamic task test passed");

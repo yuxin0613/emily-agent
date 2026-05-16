@@ -12,8 +12,8 @@ import { taskResultSummary } from "./TaskResult.ts";
 import type { Metadata, Task, TaskDependency, TaskStatus } from "../types.ts";
 import type { RoleAgentManager } from "./RoleAgentManager.ts";
 import type { TaskStore } from "./TaskStore.ts";
-import { clampPermissionMode } from "../tools/PermissionMode.ts";
 import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs, roleTaskExecutionTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
+import { graphTaskPermissionMode } from "./TaskPermissions.ts";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "cancelled", "dead_letter"]);
 
@@ -1039,7 +1039,14 @@ export class TaskGraphExecutor {
       acceptanceCriteria: spec.acceptanceCriteria,
       toolHints: spec.toolHints,
       skillHints: spec.skillHints,
-      permissionMode: clampPermissionMode(spec.permissionMode, parentTask.metadata.permissionMode),
+      permissionMode: graphTaskPermissionMode({
+        role: spec.role,
+        title: spec.title,
+        input: spec.input,
+        acceptanceCriteria: spec.acceptanceCriteria,
+        toolHints: spec.toolHints,
+        metadata: sanitizePlannerMetadata(spec.metadata) || {},
+      }, spec.permissionMode, parentTask.metadata.runPermissionMode || parentTask.metadata.permissionMode),
       timeoutMs: this.executionTimeoutMs(spec.timeoutMs),
       maxResultChars: spec.maxResultChars,
       maxMemoryCandidates: spec.maxMemoryCandidates,
@@ -1322,6 +1329,9 @@ function baseGraphMetadata(task: Task): Metadata {
     exitCriteria: Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria : [],
     maxWaves: typeof task.metadata.maxWaves === "number" ? task.metadata.maxWaves : 1,
     permissionMode: typeof task.metadata.permissionMode === "string" ? task.metadata.permissionMode : "workspace_write",
+    runPermissionMode: typeof task.metadata.runPermissionMode === "string"
+      ? task.metadata.runPermissionMode
+      : typeof task.metadata.permissionMode === "string" ? task.metadata.permissionMode : "workspace_write",
     webSearchProvider: typeof task.metadata.webSearchProvider === "string" ? task.metadata.webSearchProvider : "",
     webSearchEndpoint: typeof task.metadata.webSearchEndpoint === "string" ? task.metadata.webSearchEndpoint : "",
     webSearchMethod: typeof task.metadata.webSearchMethod === "string" ? task.metadata.webSearchMethod : "",

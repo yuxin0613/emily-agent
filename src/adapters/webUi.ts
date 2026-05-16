@@ -944,6 +944,7 @@ async function renderSettings(content) {
   const defaultProvider = optionSelect(providers.map((provider) => [provider.id, provider.id]), settings.defaultProviderId || '');
   const fallbackMode = optionSelect([['strict', 'strict'], ['fallback', 'fallback']], settings.fallbackMode || 'strict');
   const toolTimeout = numberInput(settings.toolCallTimeoutSeconds || 3600);
+  const providerTimeout = numberInput(settings.providerTimeoutSeconds || 3600);
   const mainAgents = numberInput(agents.mainAgents || 1);
   const maxSubagentsPerRole = numberInput(agents.maxSubagentsPerRole || 1);
   mainAgents.readOnly = true;
@@ -962,6 +963,7 @@ async function renderSettings(content) {
       defaultProviderId: defaultProvider.value,
       fallbackMode: fallbackMode.value,
       toolCallTimeoutSeconds: requiredNumber(toolTimeout, 'toolCallTimeoutSeconds'),
+      providerTimeoutSeconds: requiredNumber(providerTimeout, 'providerTimeoutSeconds'),
       agents: {
         mainAgents: requiredNumber(mainAgents, 'agents.mainAgents'),
         maxSubagentsPerRole: requiredNumber(maxSubagentsPerRole, 'agents.maxSubagentsPerRole'),
@@ -981,6 +983,7 @@ async function renderSettings(content) {
       formField('Default Provider', defaultProvider),
       formField('Fallback Mode', fallbackMode),
       formField('Tool Timeout Seconds', toolTimeout),
+      formField('Provider Timeout Seconds', providerTimeout),
       formField('Main Agents', mainAgents),
       formField('Max Subagents Per Role', maxSubagentsPerRole),
       formField('Max Concurrent Subagents', maxConcurrentSubagents),

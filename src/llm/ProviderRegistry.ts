@@ -7,6 +7,7 @@ import { OllamaModelProvider } from "./OllamaModelProvider.ts";
 import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
 import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
 import {
+  DEFAULT_PROVIDER_TIMEOUT_SECONDS,
   providerTimeoutMs,
 } from "./ProviderTiming.ts";
 import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
@@ -17,6 +18,7 @@ export interface RuntimeSettings {
   defaultProviderId: string;
   fallbackMode?: ProviderFallbackMode;
   toolCallTimeoutSeconds: number;
+  providerTimeoutSeconds: number;
   agents: AgentRuntimeConfig;
   providers: ProviderConfig[];
 }
@@ -25,6 +27,7 @@ export interface RuntimeSettingsUpdate {
   defaultProviderId?: unknown;
   fallbackMode?: unknown;
   toolCallTimeoutSeconds?: unknown;
+  providerTimeoutSeconds?: unknown;
   agents?: unknown;
   providers?: unknown;
 }
@@ -46,6 +49,7 @@ export class ProviderRegistry {
   defaultProviderId: string;
   fallbackMode: ProviderFallbackMode;
   toolCallTimeoutSeconds: number;
+  providerTimeoutSeconds: number;
   agents: AgentRuntimeConfig;
   usageStore?: ProviderUsageStore;
   private persistedSnapshot: RuntimeSettings;
@@ -67,7 +71,14 @@ export class ProviderRegistry {
   }): Promise<ProviderRegistry> {
     const persistedSnapshot = await readProviderConfig(dataDir, defaultProviderId);
     const loaded = providers
-      ? { defaultProviderId, fallbackMode, toolCallTimeoutSeconds: persistedSnapshot.toolCallTimeoutSeconds, agents: persistedSnapshot.agents, providers }
+      ? {
+          defaultProviderId,
+          fallbackMode,
+          toolCallTimeoutSeconds: persistedSnapshot.toolCallTimeoutSeconds,
+          providerTimeoutSeconds: persistedSnapshot.providerTimeoutSeconds,
+          agents: persistedSnapshot.agents,
+          providers,
+        }
       : persistedSnapshot;
     const registry = new ProviderRegistry({
       providers: loaded.providers,
@@ -105,12 +116,14 @@ export class ProviderRegistry {
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
     this.toolCallTimeoutSeconds = persistedSnapshot?.toolCallTimeoutSeconds || DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
+    this.providerTimeoutSeconds = persistedSnapshot?.providerTimeoutSeconds || DEFAULT_PROVIDER_TIMEOUT_SECONDS;
     this.agents = normalizeAgentRuntimeConfig(persistedSnapshot?.agents);
     this.usageStore = usageStore;
     this.persistedSnapshot = cloneProviderFile(persistedSnapshot || {
       defaultProviderId,
       fallbackMode,
       toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
+      providerTimeoutSeconds: this.providerTimeoutSeconds,
       agents: this.agents,
       providers,
     });
@@ -262,6 +275,9 @@ export class ProviderRegistry {
     if (Object.prototype.hasOwnProperty.call(input, "toolCallTimeoutSeconds")) {
       next.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(input.toolCallTimeoutSeconds);
     }
+    if (Object.prototype.hasOwnProperty.call(input, "providerTimeoutSeconds")) {
+      next.providerTimeoutSeconds = normalizeProviderTimeoutSeconds(input.providerTimeoutSeconds);
+    }
     if (Object.prototype.hasOwnProperty.call(input, "agents")) {
       const agents = input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)
         ? input.agents as Partial<AgentRuntimeConfig>
@@ -291,6 +307,7 @@ export class ProviderRegistry {
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
       toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
+      providerTimeoutSeconds: this.providerTimeoutSeconds,
       agents: this.agents,
       providers: this.list(),
     };
@@ -300,6 +317,7 @@ export class ProviderRegistry {
     this.defaultProviderId = file.defaultProviderId;
     this.fallbackMode = file.fallbackMode || "strict";
     this.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds);
+    this.providerTimeoutSeconds = normalizeProviderTimeoutSeconds(file.providerTimeoutSeconds);
     this.agents = normalizeAgentRuntimeConfig(file.agents);
     this.providers = new Map(file.providers.map((provider) => {
       const normalized = normalizeProviderConfig(provider);
@@ -314,6 +332,7 @@ export class ProviderRegistry {
       model: overrides.model || config.model,
       config: {
         ...(config.config || {}),
+        timeoutSeconds: config.config?.timeoutSeconds ?? this.providerTimeoutSeconds,
         ...(typeof overrides.temperature === "number" ? { temperature: overrides.temperature } : {}),
       },
     };
@@ -367,7 +386,7 @@ export class ProviderRegistry {
         headers: {
           authorization: `Bearer ${process.env[apiKeyEnv]}`,
         },
-        timeoutMs: providerTimeoutMs(config),
+        timeoutMs: providerTimeoutMs(config, this.providerTimeoutSeconds),
       });
       return {
         id: config.id,
@@ -398,7 +417,7 @@ export class ProviderRegistry {
     try {
       const baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
       const response = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/api/tags`, {
-        timeoutMs: providerTimeoutMs(config),
+        timeoutMs: providerTimeoutMs(config, this.providerTimeoutSeconds),
       });
       return {
         id: config.id,
@@ -463,6 +482,7 @@ async function readProviderFile(filePath: string): Promise<RuntimeSettings | nul
       defaultProviderId: parsed.defaultProviderId || "echo",
       fallbackMode: parsed.fallbackMode === "fallback" ? "fallback" : "strict",
       toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(parsed.toolCallTimeoutSeconds),
+      providerTimeoutSeconds: normalizeProviderTimeoutSeconds(parsed.providerTimeoutSeconds),
       agents: normalizeAgentRuntimeConfig(parsed.agents),
       providers: parsed.providers.map((provider) => normalizeProviderConfig(provider as ProviderConfig)),
     };
@@ -511,6 +531,9 @@ function mergeProviderFiles({
   if (desired.toolCallTimeoutSeconds !== base.toolCallTimeoutSeconds) {
     disk.toolCallTimeoutSeconds = desired.toolCallTimeoutSeconds;
   }
+  if (desired.providerTimeoutSeconds !== base.providerTimeoutSeconds) {
+    disk.providerTimeoutSeconds = desired.providerTimeoutSeconds;
+  }
   if (!sameAgentRuntimeConfig(desired.agents, base.agents)) {
     disk.agents = desired.agents;
   }
@@ -553,6 +576,7 @@ function mergeProviderFiles({
     defaultProviderId,
     fallbackMode: disk.fallbackMode === "fallback" ? "fallback" : "strict",
     toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(disk.toolCallTimeoutSeconds ?? desired.toolCallTimeoutSeconds),
+    providerTimeoutSeconds: normalizeProviderTimeoutSeconds(disk.providerTimeoutSeconds ?? desired.providerTimeoutSeconds),
     agents: normalizeAgentRuntimeConfig(disk.agents ?? desired.agents),
     providers: [...mergedProviders.values()].map(cloneProviderConfig),
   };
@@ -586,6 +610,7 @@ function cloneProviderFile(file: RuntimeSettings): RuntimeSettings {
     defaultProviderId: file.defaultProviderId || "echo",
     fallbackMode: file.fallbackMode === "fallback" ? "fallback" : "strict",
     toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds),
+    providerTimeoutSeconds: normalizeProviderTimeoutSeconds(file.providerTimeoutSeconds),
     agents: normalizeAgentRuntimeConfig(file.agents),
     providers: file.providers.map(cloneProviderConfig),
   };
@@ -645,6 +670,7 @@ function defaultProviderFile(defaultProviderId: string): RuntimeSettings {
     defaultProviderId,
     fallbackMode: "strict",
     toolCallTimeoutSeconds: DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
+    providerTimeoutSeconds: DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     agents: defaultAgentRuntimeConfig(),
     providers: [{
       id: defaultProviderId,
@@ -684,6 +710,14 @@ function normalizeToolCallTimeoutSeconds(value: unknown): number {
   if (value === undefined || value === null) return DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 24 * 60 * 60) {
     throw new Error("Config toolCallTimeoutSeconds must be an integer between 1 and 86400.");
+  }
+  return value;
+}
+
+function normalizeProviderTimeoutSeconds(value: unknown): number {
+  if (value === undefined || value === null) return DEFAULT_PROVIDER_TIMEOUT_SECONDS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 24 * 60 * 60) {
+    throw new Error("Config providerTimeoutSeconds must be an integer between 1 and 86400.");
   }
   return value;
 }

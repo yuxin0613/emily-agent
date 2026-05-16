@@ -1127,6 +1127,7 @@ function runtimeControlCommands(runtime: CommandRuntime): RuntimeCommand[] {
           defaultProviderId: "string",
           fallbackMode: "string",
           toolCallTimeoutSeconds: "number",
+          providerTimeoutSeconds: "number",
           agents: "object",
           providers: "array",
         },

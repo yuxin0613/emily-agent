@@ -251,6 +251,7 @@ Runtime settings in `.emily/config.json`:
 | Key | Purpose |
 | --- | --- |
 | `toolCallTimeoutSeconds` | Maximum time to wait for any single tool execution before returning a failed tool result. Default: `3600`. |
+| `providerTimeoutSeconds` | Default maximum time to wait for a single model provider HTTP call. Individual providers can override with `config.timeoutSeconds`. Default: `3600`. |
 | `agents.mainAgents` | Number of main agents. Must be `1`; the main agent owns ordered user context and orchestration. |
 | `agents.maxSubagentsPerRole` | Subagent limit per role. Must be `1` in the current stable model. |
 | `agents.maxConcurrentSubagents` | Global cap for simultaneously running subagents. Default: based on local CPU, capped at `4`. |
@@ -268,6 +269,7 @@ Example:
   "defaultProviderId": "main-deepseek",
   "fallbackMode": "strict",
   "toolCallTimeoutSeconds": 3600,
+  "providerTimeoutSeconds": 3600,
   "agents": {
     "mainAgents": 1,
     "maxSubagentsPerRole": 1,
