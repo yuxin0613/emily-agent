@@ -272,7 +272,7 @@ async function runRoleTask({
     source: "subagent-worker",
   });
   throwIfCancelled(task.id);
-  for (const request of providerToolRequests(response.content, toolGateway)) {
+  for (const request of providerToolRequests(response.content, task, toolGateway)) {
     toolExecutionResults.push(await toolExecutor.execute({
       tool: request.tool,
       args: request.args,
@@ -520,10 +520,11 @@ function plannedToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolR
   ]);
 }
 
-function providerToolRequests(content: string, toolGateway: ToolGateway): PlannedToolRequest[] {
-  const requests = extractJsonCandidates(content)
-    .flatMap(readProviderToolRequests)
-    .filter((request) => toolGateway.canUse(request.tool));
+function providerToolRequests(content: string, task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
+  const requests = [
+    ...extractJsonCandidates(content).flatMap(readProviderToolRequests),
+    ...codeFenceWriteRequests(content, task),
+  ].filter((request) => toolGateway.canUse(request.tool));
   return dedupeToolRequests(requests).slice(0, 12);
 }
 
@@ -579,6 +580,75 @@ function firstRecord(...values: unknown[]): Record<string, unknown> {
     if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
   }
   return {};
+}
+
+function codeFenceWriteRequests(content: string, task: Task): PlannedToolRequest[] {
+  if (!requiresFileMaterialization(task)) return [];
+  const requests: PlannedToolRequest[] = [];
+  for (const match of content.matchAll(/```([A-Za-z0-9._+-]*)[^\n]*\n([\s\S]*?)```/g)) {
+    const language = (match[1] || "").toLowerCase();
+    const code = match[2] || "";
+    if (!code.trim()) continue;
+    const path = filePathForCodeFence({ language, content, task, index: requests.length });
+    if (!path) continue;
+    requests.push({
+      tool: "write_file",
+      args: {
+        path,
+        content: code.replace(/\s+$/g, "") + "\n",
+      },
+    });
+  }
+  return requests;
+}
+
+function filePathForCodeFence({
+  language,
+  content,
+  task,
+  index,
+}: {
+  language: string;
+  content: string;
+  task: Task;
+  index: number;
+}): string {
+  const text = taskMaterializationText(task);
+  const explicit = extractExplicitFilePath(`${text}\n${content}`, language);
+  if (explicit) return explicit;
+  const outputDir = extractOutputDirectory(text);
+  const name = defaultFileNameForLanguage(language, index);
+  if (!name) return "";
+  return outputDir ? joinToolPath(outputDir, name) : name;
+}
+
+function extractExplicitFilePath(text: string, language: string): string {
+  const extensions = language === "html" || language === "javascript" || language === "js" || language === "css"
+    ? "html|css|js|jsx|ts|tsx|json|md"
+    : "html|css|js|jsx|ts|tsx|json|md|txt";
+  const match = text.match(new RegExp(`(?:^|[\\s\`'"])(~\\/[^\\s\`'"]+\\.(?:${extensions})|\\.?\\.?\\/[^\\s\`'"]+\\.(?:${extensions})|[A-Za-z0-9_./-]+\\.(?:${extensions}))(?:[:\\s\`'",)]|$)`, "i"));
+  return match?.[1] || "";
+}
+
+function extractOutputDirectory(text: string): string {
+  const match = text.match(/(?:保存到|输出到|写入到|放到|存到|save\s+(?:to|under|in)|output\s+(?:to|under|in)|write\s+(?:to|under|in))\s*[:：]?\s*(~\/[^\s`'",，。；;]+|\/[^\s`'",，。；;]+|\.{1,2}\/[^\s`'",，。；;]+|[A-Za-z0-9_./-]+\/[^\s`'",，。；;]*)/i);
+  if (!match?.[1]) return "";
+  return match[1].replace(/[),.，。；;]+$/g, "").replace(/\/$/, "");
+}
+
+function defaultFileNameForLanguage(language: string, index: number): string {
+  if (language === "html" || language === "htm") return "index.html";
+  if (language === "css") return index === 0 ? "style.css" : `style-${index + 1}.css`;
+  if (language === "js" || language === "javascript") return index === 0 ? "script.js" : `script-${index + 1}.js`;
+  if (language === "ts" || language === "typescript") return index === 0 ? "index.ts" : `index-${index + 1}.ts`;
+  if (language === "tsx") return index === 0 ? "index.tsx" : `index-${index + 1}.tsx`;
+  if (language === "json") return index === 0 ? "data.json" : `data-${index + 1}.json`;
+  if (language === "md" || language === "markdown") return index === 0 ? "README.md" : `notes-${index + 1}.md`;
+  return "";
+}
+
+function joinToolPath(directory: string, fileName: string): string {
+  return `${directory.replace(/\/+$/g, "")}/${fileName.replace(/^\/+/g, "")}`;
 }
 
 function automaticWebToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
@@ -712,12 +782,18 @@ function requiredMaterializationError({
 }
 
 function requiresFileMaterialization(task: Task): boolean {
-  const planGoal = typeof task.metadata.planGoal === "string" ? task.metadata.planGoal.trim() : "";
-  const goal = planGoal || [
+  const text = taskMaterializationText(task);
+  if (/(?:^|[\s`'"])(?:~\/|\/|\.{1,2}\/)?[A-Za-z0-9_./-]+\.(?:html|css|js|jsx|ts|tsx|json|md|txt)(?:[:\s`'",)]|$)/i.test(text)) return true;
+  return /(?:保存|保存到|输出到|写入|落盘|生成|编写|写一个|写代码|创建|新建|修改|更新|编辑).{0,40}(?:文件|代码|源码|网页|页面|HTML|html|index|artifact|file|code|source)/i.test(text)
+    || /(?:write|create|generate|edit|update|scaffold).{0,40}(?:file|code|source|html|page|artifact)/i.test(text);
+}
+
+function taskMaterializationText(task: Task): string {
+  return [
+    task.title,
     task.input,
-    Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
+    Array.isArray(task.metadata.acceptanceCriteria) ? task.metadata.acceptanceCriteria.join("\n") : "",
   ].join("\n");
-  return /(?:保存到|写入|落盘|新建|创建|新增|生成|编写|写一个|写代码|实现|开发|修改|修复|重构|搭建|构建|部署|index\.html|\.tsx?|\.jsx?|\.css|\.html|网页|前端|游戏|\bwrite\b|\bcreate\b|\bgenerate\b|\bimplement\b|\bbuild\b|\bedit\b|\bfix\b|\bscaffold\b)/i.test(goal);
 }
 
 function toMetadata(input: Record<string, unknown>): Metadata {

@@ -44,6 +44,41 @@ try {
     && event.payload.tool === "write_file"
     && event.payload.ok === true));
 
+  const inheritedGoalTask = runtime.taskStore.createTask({
+    role: "developer",
+    title: "设计游戏数据结构和架构",
+    input: "设计游戏数据结构和架构。",
+    metadata: {
+      sessionId: "coding-tool-request",
+      maxMemoryCandidates: 0,
+      planGoal: "写一个web的贪吃蛇游戏，结果保存到 ~/2_project/demo。",
+      skillHints: ["coding"],
+      toolHints: ["write_file"],
+    },
+  });
+  const inheritedGoalFinished = await runtime.roleAgentManager.runTask(inheritedGoalTask, {
+    timeoutMs: 10000,
+  });
+  assert.equal(inheritedGoalFinished.status, "done");
+
+  const codeFenceTask = runtime.taskStore.createTask({
+    role: "developer",
+    title: "materialize html",
+    input: "EMIT_HTML_CODE_FENCE 生成 HTML 文件并保存到 ./web-demo。",
+    metadata: {
+      sessionId: "coding-tool-request",
+      maxMemoryCandidates: 0,
+      skillHints: ["coding"],
+      toolHints: ["write_file"],
+    },
+  });
+  const codeFenceFinished = await runtime.roleAgentManager.runTask(codeFenceTask, {
+    timeoutMs: 10000,
+  });
+  const html = await readFile(path.join(workspaceDir, "web-demo", "index.html"), "utf8");
+  assert.equal(codeFenceFinished.status, "done");
+  assert.match(html, /snakeReady/);
+
   const noWriteTask = runtime.taskStore.createTask({
     role: "developer",
     title: "coding missing write request",

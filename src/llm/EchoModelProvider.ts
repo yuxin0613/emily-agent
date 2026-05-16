@@ -191,6 +191,15 @@ export class EchoModelProvider implements ModelProvider {
           }],
         }, null, 2));
       }
+      if (/EMIT_HTML_CODE_FENCE/.test(prompt)) {
+        return this.result([
+          "Here is the HTML artifact:",
+          "```html",
+          "<!doctype html>",
+          "<html><body><canvas id=\"game\"></canvas><script>window.snakeReady = true;</script></body></html>",
+          "```",
+        ].join("\n"));
+      }
       return this.result([
         "建议当前实现保持模块化：主 agent 负责会话和编排，subagent 负责具体任务，memory 通过统一接口同时写入内存、文件和向量索引。",
         "后续接真实模型时，只需要替换 ModelProvider；接真实向量库时，只需要替换 VectorMemoryLayer。",

@@ -503,12 +503,14 @@ function readStringArray(value: unknown): string[] {
 }
 
 function requiresFileMaterialization(task: Task): boolean {
-  const planGoal = typeof task.metadata.planGoal === "string" ? task.metadata.planGoal.trim() : "";
-  const goal = planGoal || [
+  const text = [
+    task.title,
     task.input,
-    Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
+    Array.isArray(task.metadata.acceptanceCriteria) ? task.metadata.acceptanceCriteria.join("\n") : "",
   ].join("\n");
-  return /(?:保存到|写入|落盘|新建|创建|新增|生成|编写|写一个|写代码|实现|开发|修改|修复|重构|搭建|构建|部署|index\.html|\.tsx?|\.jsx?|\.css|\.html|网页|前端|游戏|\bwrite\b|\bcreate\b|\bgenerate\b|\bimplement\b|\bbuild\b|\bedit\b|\bfix\b|\bscaffold\b)/i.test(goal);
+  if (/(?:^|[\s`'"])(?:~\/|\/|\.{1,2}\/)?[A-Za-z0-9_./-]+\.(?:html|css|js|jsx|ts|tsx|json|md|txt)(?:[:\s`'",)]|$)/i.test(text)) return true;
+  return /(?:保存|保存到|输出到|写入|落盘|生成|编写|写一个|写代码|创建|新建|修改|更新|编辑).{0,40}(?:文件|代码|源码|网页|页面|HTML|html|index|artifact|file|code|source)/i.test(text)
+    || /(?:write|create|generate|edit|update|scaffold).{0,40}(?:file|code|source|html|page|artifact)/i.test(text);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
