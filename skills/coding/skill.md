@@ -19,5 +19,6 @@ Apply this skill when a task asks for implementation, debugging, or technical ch
 
 - Inspect existing patterns before changing code.
 - Keep edits limited to the assigned task.
+- For file creation or edits, emit executable `toolRequests` with `write_file` instead of only describing commands.
 - Preserve unrelated user changes.
 - Return what changed, how it was verified, and remaining risks.

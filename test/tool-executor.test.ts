@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -314,6 +314,33 @@ const symlinkRead = await symlinkExecutor.execute({
 });
 assert.equal(symlinkRead.ok, false);
 assert.match(String(symlinkRead.error || ""), /symlink|escapes workspace/);
+
+const homeWorkspaceDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-home-"));
+const previousHome = process.env.HOME;
+process.env.HOME = homeWorkspaceDir;
+try {
+  const homeExecutor = new ToolExecutor({
+    workspaceDir: homeWorkspaceDir,
+    registry: createDefaultToolRegistry(),
+  });
+  const writeRole: RoleDefinition = {
+    ...role,
+    allowedTools: ["write_file", "read_file"],
+    forbiddenTools: [],
+  };
+  const tildeWrite = await homeExecutor.execute({
+    tool: "write_file",
+    args: { path: "~/nested/tilde.txt", content: "tilde-expanded" },
+    roleDefinition: writeRole,
+    permissionMode: "workspace_write",
+    sessionId: "tool-executor",
+  });
+  assert.equal(tildeWrite.ok, true);
+  assert.equal(await readFile(path.join(homeWorkspaceDir, "nested", "tilde.txt"), "utf8"), "tilde-expanded");
+} finally {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+}
 
 const graphTasks = createTaskGraph({
   taskStore,

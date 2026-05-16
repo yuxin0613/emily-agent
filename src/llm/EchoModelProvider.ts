@@ -180,6 +180,17 @@ export class EchoModelProvider implements ModelProvider {
     }
 
     if (agent === "developer") {
+      if (/EMIT_WRITE_FILE_TOOL_REQUEST/.test(prompt)) {
+        return this.result(JSON.stringify({
+          toolRequests: [{
+            tool: "write_file",
+            args: {
+              path: "generated/coding-tool-request.txt",
+              content: "written by echo developer tool request\n",
+            },
+          }],
+        }, null, 2));
+      }
       return this.result([
         "建议当前实现保持模块化：主 agent 负责会话和编排，subagent 负责具体任务，memory 通过统一接口同时写入内存、文件和向量索引。",
         "后续接真实模型时，只需要替换 ModelProvider；接真实向量库时，只需要替换 VectorMemoryLayer。",

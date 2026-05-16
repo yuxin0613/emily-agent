@@ -1285,5 +1285,8 @@ function baseGraphMetadata(task: Task): Metadata {
     exitCriteria: Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria : [],
     maxWaves: typeof task.metadata.maxWaves === "number" ? task.metadata.maxWaves : 1,
     permissionMode: typeof task.metadata.permissionMode === "string" ? task.metadata.permissionMode : "workspace_write",
+    webSearchProvider: typeof task.metadata.webSearchProvider === "string" ? task.metadata.webSearchProvider : "",
+    webSearchEndpoint: typeof task.metadata.webSearchEndpoint === "string" ? task.metadata.webSearchEndpoint : "",
+    webSearchMethod: typeof task.metadata.webSearchMethod === "string" ? task.metadata.webSearchMethod : "",
   };
 }

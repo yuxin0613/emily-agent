@@ -26,9 +26,9 @@ const ROUTE_RULES: RouteRule[] = [
   {
     id: "developer-code",
     role: "developer",
-    reason: "request mentions implementation, code, APIs, UI, architecture, or project build work",
+    reason: "request mentions implementation, code, web/UI, APIs, architecture, or project build work",
     weight: 4,
-    pattern: /(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口|测试|优化|修复)/i,
+    pattern: /(code|coding|bug|fix|implement|build|create|generate|web|html|frontend|game|实现|开发|创建|新增|生成|编写|代码|写一个|写代码|网页|前端|游戏|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口|测试|优化|修复)/i,
   },
   {
     id: "researcher-context",
@@ -71,6 +71,9 @@ export class AgentRouter {
       .sort((a, b) => b.score - a.score || a.role.localeCompare(b.role));
 
     const selected = new Set<string>(["planner"]);
+    if (!researchOnly && (assessment.kind === "software_delivery" || assessment.kind === "fix")) {
+      selected.add("developer");
+    }
     for (const match of matches) {
       if (match.role === "reviewer" && !options.includeReviewer) continue;
       if (match.role === "memory-curator") continue;

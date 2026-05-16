@@ -1,4 +1,4 @@
-import type { MemoryRecallResult, Task } from "../types.ts";
+import type { MemoryRecallResult, Metadata, Task } from "../types.ts";
 import type { ModelProvider } from "../llm/ModelProvider.ts";
 import { normalizeModelCompleteResult } from "../llm/ProviderRuntime.ts";
 import type { MemorySystem } from "../memory/MemorySystem.ts";
@@ -407,6 +407,7 @@ export class MainAgent {
         relevantExperiences,
         plan: delegated.plan,
         subResults,
+        reviewerVerdict,
       });
       for (const experience of relevantExperiences) {
         this.experienceStore.recordUse(experience.id);
@@ -526,6 +527,7 @@ export class MainAgent {
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
         permissionMode: permissionMode || "workspace_write",
+        ...runtimeWebSearchMetadata(),
       },
       spec: {
         tasks: [
@@ -619,6 +621,7 @@ export class MainAgent {
           permissionMode: permissionMode || "workspace_write",
           planOnly: true,
           executionState: "draft",
+          ...runtimeWebSearchMetadata(),
         },
       });
       const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
@@ -643,6 +646,7 @@ export class MainAgent {
         createdBy: this.name,
         planSourceTaskId: finishedPlanner.id,
         permissionMode: permissionMode || "workspace_write",
+        ...runtimeWebSearchMetadata(),
       },
     });
     const executor = new TaskGraphExecutor({
@@ -792,6 +796,7 @@ export class MainAgent {
     relevantExperiences,
     plan,
     subResults,
+    reviewerVerdict,
   }: {
     input: string;
     runId?: string;
@@ -800,6 +805,7 @@ export class MainAgent {
     relevantExperiences: ExperienceRecallResult[];
     plan?: PlanSpec;
     subResults: Array<{ agent: string; content: string }>;
+    reviewerVerdict?: ReviewerVerdict;
   }): Promise<string> {
     const prompt = [
       `User input: ${input}`,
@@ -808,6 +814,8 @@ export class MainAgent {
       ...formatExperiences(relevantExperiences),
       "Execution plan:",
       ...(plan ? formatPlan(plan) : ["- (none)"]),
+      "Reviewer verdict:",
+      ...(reviewerVerdict ? formatReviewerVerdict(reviewerVerdict) : ["- (none)"]),
       "Sub-agent results:",
       ...subResults.map((result) => `- ${result.agent}: ${result.content}`),
       "",
@@ -822,6 +830,16 @@ export class MainAgent {
       source: sessionId ? `session:${sessionId}` : "main-agent",
       phase: "synthesize",
     });
+    if (reviewerVerdict?.verdict === "fail" && !/(未通过|失败|没有完成|未完成|不能按已完成处理)/.test(result.content)) {
+      return [
+        "这次执行未通过验证，不能按已完成处理。",
+        "",
+        result.content,
+        "",
+        "Reviewer:",
+        ...formatReviewerVerdict(reviewerVerdict),
+      ].join("\n");
+    }
     return result.content;
   }
 
@@ -972,6 +990,14 @@ function isExplicitWebSearchRequest(input: string): boolean {
   return /(?:搜索|搜一下|查找|检索|联网|新闻|最新|动态|互联网|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b|\binternet\b|\bweb\b)/i.test(input);
 }
 
+function runtimeWebSearchMetadata(): Metadata {
+  const metadata: Metadata = {};
+  if (process.env.EMILY_WEB_SEARCH_PROVIDER) metadata.webSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
+  if (process.env.EMILY_WEB_SEARCH_ENDPOINT) metadata.webSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  if (process.env.EMILY_WEB_SEARCH_METHOD) metadata.webSearchMethod = process.env.EMILY_WEB_SEARCH_METHOD;
+  return metadata;
+}
+
 function isModelIdentityQuestion(input: string): boolean {
   const normalized = input.trim();
   if (/(?:搜索|搜一下|查找|检索|联网|新闻|最新|动态|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b)/i.test(normalized)) return false;
@@ -1091,6 +1117,16 @@ function formatPlan(plan: PlanSpec): string[] {
     ...plan.exitCriteria.map((item) => `  - ${item}`),
     "- tasks:",
     ...plan.tasks.map((task) => `  - ${task.key} [${task.role}] parent=${task.parentKey || "(root)"} wave=${task.wave} dependsOn=${task.dependsOn.join(",") || "(none)"}`),
+  ];
+}
+
+function formatReviewerVerdict(verdict: ReviewerVerdict): string[] {
+  return [
+    `- verdict: ${verdict.verdict}`,
+    `- confidence: ${verdict.confidence}`,
+    `- retrySuggested: ${verdict.retrySuggested}`,
+    "- reasons:",
+    ...(verdict.reasons.length ? verdict.reasons.map((reason) => `  - ${reason}`) : ["  - (none)"]),
   ];
 }
 

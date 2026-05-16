@@ -204,12 +204,12 @@ export class ToolExecutor {
   }
 
   private async executeAllowed(tool: ToolPermission, args: Record<string, unknown>, request: ToolExecutionRequest): Promise<unknown> {
-    if (tool === "read_file") return this.readFile(args);
-    if (tool === "write_file") return this.writeFile(args);
+    if (tool === "read_file") return this.readFile(args, request);
+    if (tool === "write_file") return this.writeFile(args, request);
     if (tool === "run_tests") return this.runTests(args);
     if (tool === "inspect_task") return this.inspectTask(args);
     if (tool === "create_task") return this.createTask(args, request);
-    if (tool === "delete_file") return this.deleteFile(args);
+    if (tool === "delete_file") return this.deleteFile(args, request);
     if (tool === "http_fetch") return this.httpFetch(args);
     if (tool === "web_search") return this.webSearch(args);
     if (tool === "browser") return this.browser(args);
@@ -229,36 +229,42 @@ export class ToolExecutor {
     throw new ToolApprovalRequiredError(`${requirement.reason || `Tool ${request.tool} requires explicit approval before execution`}${suffix}.`, requirement.template);
   }
 
-  private async readFile(args: Record<string, unknown>): Promise<{ path: string; content: string; bytes: number; truncated: boolean }> {
-    const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path, "path"));
+  private async readFile(args: Record<string, unknown>, request: ToolExecutionRequest): Promise<{ path: string; content: string; bytes: number; truncated: boolean }> {
+    const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path, "path"), {
+      allowOutsideWorkspace: canAccessOutsideWorkspace(request),
+    });
     const maxBytes = positiveNumber(args.maxBytes, 128000);
     const content = await readFile(filePath, "utf8");
     const truncated = Buffer.byteLength(content, "utf8") > maxBytes;
     const output = truncated ? content.slice(0, maxBytes) : content;
     return {
-      path: path.relative(this.workspaceDir, filePath),
+      path: this.formatToolPath(filePath),
       content: output,
       bytes: Buffer.byteLength(content, "utf8"),
       truncated,
     };
   }
 
-  private async writeFile(args: Record<string, unknown>): Promise<{ path: string; bytes: number }> {
-    const filePath = await this.resolveWritableWorkspacePath(requiredString(args.path, "path"));
+  private async writeFile(args: Record<string, unknown>, request: ToolExecutionRequest): Promise<{ path: string; bytes: number }> {
+    const filePath = await this.resolveWritableWorkspacePath(requiredString(args.path, "path"), {
+      allowOutsideWorkspace: canAccessOutsideWorkspace(request),
+    });
     const content = String(args.content ?? "");
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, content, "utf8");
     return {
-      path: path.relative(this.workspaceDir, filePath),
+      path: this.formatToolPath(filePath),
       bytes: Buffer.byteLength(content, "utf8"),
     };
   }
 
-  private async deleteFile(args: Record<string, unknown>): Promise<{ path: string; deleted: boolean }> {
-    const filePath = await this.resolveDeletableWorkspacePath(requiredString(args.path, "path"));
+  private async deleteFile(args: Record<string, unknown>, request: ToolExecutionRequest): Promise<{ path: string; deleted: boolean }> {
+    const filePath = await this.resolveDeletableWorkspacePath(requiredString(args.path, "path"), {
+      allowOutsideWorkspace: canAccessOutsideWorkspace(request),
+    });
     await rm(filePath, { force: false, recursive: false });
     return {
-      path: path.relative(this.workspaceDir, filePath),
+      path: this.formatToolPath(filePath),
       deleted: true,
     };
   }
@@ -709,24 +715,25 @@ export class ToolExecutor {
     return task;
   }
 
-  private resolveLexicalWorkspacePath(input: string): string {
-    const resolved = path.resolve(this.workspaceDir, input);
-    if (resolved !== this.workspaceDir && !resolved.startsWith(`${this.workspaceDir}${path.sep}`)) {
+  private resolveLexicalWorkspacePath(input: string, { allowOutsideWorkspace = false }: { allowOutsideWorkspace?: boolean } = {}): string {
+    const expanded = expandHomePath(input);
+    const resolved = path.resolve(this.workspaceDir, expanded);
+    if (!allowOutsideWorkspace && resolved !== this.workspaceDir && !resolved.startsWith(`${this.workspaceDir}${path.sep}`)) {
       throw new Error(`Path escapes workspace: ${input}`);
     }
     return resolved;
   }
 
-  private async resolveReadableWorkspacePath(input: string): Promise<string> {
-    const resolved = this.resolveLexicalWorkspacePath(input);
+  private async resolveReadableWorkspacePath(input: string, options: { allowOutsideWorkspace?: boolean } = {}): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input, options);
     const real = await realpath(resolved);
-    await this.assertRealPathInsideWorkspace(real, input);
+    if (!options.allowOutsideWorkspace) await this.assertRealPathInsideWorkspace(real, input);
     return real;
   }
 
-  private async resolveWritableWorkspacePath(input: string): Promise<string> {
-    const resolved = this.resolveLexicalWorkspacePath(input);
-    await this.assertParentInsideWorkspace(path.dirname(resolved), input);
+  private async resolveWritableWorkspacePath(input: string, options: { allowOutsideWorkspace?: boolean } = {}): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input, options);
+    if (!options.allowOutsideWorkspace) await this.assertParentInsideWorkspace(path.dirname(resolved), input);
     const stats = await lstat(resolved).catch((error) => {
       if (isNodeError(error) && error.code === "ENOENT") return null;
       throw error;
@@ -734,15 +741,15 @@ export class ToolExecutor {
     if (stats?.isSymbolicLink()) {
       throw new Error(`Refusing to write through workspace symlink: ${input}`);
     }
-    if (stats) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
+    if (stats && !options.allowOutsideWorkspace) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
     return resolved;
   }
 
-  private async resolveDeletableWorkspacePath(input: string): Promise<string> {
-    const resolved = this.resolveLexicalWorkspacePath(input);
-    await this.assertParentInsideWorkspace(path.dirname(resolved), input);
+  private async resolveDeletableWorkspacePath(input: string, options: { allowOutsideWorkspace?: boolean } = {}): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input, options);
+    if (!options.allowOutsideWorkspace) await this.assertParentInsideWorkspace(path.dirname(resolved), input);
     const stats = await lstat(resolved);
-    if (!stats.isSymbolicLink()) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
+    if (!stats.isSymbolicLink() && !options.allowOutsideWorkspace) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
     return resolved;
   }
 
@@ -756,6 +763,11 @@ export class ToolExecutor {
     if (realTarget !== realWorkspace && !realTarget.startsWith(`${realWorkspace}${path.sep}`)) {
       throw new Error(`Path escapes workspace through symlink: ${originalInput}`);
     }
+  }
+
+  private formatToolPath(filePath: string): string {
+    const relative = path.relative(this.workspaceDir, filePath);
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : filePath;
   }
 
   private addEvent(type: string, request: ToolExecutionRequest, payload: Record<string, unknown>): number | null {
@@ -1887,6 +1899,19 @@ function isSensitiveEventKey(key: string): boolean {
 function isLargeEventKey(key: string): boolean {
   const normalized = key.toLowerCase();
   return normalized.includes("content") || normalized.includes("body");
+}
+
+function canAccessOutsideWorkspace(request: ToolExecutionRequest): boolean {
+  return parsePermissionMode(request.permissionMode) === "danger_full_access";
+}
+
+function expandHomePath(input: string): string {
+  if (input === "~") return process.env.HOME || input;
+  if (input.startsWith(`~${path.sep}`)) {
+    const home = process.env.HOME;
+    if (home) return path.join(home, input.slice(2));
+  }
+  return input;
 }
 
 function summarizeOutput(output: unknown): unknown {

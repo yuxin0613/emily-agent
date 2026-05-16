@@ -31,6 +31,8 @@ Capabilities: coding, debugging, architecture
 3. Identify the smallest safe implementation path and the exact modules likely to change.
 4. Return either the implementation result or a precise patch plan with file-level details.
 5. Include a verification plan and call out anything not actually executed.
+6. When the task requires file changes, output a JSON code block with `toolRequests` so the runtime can execute the writes. Use `write_file` for files and `run_tests` for verification; do not present shell snippets as completed work.
+7. Never claim a file was created, edited, or tested unless tool execution evidence reports success.
 
 ## Output Shape
 

@@ -28,7 +28,7 @@ export function buildRoleWorkProduct({
   canReadFiles = true,
 }: RoleWorkProductInput): string {
   if (role === "developer") {
-    return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
+    return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, toolExecutionResults, workspaceDir, canReadFiles });
   }
   if (role === "researcher") {
     return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, toolExecutionResults, workspaceDir, canReadFiles });
@@ -45,6 +45,7 @@ function buildDeveloperWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
+  toolExecutionResults = [],
   workspaceDir = process.cwd(),
   canReadFiles = true,
 }: Omit<RoleWorkProductInput, "role">): string {
@@ -72,6 +73,10 @@ function buildDeveloperWorkProduct({
     "",
     "## Implementation Strategy",
     ...implementationStrategy(task.input, fileRefs),
+    "",
+    "## Tool Execution Evidence",
+    ...formatToolExecutionContext(toolExecutionResults),
+    ...fileWriteEvidenceWarnings(task, toolExecutionResults),
     "",
     "## Verification Plan",
     ...verificationPlan(packageInfo, task.metadata),
@@ -179,7 +184,7 @@ function extractReviewedEvidence(input: string): string {
 function hasExecutionFailureSignal(text: string): boolean {
   return signalLines(text).some((line) => {
     if (isNegatedSignalLine(line)) return false;
-    return /\bfailed\b|\bfail\b|dead_letter|没有完成|任务执行失败|error:|exception|traceback/.test(line);
+    return /\bfailed\b|\bfail\b|dead_letter|没有完成|任务执行失败|error:|exception|traceback|no successful write_file|no write_file execution succeeded|not treat this as implemented/.test(line);
   });
 }
 
@@ -420,6 +425,16 @@ function developerRisks(task: Task, toolResolution: ToolHintResolution, fileRefs
   return risks.length ? risks : ["- No blocking risk detected from local context."];
 }
 
+function fileWriteEvidenceWarnings(task: Task, toolExecutionResults: ToolExecutionResult[]): string[] {
+  if (!requiresFileMaterialization(task)) return [];
+  const writeResults = toolExecutionResults.filter((result) => result.tool === "write_file");
+  if (writeResults.some((result) => result.ok)) return [];
+  if (!writeResults.length) {
+    return ["- No write_file execution succeeded; do not treat this as implemented."];
+  }
+  return ["- No successful write_file execution succeeded; do not treat this as implemented."];
+}
+
 function researchFacts({
   task,
   fileRefs,
@@ -485,6 +500,15 @@ function stringMetadata(metadata: Metadata, key: string): string {
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function requiresFileMaterialization(task: Task): boolean {
+  const planGoal = typeof task.metadata.planGoal === "string" ? task.metadata.planGoal.trim() : "";
+  const goal = planGoal || [
+    task.input,
+    Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
+  ].join("\n");
+  return /(?:保存到|写入|落盘|新建|创建|新增|生成|编写|写一个|写代码|实现|开发|修改|修复|重构|搭建|构建|部署|index\.html|\.tsx?|\.jsx?|\.css|\.html|网页|前端|游戏|\bwrite\b|\bcreate\b|\bgenerate\b|\bimplement\b|\bbuild\b|\bedit\b|\bfix\b|\bscaffold\b)/i.test(goal);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

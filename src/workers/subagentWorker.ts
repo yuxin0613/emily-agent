@@ -247,6 +247,12 @@ async function runRoleTask({
       "Tool context:",
       ...toolGateway.renderToolContext(toolResolution),
       "",
+      "Tool request protocol:",
+      "If this task requires creating or editing files, include one JSON block with a top-level toolRequests array.",
+      "Supported request shape: {\"toolRequests\":[{\"tool\":\"write_file\",\"args\":{\"path\":\"relative/or/approved/path\",\"content\":\"...\"}}]}.",
+      "Use write_file for file creation or edits and run_tests for verification commands; do not describe shell commands as if they were executed.",
+      "Do not claim a file was created, edited, or verified unless the tool execution results show success.",
+      "",
       "Tool execution results:",
       ...renderToolExecutionResults(toolExecutionResults),
       "",
@@ -266,6 +272,27 @@ async function runRoleTask({
     source: "subagent-worker",
   });
   throwIfCancelled(task.id);
+  for (const request of providerToolRequests(response.content, toolGateway)) {
+    toolExecutionResults.push(await toolExecutor.execute({
+      tool: request.tool,
+      args: request.args,
+      approval: request.approval,
+      roleDefinition: definition,
+      permissionMode,
+      task,
+      runId: typeof task.metadata.runId === "string" ? task.metadata.runId : null,
+      sessionId: String(task.metadata.sessionId || "default"),
+    }));
+  }
+  throwIfCancelled(task.id);
+
+  const materializationError = requiredMaterializationError({
+    role,
+    task,
+    toolGateway,
+    toolExecutionResults,
+  });
+  if (materializationError) throw new Error(materializationError);
 
   const workProduct = buildRoleWorkProduct({
     role,
@@ -493,16 +520,65 @@ function plannedToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolR
   ]);
 }
 
+function providerToolRequests(content: string, toolGateway: ToolGateway): PlannedToolRequest[] {
+  const requests = extractJsonCandidates(content)
+    .flatMap(readProviderToolRequests)
+    .filter((request) => toolGateway.canUse(request.tool));
+  return dedupeToolRequests(requests).slice(0, 12);
+}
+
 function readToolRequests(value: unknown): PlannedToolRequest[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
     .map((item) => ({
-      tool: String(item.tool || ""),
-      args: item.args && typeof item.args === "object" && !Array.isArray(item.args) ? item.args as Record<string, unknown> : {},
+      tool: String(item.tool || item.name || ""),
+      args: firstRecord(item.args, item.arguments, item.input),
       approval: normalizeToolApproval(item.approval),
     }))
     .filter((item) => item.tool.trim());
+}
+
+function readProviderToolRequests(value: unknown): PlannedToolRequest[] {
+  if (Array.isArray(value)) return readToolRequests(value);
+  if (!value || typeof value !== "object") return [];
+  const record = value as Record<string, unknown>;
+  return readToolRequests(record.toolRequests || record.tools || record.requests);
+}
+
+function extractJsonCandidates(content: string): unknown[] {
+  const candidates: string[] = [];
+  const fenced = content.matchAll(/```(?:json|toolRequests|tools)?\s*([\s\S]*?)```/gi);
+  for (const match of fenced) candidates.push(match[1].trim());
+
+  const trimmed = content.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) candidates.push(trimmed);
+  const firstObject = content.indexOf("{");
+  const lastObject = content.lastIndexOf("}");
+  if (firstObject >= 0 && lastObject > firstObject) candidates.push(content.slice(firstObject, lastObject + 1));
+  const firstArray = content.indexOf("[");
+  const lastArray = content.lastIndexOf("]");
+  if (firstArray >= 0 && lastArray > firstArray) candidates.push(content.slice(firstArray, lastArray + 1));
+
+  const parsed: unknown[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      parsed.push(JSON.parse(candidate));
+    } catch {
+      // Provider prose can contain non-JSON braces; invalid candidates are ignored.
+    }
+  }
+  return parsed;
+}
+
+function firstRecord(...values: unknown[]): Record<string, unknown> {
+  for (const value of values) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  }
+  return {};
 }
 
 function automaticWebToolRequests(task: Task, toolGateway: ToolGateway): PlannedToolRequest[] {
@@ -536,13 +612,23 @@ function automaticWebSearchToolRequests(task: Task, toolGateway: ToolGateway): P
     Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
   ].join("\n");
   if (!shouldAutoSearchWeb(text)) return [];
+  const args: Record<string, unknown> = {
+    query: searchQueryFromTask(task),
+    count: 5,
+    timeoutMs: 15000,
+  };
+  if (typeof task.metadata.webSearchProvider === "string" && task.metadata.webSearchProvider.trim()) {
+    args.provider = task.metadata.webSearchProvider.trim();
+  }
+  if (typeof task.metadata.webSearchEndpoint === "string" && task.metadata.webSearchEndpoint.trim()) {
+    args.endpoint = task.metadata.webSearchEndpoint.trim();
+  }
+  if (typeof task.metadata.webSearchMethod === "string" && task.metadata.webSearchMethod.trim()) {
+    args.method = task.metadata.webSearchMethod.trim();
+  }
   return [{
     tool: "web_search",
-    args: {
-      query: searchQueryFromTask(task),
-      count: 5,
-      timeoutMs: 15000,
-    },
+    args,
     approval: {
       approved: true,
       template: "network_read",
@@ -593,6 +679,45 @@ function dedupeToolRequests(requests: PlannedToolRequest[]): PlannedToolRequest[
     result.push(request);
   }
   return result;
+}
+
+function requiredMaterializationError({
+  role,
+  task,
+  toolGateway,
+  toolExecutionResults,
+}: {
+  role: string;
+  task: Task;
+  toolGateway: ToolGateway;
+  toolExecutionResults: ToolExecutionResult[];
+}): string {
+  if (role !== "developer") return "";
+  if (!requiresFileMaterialization(task)) return "";
+  if (!toolGateway.canUse("write_file")) {
+    return "Developer task requires creating or editing files, but write_file is not allowed for this role or permission mode.";
+  }
+  const writeResults = toolExecutionResults.filter((result) => result.tool === "write_file");
+  if (writeResults.some((result) => result.ok)) return "";
+  if (!writeResults.length) {
+    return [
+      "Developer task requires creating or editing files, but the model returned no executable write_file toolRequests.",
+      "The developer response must include a JSON block like {\"toolRequests\":[{\"tool\":\"write_file\",\"args\":{\"path\":\"index.html\",\"content\":\"...\"}}]}.",
+    ].join(" ");
+  }
+  return [
+    "Developer task requires creating or editing files, but every write_file tool execution failed.",
+    ...writeResults.map((result) => result.error ? `${result.tool}: ${result.error}` : `${result.tool}: failed`),
+  ].join(" ");
+}
+
+function requiresFileMaterialization(task: Task): boolean {
+  const planGoal = typeof task.metadata.planGoal === "string" ? task.metadata.planGoal.trim() : "";
+  const goal = planGoal || [
+    task.input,
+    Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria.join("\n") : "",
+  ].join("\n");
+  return /(?:保存到|写入|落盘|新建|创建|新增|生成|编写|写一个|写代码|实现|开发|修改|修复|重构|搭建|构建|部署|index\.html|\.tsx?|\.jsx?|\.css|\.html|网页|前端|游戏|\bwrite\b|\bcreate\b|\bgenerate\b|\bimplement\b|\bbuild\b|\bedit\b|\bfix\b|\bscaffold\b)/i.test(goal);
 }
 
 function toMetadata(input: Record<string, unknown>): Metadata {

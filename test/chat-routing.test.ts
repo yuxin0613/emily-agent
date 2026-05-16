@@ -23,6 +23,10 @@ try {
   assert.ok(searchRoute.selectedRoles.includes("researcher"));
   const modelNewsRoute = new AgentRouter().route("搜索nvidia大模型的新闻");
   assert.ok(modelNewsRoute.selectedRoles.includes("researcher"));
+  const codingRoute = new AgentRouter().route("写一个web的贪吃蛇游戏，保存到 ~/2_project/demo");
+  assert.ok(codingRoute.selectedRoles.includes("developer"));
+  assert.ok(!codingRoute.selectedRoles.includes("researcher"));
+  assert.equal(assessTaskComplexity("写一个web的贪吃蛇游戏，保存到 ~/2_project/demo").kind, "software_delivery");
   assert.equal(isPlanningOnlyRequest("帮我规划一个 Todo 应用 POC，不要立即实现"), true);
   assert.equal(isPlanningOnlyRequest("帮我做一个 Todo 应用 POC"), false);
   assert.equal(classifyUserMessageIntent("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同"), "task");
