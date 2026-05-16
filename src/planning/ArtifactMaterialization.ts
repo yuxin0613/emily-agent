@@ -51,6 +51,7 @@ export function ensureArtifactMaterializationPlan(plan: PlanSpec, input: string)
 
   return {
     ...plan,
+    maxWaves: Math.max(plan.maxWaves, finalTask.wave),
     tasks: tasks.map((task) => {
       if (task.key === finalKey || task.role !== "reviewer") return task;
       return {
@@ -155,8 +156,21 @@ function extractOutputDirectory(text: string): string {
 }
 
 function extractExplicitFilePaths(text: string): string[] {
-  const pattern = new RegExp(`(?:^|[\\s\`'"])(~\\/[^\\s\`'"]+\\.(?:${ARTIFACT_EXTENSIONS})|\\/[^\\s\`'"]+\\.(?:${ARTIFACT_EXTENSIONS})|\\.{1,2}\\/[^\\s\`'"]+\\.(?:${ARTIFACT_EXTENSIONS})|[A-Za-z0-9_.-]+\\.(?:${ARTIFACT_EXTENSIONS}))(?:[:\\s\`'",)，。；;]|$)`, "gi");
-  return unique([...text.matchAll(pattern)].map((match) => (match[1] || "").replace(/[),.，。；;]+$/g, "")));
+  const pattern = new RegExp(`~\\/[^\\s\`'"、,，]+\\.(?:${ARTIFACT_EXTENSIONS})|\\/[^\\s\`'"、,，]+\\.(?:${ARTIFACT_EXTENSIONS})|\\.{1,2}\\/[^\\s\`'"、,，]+\\.(?:${ARTIFACT_EXTENSIONS})|[A-Za-z0-9_.-]+\\.(?:${ARTIFACT_EXTENSIONS})`, "gi");
+  const values: string[] = [];
+  for (const match of text.matchAll(pattern)) {
+    const value = (match[0] || "").replace(/[),.，。；;]+$/g, "");
+    if (!value) continue;
+    const start = match.index || 0;
+    const end = start + match[0].length;
+    if (!isFilePathBoundary(text[start - 1]) || !isFilePathBoundary(text[end])) continue;
+    values.push(value);
+  }
+  return unique(values);
+}
+
+function isFilePathBoundary(value: string | undefined): boolean {
+  return !value || /[\s`'",、，:：)，。；;()]/.test(value);
 }
 
 function defaultArtifactFiles(input: string, outputDirectory: string): string[] {

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { artifactRequirementForInput, ensureArtifactMaterializationPlan } from "../src/planning/ArtifactMaterialization.ts";
+import { ensureMinimumTaskNodePlan, requestedMinimumTaskNodes } from "../src/planning/MinimumTaskNodes.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
 const repoRoot = process.cwd();
@@ -99,6 +100,7 @@ try {
   const finalTask = materialized.tasks.find((item) => item.key === "final_materialization");
   assert.ok(finalTask);
   assert.equal(finalTask.role, "developer");
+  assert.ok(materialized.maxWaves >= finalTask.wave);
   assert.deepEqual(finalTask.metadata?.requiredFiles, [
     "~/2_project/focusforge_demo/index.html",
     "~/2_project/focusforge_demo/styles.css",
@@ -113,6 +115,71 @@ try {
     "./demo/app.js",
     "./demo/README.md",
   ]);
+
+  const longTaskPrompt = [
+    "测试长任务 coding。本任务不是 plan-only。请按 UAT 级别完成一个纯前端 Web 应用，保存到 ~/2_project/focusforge_demo；如果目录不存在请新建。",
+    "必须先生成不少于 15 个任务节点，然后继续执行这些任务节点。",
+    "质量要求：目录中至少包含 index.html、styles.css、app.js、README.md。",
+  ].join("\n");
+  assert.equal(requestedMinimumTaskNodes(longTaskPrompt), 15);
+  assert.deepEqual(artifactRequirementForInput(longTaskPrompt)?.requiredFiles, [
+    "~/2_project/focusforge_demo/index.html",
+    "~/2_project/focusforge_demo/styles.css",
+    "~/2_project/focusforge_demo/app.js",
+    "~/2_project/focusforge_demo/README.md",
+  ]);
+  const minimumExpanded = ensureMinimumTaskNodePlan({
+    goal: "Build FocusForge",
+    deliveryLevel: "uat",
+    exitCriteria: ["Artifacts are runnable."],
+    planningMode: "rolling",
+    maxWaves: 12,
+    failureStrategy: "block_dependents",
+    tasks: [{
+      key: "scope",
+      role: "planner",
+      title: "scope",
+      input: "Scope the app.",
+      dependsOn: [],
+      dependencyType: "success",
+      acceptanceCriteria: ["Scope exists."],
+      toolHints: [],
+      skillHints: ["planning"],
+      timeoutMs: 30000,
+      maxRetries: 1,
+      maxResultChars: 12000,
+      maxMemoryCandidates: 1,
+      wave: 1,
+      expandable: false,
+      expansionGoal: "",
+      maxExpansionDepth: 0,
+    }, {
+      key: "architecture",
+      role: "planner",
+      title: "architecture",
+      input: "Architect the app.",
+      parentKey: "scope",
+      dependsOn: ["scope"],
+      dependencyType: "success",
+      acceptanceCriteria: ["Architecture exists."],
+      toolHints: [],
+      skillHints: ["planning"],
+      timeoutMs: 30000,
+      maxRetries: 1,
+      maxResultChars: 12000,
+      maxMemoryCandidates: 1,
+      wave: 1,
+      expandable: false,
+      expansionGoal: "",
+      maxExpansionDepth: 0,
+    }],
+    review: { required: true, criteria: ["Artifacts are runnable."] },
+    clarificationRequired: false,
+    clarificationQuestions: [],
+  }, longTaskPrompt);
+  assert.ok(minimumExpanded.tasks.length >= 15);
+  assert.ok(minimumExpanded.tasks.every((item) => item.acceptanceCriteria.length > 0));
+  assert.ok(minimumExpanded.tasks.some((item) => item.metadata?.generatedForMinimumTaskNodes === true));
 
   const inheritedGoalTask = runtime.taskStore.createTask({
     role: "developer",

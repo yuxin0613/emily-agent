@@ -147,7 +147,7 @@ function buildReviewerWorkProduct({ task, providerContent }: Pick<RoleWorkProduc
   if (hasCoverageBlockerSignal(reviewedEvidence)) {
     reasons.push("The reviewed output mentions missing coverage or blockers.");
   }
-  if (!/sub-results?:|subagent|developer|researcher|planner|review/i.test(input)) {
+  if (expectsSubagentEvidence(task.input) && !/sub-results?:|subagent|developer|researcher|planner|review/i.test(input)) {
     reasons.push("The review input does not include enough subagent result evidence.");
   }
 
@@ -171,6 +171,10 @@ function buildReviewerWorkProduct({ task, providerContent }: Pick<RoleWorkProduc
   };
 
   return JSON.stringify(value, null, 2);
+}
+
+function expectsSubagentEvidence(input: string): boolean {
+  return /graph outputs?|sub-results?|subagent|sub-agent|子任务结果|子代理结果|执行结果汇总|图执行结果/i.test(input);
 }
 
 function extractReviewedEvidence(input: string): string {

@@ -16,6 +16,7 @@ import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts"
 import { TaskGraphExecutor, type TaskGraphPause } from "../tasks/TaskGraphExecutor.ts";
 import { taskResultSummary } from "../tasks/TaskResult.ts";
 import { ensureArtifactMaterializationPlan } from "../planning/ArtifactMaterialization.ts";
+import { ensureMinimumTaskNodePlan, requestedMinimumTaskNodes } from "../planning/MinimumTaskNodes.ts";
 import {
   createFallbackPlanSpec,
   createPlanningOnlyPlanSpec,
@@ -643,6 +644,7 @@ export class MainAgent {
       };
     }
 
+    plan = ensureMinimumTaskNodePlan(plan, input);
     plan = ensureArtifactMaterializationPlan(plan, input);
     const executionTasks = createTaskGraphFromPlan({
       taskStore: this.taskStore,
@@ -1102,6 +1104,7 @@ function plannerPrompt(input: string, deliveryLevel: string, roleTaskTimeoutMs =
     `- longTask: ${assessment.longTask}`,
     `- splittable: ${assessment.splittable}`,
     `- estimatedNodes: ${assessment.estimatedNodes}`,
+    `- requestedMinimumTaskNodes: ${requestedMinimumTaskNodes(input) || "(none)"}`,
     "- reasons:",
     ...assessment.reasons.map((reason) => `  - ${reason}`),
     "",
