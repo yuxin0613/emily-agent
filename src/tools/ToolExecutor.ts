@@ -578,6 +578,7 @@ export class ToolExecutor {
         method: "POST",
         headers,
         body,
+        allowPrivateEgress: isLocalOllamaWebSearchEndpoint(endpoint),
         signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
       });
       if (response.status === 401) throw new Error("Ollama web search authentication failed. Run ollama signin or configure EMILY_OLLAMA_API_KEY/OLLAMA_API_KEY.");
@@ -852,6 +853,7 @@ interface PinnedFetchInit {
   headers?: Record<string, string>;
   body?: string | Buffer | Uint8Array;
   signal?: AbortSignal;
+  allowPrivateEgress?: boolean;
 }
 
 interface HttpEgressTarget {
@@ -862,18 +864,18 @@ interface HttpEgressTarget {
 }
 
 async function fetchWithPinnedEgress(url: URL, init: PinnedFetchInit = {}, redirectCount = 0): Promise<Response> {
-  const target = await resolveHttpEgressTarget(url);
+  const target = await resolveHttpEgressTarget(url, { allowPrivateEgress: init.allowPrivateEgress === true });
   return nativeHttpRequest(target, init, redirectCount);
 }
 
-async function resolveHttpEgressTarget(url: URL): Promise<HttpEgressTarget> {
+async function resolveHttpEgressTarget(url: URL, options: { allowPrivateEgress?: boolean } = {}): Promise<HttpEgressTarget> {
   assertHttpUrlSafe(url);
   const hostname = url.hostname.toLowerCase();
   const literalIp = ipAddressFromHost(hostname);
   const hostHeader = url.host;
   const servername = literalIp ? undefined : url.hostname;
 
-  if (isHttpEgressAllowedByPolicy(url)) {
+  if (options.allowPrivateEgress || isHttpEgressAllowedByPolicy(url)) {
     const connectHostname = literalIp || await firstResolvedAddress(hostname);
     return { url, connectHostname, hostHeader, servername };
   }
@@ -917,8 +919,9 @@ function nativeHttpRequest(target: HttpEgressTarget, init: PinnedFetchInit, redi
       if (isRedirectStatus(status) && location && redirectCount < 5) {
         response.resume();
         const nextUrl = new URL(location, target.url);
+        const nextInit = { ...redirectInit(init, status, method), allowPrivateEgress: false };
         resolveHttpEgressTarget(nextUrl)
-          .then((nextTarget) => nativeHttpRequest(nextTarget, redirectInit(init, status, method), redirectCount + 1))
+          .then((nextTarget) => nativeHttpRequest(nextTarget, nextInit, redirectCount + 1))
           .then(resolve, reject);
         return;
       }
@@ -1091,6 +1094,14 @@ function normalizeAllowlistEntry(entry: string): HttpEgressAllowlistEntry | null
   const hostname = canonicalHostname(raw);
   if (!hostname || hostname.includes("*") || hostname.includes(":")) return null;
   return { kind: "host", hostname };
+}
+
+function isLocalOllamaWebSearchEndpoint(url: URL): boolean {
+  const hostname = canonicalHostname(url.hostname);
+  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  return localHost
+    && (url.protocol === "http:" || url.protocol === "https:")
+    && (url.pathname === OLLAMA_LOCAL_WEB_SEARCH_PROXY_PATH || url.pathname === OLLAMA_HOSTED_WEB_SEARCH_PATH);
 }
 
 function canonicalHostname(hostname: string): string {

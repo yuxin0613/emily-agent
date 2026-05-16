@@ -244,7 +244,7 @@ const allowlistServer = http.createServer((request, response) => {
 });
 await new Promise<void>((resolve) => allowlistServer.listen(0, "127.0.0.1", resolve));
 const allowlistAddress = allowlistServer.address() as AddressInfo;
-const previousEgressAllowlist = process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+const previousBrowserEgressAllowlist = process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
 try {
   process.env.EMILY_HTTP_EGRESS_ALLOWLIST = `http://127.0.0.1:${allowlistAddress.port}`;
   const allowlistedPrivate = await executor.execute({
@@ -281,8 +281,8 @@ try {
   assert.equal(malformedWildcard.ok, false);
   assert.match(String(malformedWildcard.error || ""), /private|local/);
 } finally {
-  if (previousEgressAllowlist === undefined) delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
-  else process.env.EMILY_HTTP_EGRESS_ALLOWLIST = previousEgressAllowlist;
+  if (previousBrowserEgressAllowlist === undefined) delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  else process.env.EMILY_HTTP_EGRESS_ALLOWLIST = previousBrowserEgressAllowlist;
   await new Promise<void>((resolve, reject) => allowlistServer.close((error) => error ? reject(error) : resolve()));
 }
 
@@ -478,6 +478,7 @@ const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
 const previousWebSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
 const previousWebSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
 const previousOllamaBaseUrl = process.env.EMILY_OLLAMA_BASE_URL;
+const previousEgressAllowlist = process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
 process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 try {
   const webSearch = await executor.execute({
@@ -508,6 +509,31 @@ try {
   assert.equal(ollamaSearchOutput.results?.[0]?.title, "Ollama local search");
   assert.equal(ollamaSearchOutput.results?.[0]?.snippet, "Local Ollama proxy result.");
   assert.equal(ollamaSearchPaths.at(-1), "/api/experimental/web_search");
+
+  delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
+  delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  const endpointPrivateBlocked = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "endpoint", endpoint: `http://127.0.0.1:${address.port}/web-search`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local endpoint private egress should remain blocked" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(endpointPrivateBlocked.ok, false);
+  assert.match(String(endpointPrivateBlocked.error || ""), /private or local address is blocked/);
+
+  const localOllamaWithoutGlobalPrivateAccess = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "ollama", baseUrl: `http://127.0.0.1:${address.port}`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "scoped local Ollama web search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(localOllamaWithoutGlobalPrivateAccess.ok, true);
+  assert.equal((localOllamaWithoutGlobalPrivateAccess.output as { results?: Array<{ title?: string }> }).results?.[0]?.title, "Ollama local search");
+  process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 
   delete process.env.EMILY_WEB_SEARCH_PROVIDER;
   delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
@@ -583,6 +609,8 @@ try {
   else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousWebSearchEndpoint;
   if (previousOllamaBaseUrl === undefined) delete process.env.EMILY_OLLAMA_BASE_URL;
   else process.env.EMILY_OLLAMA_BASE_URL = previousOllamaBaseUrl;
+  if (previousEgressAllowlist === undefined) delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  else process.env.EMILY_HTTP_EGRESS_ALLOWLIST = previousEgressAllowlist;
   await new Promise<void>((resolve, reject) => browserServer.close((error) => error ? reject(error) : resolve()));
 }
 
