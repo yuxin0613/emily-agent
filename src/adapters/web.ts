@@ -1,9 +1,8 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { isIP, type Socket } from "node:net";
-import { CommandPermissionError, type CommandPermission } from "../commands/CommandRegistry.ts";
+import { CommandPermissionError, assertPermissionModeWithinCommandPermission, type CommandPermission } from "../commands/CommandRegistry.ts";
 import { dispatchGatewayRequest, gatewayEvent, gatewayProtocolSpec, parseGatewayRequest } from "../gateway/GatewayProtocol.ts";
-import { parsePermissionMode } from "../tools/PermissionMode.ts";
 import { webAppHtml } from "./webUi.ts";
 import type { Metadata, ToolPermission } from "../types.ts";
 
@@ -642,7 +641,7 @@ export async function startWebServer({
         const result = await runtime.handleUserMessage(String(body.message || ""), {
           sessionId: String(body.sessionId || "web"),
           source: "web",
-          permissionMode: parsePermissionMode(body.permissionMode),
+          permissionMode: assertPermissionModeWithinCommandPermission(body.permissionMode, auth.maxPermission),
         });
         return sendJson(response, 200, result);
       }

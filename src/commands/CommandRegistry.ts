@@ -1,7 +1,8 @@
 import type { CronJobInput } from "../cron/CronScheduler.ts";
 import type { ToolApproval } from "../tools/ToolExecutor.ts";
-import type { Metadata, ToolPermission } from "../types.ts";
+import type { Metadata, PermissionMode, ToolPermission } from "../types.ts";
 import { createDefaultToolRegistry } from "../tools/ToolRegistry.ts";
+import { clampPermissionMode, parsePermissionMode } from "../tools/PermissionMode.ts";
 import {
   renderTaskMindMap,
   renderTaskMindMapNode,
@@ -239,6 +240,7 @@ function cronCommands(runtime: CommandRuntime): RuntimeCommand[] {
           status: "string",
         },
       },
+      permissionForInput: ({ input }) => cronDefinitionPermission(input),
       run: ({ args, input }) => runtime.createCronJob({
         name: stringInput(input.name, args[0], "name"),
         schedule: stringInput(input.schedule, args[1], "schedule"),
@@ -278,6 +280,7 @@ function cronCommands(runtime: CommandRuntime): RuntimeCommand[] {
           status: "string",
         },
       },
+      permissionForInput: ({ input }) => cronDefinitionPermission(input),
       run: ({ args, input }) => runtime.updateCronJob(stringInput(input.id, args[0], "id"), {
         name: stringOptional(input.name),
         schedule: stringOptional(input.schedule),
@@ -633,9 +636,16 @@ function graphCommands(runtime: CommandRuntime): RuntimeCommand[] {
           skillHints: "array",
           timeoutMs: "number",
           maxRetries: "number",
+          maxResultChars: "number",
+          maxMemoryCandidates: "number",
+          expandable: "boolean",
+          expansionGoal: "string",
+          maxExpansionDepth: "number",
+          permissionMode: "string",
           metadata: "object",
         },
       },
+      permissionForInput: ({ input }) => graphMutationPermission(input),
       run: ({ args, input }) => runtime.addTaskMindMapNode({
         runId: stringInput(input.runId, args[0], "runId"),
         parent: stringInput(input.parent, args[1], "parent"),
@@ -679,9 +689,18 @@ function graphCommands(runtime: CommandRuntime): RuntimeCommand[] {
           acceptanceCriteria: "array",
           toolHints: "array",
           skillHints: "array",
+          timeoutMs: "number",
+          maxRetries: "number",
+          maxResultChars: "number",
+          maxMemoryCandidates: "number",
+          expandable: "boolean",
+          expansionGoal: "string",
+          maxExpansionDepth: "number",
+          permissionMode: "string",
           metadata: "object",
         },
       },
+      permissionForInput: ({ input }) => graphMutationPermission(input),
       run: ({ args, input }) => runtime.addTaskMindMapNodeBefore(siblingInput(input, args)),
       renderText: (result) => renderTaskMindMapNode((result as { node: Parameters<typeof renderTaskMindMapNode>[0] }).node),
     },
@@ -704,9 +723,18 @@ function graphCommands(runtime: CommandRuntime): RuntimeCommand[] {
           acceptanceCriteria: "array",
           toolHints: "array",
           skillHints: "array",
+          timeoutMs: "number",
+          maxRetries: "number",
+          maxResultChars: "number",
+          maxMemoryCandidates: "number",
+          expandable: "boolean",
+          expansionGoal: "string",
+          maxExpansionDepth: "number",
+          permissionMode: "string",
           metadata: "object",
         },
       },
+      permissionForInput: ({ input }) => graphMutationPermission(input),
       run: ({ args, input }) => runtime.addTaskMindMapNodeAfter(siblingInput(input, args)),
       renderText: (result) => renderTaskMindMapNode((result as { node: Parameters<typeof renderTaskMindMapNode>[0] }).node),
     },
@@ -732,10 +760,16 @@ function graphCommands(runtime: CommandRuntime): RuntimeCommand[] {
           skillHints: "array",
           timeoutMs: "number",
           maxRetries: "number",
+          maxResultChars: "number",
+          maxMemoryCandidates: "number",
+          expandable: "boolean",
+          expansionGoal: "string",
+          maxExpansionDepth: "number",
           reopenBlocked: "boolean",
           metadata: "object",
         },
       },
+      permissionForInput: ({ input }) => graphMutationPermission(input),
       run: ({ args, input }) => runtime.updateTaskMindMapNode({
         runId: stringInput(input.runId, args[0], "runId"),
         selector: stringInput(input.selector, args[1], "selector"),
@@ -1344,8 +1378,50 @@ function permissionRank(permission: CommandPermission): number {
   return 0;
 }
 
+export function maxPermissionModeForCommandPermission(permission: CommandPermission): PermissionMode {
+  if (permission === "danger") return "danger_full_access";
+  if (permission === "write") return "workspace_write";
+  return "read_only";
+}
+
+export function assertPermissionModeWithinCommandPermission(
+  requested: unknown,
+  maxPermission: CommandPermission,
+): PermissionMode {
+  const requestedMode = parsePermissionMode(requested, "workspace_write");
+  const allowedMode = maxPermissionModeForCommandPermission(maxPermission);
+  const clamped = clampPermissionMode(requestedMode, allowedMode);
+  if (clamped === requestedMode) return requestedMode;
+  const requiredPermission = commandPermissionForPermissionMode(requestedMode);
+  throw new CommandPermissionError(`permissionMode ${requestedMode} requires ${requiredPermission} permission; caller is limited to ${maxPermission}.`);
+}
+
+function commandPermissionForPermissionMode(mode: PermissionMode): CommandPermission {
+  if (mode === "danger_full_access") return "danger";
+  if (mode === "workspace_write") return "write";
+  return "read";
+}
+
+function permissionModeNeedsDanger(value: unknown): boolean {
+  return value !== undefined && parsePermissionMode(value, "workspace_write") === "danger_full_access";
+}
+
+function metadataPermissionModeNeedsDanger(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const metadata = value as Record<string, unknown>;
+  return permissionModeNeedsDanger(metadata.permissionMode) || permissionModeNeedsDanger(metadata.runPermissionMode);
+}
+
 function wantsDeepProviderCheck(input: Record<string, unknown>, args: string[]): boolean {
   return input.deep === true || args.includes("--deep") || args.includes("deep");
+}
+
+function cronDefinitionPermission(input: Record<string, unknown>): CommandPermission {
+  return permissionModeNeedsDanger(input.permissionMode) ? "danger" : "write";
+}
+
+function graphMutationPermission(input: Record<string, unknown>): CommandPermission {
+  return permissionModeNeedsDanger(input.permissionMode) || metadataPermissionModeNeedsDanger(input.metadata) ? "danger" : "write";
 }
 
 function roleDefinitionPermission(input: Record<string, unknown>): CommandPermission {

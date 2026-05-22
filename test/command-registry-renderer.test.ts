@@ -124,6 +124,42 @@ try {
   }, { maxPermission: "read" });
   assert.equal(toolsListReadToken.ok, true);
 
+  const gatewayDangerChatWrite = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "chat-danger-write-1",
+    method: "chat.send",
+    params: { message: "hi", permissionMode: "danger_full_access" },
+  }, { maxPermission: "write" });
+  assert.equal(gatewayDangerChatWrite.ok, false);
+  assert.match(String(gatewayDangerChatWrite.error?.message || ""), /requires danger permission/);
+
+  await assert.rejects(
+    runtime.runCommand("cron.create", {
+      input: {
+        name: "danger cron",
+        schedule: "@hourly",
+        message: "hi",
+        permissionMode: "danger_full_access",
+      },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
+  const gatewayDangerCronWrite = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "cron-danger-write-1",
+    method: "cron.create",
+    params: {
+      name: "danger cron gateway",
+      schedule: "@hourly",
+      message: "hi",
+      permissionMode: "danger_full_access",
+    },
+  }, { maxPermission: "write" });
+  assert.equal(gatewayDangerCronWrite.ok, false);
+  assert.match(String(gatewayDangerCronWrite.error?.message || ""), /requires danger permission/);
+
   const toolRun = await dispatchGatewayRequest(runtime as never, {
     type: "request",
     id: "tool-1",

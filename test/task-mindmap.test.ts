@@ -176,6 +176,51 @@ try {
   }, { maxPermission: "read" });
   assert.equal(gatewayWriteDenied.ok, false);
   assert.match(String(gatewayWriteDenied.error?.message || ""), /requires write permission/);
+
+  await assert.rejects(
+    runtime.runCommand("graph.add", {
+      input: {
+        runId: run.id,
+        parent: "architecture",
+        key: "danger_denied",
+        role: "developer",
+        title: "Danger denied",
+        input: "Should not be added with elevated permission.",
+        permissionMode: "danger_full_access",
+      },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
+  await assert.rejects(
+    runtime.runCommand("graph.update", {
+      input: {
+        runId: run.id,
+        selector: "api_slice",
+        metadata: {
+          permissionMode: "danger_full_access",
+          runPermissionMode: "danger_full_access",
+        },
+      },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
+  const adminDangerAdd = await runtime.runCommand("graph.add", {
+    input: {
+      runId: run.id,
+      parent: "architecture",
+      key: "admin_danger_clamped",
+      role: "developer",
+      title: "Admin danger clamped",
+      input: "Admin can request danger, but this run started as workspace_write.",
+      permissionMode: "danger_full_access",
+    },
+  }) as { node: { metadata: { permissionMode?: string; runPermissionMode?: string } } };
+  assert.equal(adminDangerAdd.node.metadata.permissionMode, "workspace_write");
+  assert.equal(adminDangerAdd.node.metadata.runPermissionMode, "workspace_write");
 } finally {
   await runtime.shutdown();
 }

@@ -1,6 +1,7 @@
 import type { Metadata, Task, TaskDependency, TaskStatus } from "../types.ts";
 import type { TaskStore } from "./TaskStore.ts";
 import { DEFAULT_ROLE_TASK_TIMEOUT_MS, MAX_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
+import { graphTaskPermissionMode } from "./TaskPermissions.ts";
 
 export interface TaskMindMapNode {
   id: string;
@@ -338,15 +339,29 @@ export function addTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNodeAdd
   const dependencyKeys = input.dependsOn?.length ? input.dependsOn : [parent.key];
   const dependencyTasks = dependencyKeys.map((dependency) => resolveNode(map, dependency));
   assertNoDependencyCycle(map, key, dependencyTasks.map((dependency) => dependency.key));
+  const sanitizedMetadata = sanitizeGraphMutationMetadata(input.metadata);
   const inheritedPermissionMode = typeof parent.metadata.permissionMode === "string" ? parent.metadata.permissionMode : "";
-  const permissionMode = input.permissionMode || inheritedPermissionMode;
+  const runPermissionMode = typeof parent.metadata.runPermissionMode === "string"
+    ? parent.metadata.runPermissionMode
+    : inheritedPermissionMode || "workspace_write";
+  const role = normalizeRole(input.role);
+  const title = input.title.trim();
+  const taskInput = input.input.trim();
+  const permissionMode = graphTaskPermissionMode({
+    role,
+    title,
+    input: taskInput,
+    acceptanceCriteria: input.acceptanceCriteria,
+    toolHints: input.toolHints,
+    metadata: sanitizedMetadata,
+  }, input.permissionMode || inheritedPermissionMode, runPermissionMode);
   const inheritedTimeoutMs = normalizeRoleTaskTimeoutMs(parentTask.metadata.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS);
   const metadata: Metadata = {
     ...inheritedGraphMetadata(parentTask.metadata),
-    ...(input.metadata || {}),
+    ...sanitizedMetadata,
     graphKey: key,
     graphId: parent.metadata.graphId || "",
-    graphRole: normalizeRole(input.role),
+    graphRole: role,
     parentKey: parent.key,
     acceptanceCriteria: stringList(input.acceptanceCriteria, ["The task produces a useful result for this branch."]),
     toolHints: stringList(input.toolHints, []),
@@ -364,13 +379,14 @@ export function addTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNodeAdd
       at: new Date().toISOString(),
       parentKey: parent.key,
     },
+    permissionMode,
+    runPermissionMode,
   };
-  if (permissionMode) metadata.permissionMode = permissionMode;
 
   const created = taskStore.createTask({
-    role: normalizeRole(input.role),
-    title: input.title.trim(),
-    input: input.input.trim(),
+    role,
+    title,
+    input: taskInput,
     parentTaskId: parent.id,
     maxRetries: normalizeRetries(input.maxRetries, 1),
     metadata,
@@ -465,9 +481,10 @@ export function updateTaskMindMapNode(taskStore: TaskStore, input: TaskGraphNode
   if (!title) throw new Error("title must not be empty");
   if (!taskInput) throw new Error("input must not be empty");
 
+  const sanitizedMetadata = sanitizeGraphMutationMetadata(input.metadata);
   const metadata = {
     ...task.metadata,
-    ...(input.metadata || {}),
+    ...sanitizedMetadata,
     graphRole: role,
     acceptanceCriteria: input.acceptanceCriteria === undefined
       ? task.metadata.acceptanceCriteria
@@ -741,11 +758,18 @@ function uniqueChildKey(parentKey: string, existingKeys: Set<string>): string {
 
 function inheritedGraphMetadata(metadata: Metadata): Metadata {
   const inherited: Metadata = {};
-  for (const key of ["runId", "sessionId", "source", "permissionMode", "planGoal", "deliveryLevel", "planningMode", "failureStrategy", "exitCriteria", "maxWaves"]) {
+  for (const key of ["runId", "sessionId", "source", "permissionMode", "runPermissionMode", "planGoal", "deliveryLevel", "planningMode", "failureStrategy", "exitCriteria", "maxWaves"]) {
     const value = metadata[key];
     if (value !== undefined) inherited[key] = value;
   }
   return inherited;
+}
+
+function sanitizeGraphMutationMetadata(metadata: Metadata | undefined): Metadata {
+  const sanitized = { ...(metadata || {}) };
+  delete sanitized.permissionMode;
+  delete sanitized.runPermissionMode;
+  return sanitized;
 }
 
 function nextWave(parent: TaskMindMapNode): number {

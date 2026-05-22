@@ -6,9 +6,13 @@ let latestEventsLimit = 0;
 let diagnosticsRepair: boolean | null = null;
 let genericCommandMaxPermission = "";
 let settingsUpdateInput: Record<string, unknown> | undefined;
+let latestChatContext: { sessionId?: string; source?: string; permissionMode?: unknown } | null = null;
 
 const runtime = {
-  handleUserMessage: async () => ({ content: "ok", delegatedTo: [] }),
+  handleUserMessage: async (_message: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}) => {
+    latestChatContext = context;
+    return { content: "ok", delegatedTo: [] };
+  },
   taskStore: {
     getLatestEvents: ({ limit }: { limit: number }) => {
       latestEventsLimit = limit;
@@ -192,6 +196,30 @@ try {
     body: JSON.stringify({ message: "hi" }),
   });
   assert.equal(writeScopedWrite.status, 200);
+  assert.equal(latestChatContext?.permissionMode, "workspace_write");
+
+  const writeScopedDangerChat = await fetch(`${server.url}/chat`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "write-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ message: "hi", permissionMode: "danger_full_access" }),
+  });
+  assert.equal(writeScopedDangerChat.status, 403);
+
+  const adminDangerChat = await fetch(`${server.url}/chat`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-emily-token": "test-token",
+      origin: server.url,
+    },
+    body: JSON.stringify({ message: "hi", permissionMode: "danger_full_access" }),
+  });
+  assert.equal(adminDangerChat.status, 200);
+  assert.equal(latestChatContext?.permissionMode, "danger_full_access");
 
   const unauthorized = await fetch(`${server.url}/chat`, {
     method: "POST",

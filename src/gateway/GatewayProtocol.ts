@@ -1,5 +1,4 @@
-import { parsePermissionMode } from "../tools/PermissionMode.ts";
-import type { CommandPermission } from "../commands/CommandRegistry.ts";
+import { assertPermissionModeWithinCommandPermission, type CommandPermission } from "../commands/CommandRegistry.ts";
 import type { Metadata, ToolPermission } from "../types.ts";
 
 export interface GatewayRequest {
@@ -173,7 +172,7 @@ export async function dispatchGatewayRequest(
     const params = request.params || {};
     const maxPermission = options.maxPermission || "danger";
     assertGatewayMethodPermission(request.method, params, maxPermission);
-    const result = await dispatch(scopeRuntime(runtime, maxPermission), request.method, params);
+    const result = await dispatch(scopeRuntime(runtime, maxPermission), request.method, params, maxPermission);
     return { type: "response", id: request.id, ok: true, result };
   } catch (error) {
     return {
@@ -287,13 +286,13 @@ function permissionRank(permission: CommandPermission): number {
   return 0;
 }
 
-async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: Record<string, unknown>): Promise<unknown> {
+async function dispatch(runtime: GatewayRuntime, method: GatewayMethod, params: Record<string, unknown>, maxPermission: CommandPermission): Promise<unknown> {
   switch (method) {
     case "chat.send":
       return runtime.handleUserMessage(String(params.message || ""), {
         sessionId: typeof params.sessionId === "string" ? params.sessionId : "gateway",
         source: typeof params.source === "string" ? params.source : "gateway",
-        permissionMode: parsePermissionMode(params.permissionMode),
+        permissionMode: assertPermissionModeWithinCommandPermission(params.permissionMode, maxPermission),
       });
     case "sessions.list":
       return runtime.runCommand("session.list", {
