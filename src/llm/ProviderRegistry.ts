@@ -5,16 +5,33 @@ import { EchoModelProvider } from "./EchoModelProvider.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealth } from "./ModelProvider.ts";
 import { OllamaModelProvider } from "./OllamaModelProvider.ts";
 import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
+import { CodexModelProvider, codexResponsesUrl } from "./CodexModelProvider.ts";
+import { readCodexAuthCredentials } from "./CodexAuth.ts";
 import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
+import {
+  DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+  providerTimeoutMs,
+} from "./ProviderTiming.ts";
 import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 import type { RoleDefinition } from "../types.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_SECONDS, MAX_ROLE_TASK_TIMEOUT_SECONDS } from "../runtime/RoleTaskTimeout.ts";
 
-interface ProviderFile {
+export interface RuntimeSettings {
   defaultProviderId: string;
   fallbackMode?: ProviderFallbackMode;
   toolCallTimeoutSeconds: number;
+  providerTimeoutSeconds: number;
   agents: AgentRuntimeConfig;
   providers: ProviderConfig[];
+}
+
+export interface RuntimeSettingsUpdate {
+  defaultProviderId?: unknown;
+  fallbackMode?: unknown;
+  toolCallTimeoutSeconds?: unknown;
+  providerTimeoutSeconds?: unknown;
+  agents?: unknown;
+  providers?: unknown;
 }
 
 export const DEFAULT_TOOL_CALL_TIMEOUT_SECONDS = 3600;
@@ -26,6 +43,7 @@ export interface AgentRuntimeConfig {
   releaseSubagentsAfterTask: boolean;
   subagentIdleTtlSeconds: number;
   plannerTaskTimeoutSeconds: number;
+  roleTaskTimeoutSeconds: number;
 }
 
 export class ProviderRegistry {
@@ -33,9 +51,10 @@ export class ProviderRegistry {
   defaultProviderId: string;
   fallbackMode: ProviderFallbackMode;
   toolCallTimeoutSeconds: number;
+  providerTimeoutSeconds: number;
   agents: AgentRuntimeConfig;
   usageStore?: ProviderUsageStore;
-  private persistedSnapshot: ProviderFile;
+  private persistedSnapshot: RuntimeSettings;
 
   static async create({
     dataDir,
@@ -54,7 +73,14 @@ export class ProviderRegistry {
   }): Promise<ProviderRegistry> {
     const persistedSnapshot = await readProviderConfig(dataDir, defaultProviderId);
     const loaded = providers
-      ? { defaultProviderId, fallbackMode, toolCallTimeoutSeconds: persistedSnapshot.toolCallTimeoutSeconds, agents: persistedSnapshot.agents, providers }
+      ? {
+          defaultProviderId,
+          fallbackMode,
+          toolCallTimeoutSeconds: persistedSnapshot.toolCallTimeoutSeconds,
+          providerTimeoutSeconds: persistedSnapshot.providerTimeoutSeconds,
+          agents: persistedSnapshot.agents,
+          providers,
+        }
       : persistedSnapshot;
     const registry = new ProviderRegistry({
       providers: loaded.providers,
@@ -82,21 +108,24 @@ export class ProviderRegistry {
     defaultProviderId?: string;
     fallbackMode?: ProviderFallbackMode;
     usageStore?: ProviderUsageStore;
-    persistedSnapshot?: ProviderFile;
+    persistedSnapshot?: RuntimeSettings;
   }) {
     this.providers = new Map(providers.map((provider) => {
-      validateProviderConfig(provider);
-      return [provider.id, cloneProviderConfig(provider)];
+      const normalized = normalizeProviderConfig(provider);
+      validateProviderConfig(normalized);
+      return [normalized.id, cloneProviderConfig(normalized)];
     }));
     this.defaultProviderId = defaultProviderId;
     this.fallbackMode = fallbackMode;
     this.toolCallTimeoutSeconds = persistedSnapshot?.toolCallTimeoutSeconds || DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
+    this.providerTimeoutSeconds = persistedSnapshot?.providerTimeoutSeconds || DEFAULT_PROVIDER_TIMEOUT_SECONDS;
     this.agents = normalizeAgentRuntimeConfig(persistedSnapshot?.agents);
     this.usageStore = usageStore;
     this.persistedSnapshot = cloneProviderFile(persistedSnapshot || {
       defaultProviderId,
       fallbackMode,
       toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
+      providerTimeoutSeconds: this.providerTimeoutSeconds,
       agents: this.agents,
       providers,
     });
@@ -162,6 +191,7 @@ export class ProviderRegistry {
     if (config.type === "echo") provider = new EchoModelProvider({ id: config.id, model: config.model || "echo-local" });
     else if (config.type === "openai") provider = new OpenAIModelProvider(config);
     else if (config.type === "ollama") provider = new OllamaModelProvider(config);
+    else if (config.type === "codex") provider = new CodexModelProvider(config);
     else throw new Error(`Unsupported provider type: ${(config as ProviderConfig).type}`);
     return new ResilientModelProvider(provider, config, { usageStore: this.usageStore });
   }
@@ -177,25 +207,28 @@ export class ProviderRegistry {
   }
 
   add(config: ProviderConfig): void {
-    validateProviderConfig(config);
-    this.providers.set(config.id, cloneProviderConfig(config));
+    const normalized = normalizeProviderConfig(config);
+    validateProviderConfig(normalized);
+    this.providers.set(normalized.id, cloneProviderConfig(normalized));
   }
 
   enable(providerId: string): ProviderConfig {
     const config = this.getConfigIncludingDisabled(providerId);
     config.enabled = true;
-    validateProviderConfig(config);
-    this.providers.set(providerId, cloneProviderConfig(config));
-    return cloneProviderConfig(config);
+    const normalized = normalizeProviderConfig(config);
+    validateProviderConfig(normalized);
+    this.providers.set(providerId, cloneProviderConfig(normalized));
+    return cloneProviderConfig(normalized);
   }
 
   disable(providerId: string, { referencedBy = [] }: { referencedBy?: string[] } = {}): ProviderConfig {
     this.assertProviderCanBeRemovedOrDisabled(providerId, referencedBy, "disable");
     const config = this.getConfigIncludingDisabled(providerId);
     config.enabled = false;
-    validateProviderConfig(config);
-    this.providers.set(providerId, cloneProviderConfig(config));
-    return cloneProviderConfig(config);
+    const normalized = normalizeProviderConfig(config);
+    validateProviderConfig(normalized);
+    this.providers.set(providerId, cloneProviderConfig(normalized));
+    return cloneProviderConfig(normalized);
   }
 
   remove(providerId: string, { referencedBy = [] }: { referencedBy?: string[] } = {}): ProviderConfig {
@@ -230,24 +263,69 @@ export class ProviderRegistry {
     });
   }
 
-  private toProviderFile(): ProviderFile {
+  getSettings(): RuntimeSettings {
+    return cloneProviderFile(this.toProviderFile());
+  }
+
+  updateSettings(input: RuntimeSettingsUpdate = {}): RuntimeSettings {
+    const next = this.toProviderFile();
+    if (Object.prototype.hasOwnProperty.call(input, "defaultProviderId")) {
+      next.defaultProviderId = requiredConfigString(input.defaultProviderId, "defaultProviderId");
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "fallbackMode")) {
+      next.fallbackMode = parseFallbackMode(input.fallbackMode);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "toolCallTimeoutSeconds")) {
+      next.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(input.toolCallTimeoutSeconds);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "providerTimeoutSeconds")) {
+      next.providerTimeoutSeconds = normalizeProviderTimeoutSeconds(input.providerTimeoutSeconds);
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "agents")) {
+      const agents = input.agents && typeof input.agents === "object" && !Array.isArray(input.agents)
+        ? input.agents as Partial<AgentRuntimeConfig>
+        : {};
+      next.agents = normalizeAgentRuntimeConfig({ ...next.agents, ...agents });
+    }
+    if (Object.prototype.hasOwnProperty.call(input, "providers")) {
+      if (!Array.isArray(input.providers)) throw new Error("Settings providers must be an array.");
+      next.providers = input.providers.map((provider) => {
+        if (!provider || typeof provider !== "object" || Array.isArray(provider)) {
+          throw new Error("Settings providers must contain provider objects.");
+        }
+        const normalized = normalizeProviderConfig(provider as ProviderConfig);
+        validateProviderConfig(normalized);
+        return cloneProviderConfig(normalized);
+      });
+    }
+    if (!next.providers.some((provider) => provider.id === next.defaultProviderId)) {
+      throw new Error(`Default provider is not configured: ${next.defaultProviderId}`);
+    }
+    this.applyProviderFile(next);
+    return this.getSettings();
+  }
+
+  private toProviderFile(): RuntimeSettings {
     return {
       defaultProviderId: this.defaultProviderId,
       fallbackMode: this.fallbackMode,
       toolCallTimeoutSeconds: this.toolCallTimeoutSeconds,
+      providerTimeoutSeconds: this.providerTimeoutSeconds,
       agents: this.agents,
       providers: this.list(),
     };
   }
 
-  private applyProviderFile(file: ProviderFile): void {
+  private applyProviderFile(file: RuntimeSettings): void {
     this.defaultProviderId = file.defaultProviderId;
     this.fallbackMode = file.fallbackMode || "strict";
     this.toolCallTimeoutSeconds = normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds);
+    this.providerTimeoutSeconds = normalizeProviderTimeoutSeconds(file.providerTimeoutSeconds);
     this.agents = normalizeAgentRuntimeConfig(file.agents);
     this.providers = new Map(file.providers.map((provider) => {
-      validateProviderConfig(provider);
-      return [provider.id, cloneProviderConfig(provider)];
+      const normalized = normalizeProviderConfig(provider);
+      validateProviderConfig(normalized);
+      return [normalized.id, cloneProviderConfig(normalized)];
     }));
   }
 
@@ -257,6 +335,7 @@ export class ProviderRegistry {
       model: overrides.model || config.model,
       config: {
         ...(config.config || {}),
+        timeoutSeconds: config.config?.timeoutSeconds ?? this.providerTimeoutSeconds,
         ...(typeof overrides.temperature === "number" ? { temperature: overrides.temperature } : {}),
       },
     };
@@ -288,6 +367,10 @@ export class ProviderRegistry {
       return this.checkOllamaProvider(config, { deep });
     }
 
+    if (config.type === "codex") {
+      return this.checkCodexProvider(config, { deep });
+    }
+
     return { id: config.id, type: config.type, model: config.model || "", ok: false, reason: "Unsupported provider type", deepChecked: false };
   }
 
@@ -310,7 +393,7 @@ export class ProviderRegistry {
         headers: {
           authorization: `Bearer ${process.env[apiKeyEnv]}`,
         },
-        timeoutMs: config.config?.timeoutMs || 60000,
+        timeoutMs: providerTimeoutMs(config, this.providerTimeoutSeconds),
       });
       return {
         id: config.id,
@@ -341,7 +424,7 @@ export class ProviderRegistry {
     try {
       const baseUrl = config.config?.baseUrl || "http://127.0.0.1:11434";
       const response = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/api/tags`, {
-        timeoutMs: config.config?.timeoutMs || 60000,
+        timeoutMs: providerTimeoutMs(config, this.providerTimeoutSeconds),
       });
       return {
         id: config.id,
@@ -349,6 +432,71 @@ export class ProviderRegistry {
         model: config.model || "",
         ok: response.ok,
         reason: response.ok ? undefined : `Ollama responded ${response.status}`,
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    } catch (error) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+  }
+
+  private async checkCodexProvider(config: ProviderConfig, { deep }: { deep: boolean }): Promise<ProviderHealth> {
+    let credentials: Awaited<ReturnType<typeof readCodexAuthCredentials>>;
+    try {
+      credentials = await readCodexAuthCredentials(config.config?.authJsonPath, config.id);
+    } catch (error) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        deepChecked: false,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+
+    if (!deep) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: true,
+        deepChecked: false,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+
+    try {
+      const response = await fetchWithTimeout(codexResponsesUrl(config.config?.baseUrl || "https://chatgpt.com/backend-api/codex"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${credentials.accessToken}`,
+          "ChatGPT-Account-ID": credentials.accountId,
+          originator: "codex_cli_rs",
+          "user-agent": "emily-agent",
+        },
+        body: JSON.stringify({
+          model: config.model || "gpt-5.5",
+          input: "Reply with the exact text: provider health ok",
+        }),
+        timeoutMs: providerTimeoutMs(config, this.providerTimeoutSeconds),
+      });
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: response.ok,
+        reason: response.ok ? undefined : `Codex provider responded ${response.status}`,
         deepChecked: true,
         circuitOpen: isProviderCircuitOpen(config.id),
       };
@@ -384,12 +532,27 @@ export function legacyProviderConfigPath(dataDir: string): string {
   return path.join(dataDir, "providers.json");
 }
 
-async function fetchWithTimeout(url: string, { headers = {}, timeoutMs }: { headers?: Record<string, string>; timeoutMs: number }): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  {
+    headers = {},
+    timeoutMs,
+    method = "GET",
+    body,
+  }: {
+    headers?: Record<string, string>;
+    timeoutMs: number;
+    method?: string;
+    body?: string;
+  },
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, {
+      method,
       headers,
+      body,
       signal: controller.signal,
     });
   } finally {
@@ -397,17 +560,18 @@ async function fetchWithTimeout(url: string, { headers = {}, timeoutMs }: { head
   }
 }
 
-async function readProviderFile(filePath: string): Promise<ProviderFile | null> {
+async function readProviderFile(filePath: string): Promise<RuntimeSettings | null> {
   try {
     const raw = await readFile(filePath, "utf8");
-    const parsed = JSON.parse(raw) as Partial<ProviderFile>;
+    const parsed = JSON.parse(raw) as Partial<RuntimeSettings>;
     if (!Array.isArray(parsed.providers)) return null;
     return {
       defaultProviderId: parsed.defaultProviderId || "echo",
       fallbackMode: parsed.fallbackMode === "fallback" ? "fallback" : "strict",
       toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(parsed.toolCallTimeoutSeconds),
+      providerTimeoutSeconds: normalizeProviderTimeoutSeconds(parsed.providerTimeoutSeconds),
       agents: normalizeAgentRuntimeConfig(parsed.agents),
-      providers: parsed.providers,
+      providers: parsed.providers.map((provider) => normalizeProviderConfig(provider as ProviderConfig)),
     };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
@@ -415,13 +579,13 @@ async function readProviderFile(filePath: string): Promise<ProviderFile | null> 
   }
 }
 
-async function readProviderConfig(dataDir: string, defaultProviderId: string): Promise<ProviderFile> {
+async function readProviderConfig(dataDir: string, defaultProviderId: string): Promise<RuntimeSettings> {
   return await readProviderFile(providerConfigPath(dataDir))
     || await readProviderFile(legacyProviderConfigPath(dataDir))
     || defaultProviderFile(defaultProviderId);
 }
 
-async function writeProviderFileUnlocked(dataDir: string, targetPath: string, file: ProviderFile): Promise<void> {
+async function writeProviderFileUnlocked(dataDir: string, targetPath: string, file: RuntimeSettings): Promise<void> {
   const tmpPath = path.join(dataDir, `.config.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
   try {
     await writeFile(tmpPath, JSON.stringify(file, null, 2), "utf8");
@@ -437,10 +601,10 @@ function mergeProviderFiles({
   desired,
   disk,
 }: {
-  base: ProviderFile;
-  desired: ProviderFile;
-  disk: ProviderFile;
-}): ProviderFile {
+  base: RuntimeSettings;
+  desired: RuntimeSettings;
+  disk: RuntimeSettings;
+}): RuntimeSettings {
   const baseProviders = providerMap(base.providers);
   const desiredProviders = providerMap(desired.providers);
   const mergedProviders = providerMap(disk.providers);
@@ -453,6 +617,9 @@ function mergeProviderFiles({
   }
   if (desired.toolCallTimeoutSeconds !== base.toolCallTimeoutSeconds) {
     disk.toolCallTimeoutSeconds = desired.toolCallTimeoutSeconds;
+  }
+  if (desired.providerTimeoutSeconds !== base.providerTimeoutSeconds) {
+    disk.providerTimeoutSeconds = desired.providerTimeoutSeconds;
   }
   if (!sameAgentRuntimeConfig(desired.agents, base.agents)) {
     disk.agents = desired.agents;
@@ -492,10 +659,11 @@ function mergeProviderFiles({
     }
   }
 
-  const merged: ProviderFile = {
+  const merged: RuntimeSettings = {
     defaultProviderId,
     fallbackMode: disk.fallbackMode === "fallback" ? "fallback" : "strict",
     toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(disk.toolCallTimeoutSeconds ?? desired.toolCallTimeoutSeconds),
+    providerTimeoutSeconds: normalizeProviderTimeoutSeconds(disk.providerTimeoutSeconds ?? desired.providerTimeoutSeconds),
     agents: normalizeAgentRuntimeConfig(disk.agents ?? desired.agents),
     providers: [...mergedProviders.values()].map(cloneProviderConfig),
   };
@@ -524,11 +692,12 @@ function sameAgentRuntimeConfig(left: AgentRuntimeConfig, right: AgentRuntimeCon
   return stableJson(normalizeAgentRuntimeConfig(left)) === stableJson(normalizeAgentRuntimeConfig(right));
 }
 
-function cloneProviderFile(file: ProviderFile): ProviderFile {
+function cloneProviderFile(file: RuntimeSettings): RuntimeSettings {
   return {
     defaultProviderId: file.defaultProviderId || "echo",
     fallbackMode: file.fallbackMode === "fallback" ? "fallback" : "strict",
     toolCallTimeoutSeconds: normalizeToolCallTimeoutSeconds(file.toolCallTimeoutSeconds),
+    providerTimeoutSeconds: normalizeProviderTimeoutSeconds(file.providerTimeoutSeconds),
     agents: normalizeAgentRuntimeConfig(file.agents),
     providers: file.providers.map(cloneProviderConfig),
   };
@@ -583,11 +752,12 @@ async function removeLegacyProviderConfig(dataDir: string): Promise<void> {
   });
 }
 
-function defaultProviderFile(defaultProviderId: string): ProviderFile {
+function defaultProviderFile(defaultProviderId: string): RuntimeSettings {
   return {
     defaultProviderId,
     fallbackMode: "strict",
     toolCallTimeoutSeconds: DEFAULT_TOOL_CALL_TIMEOUT_SECONDS,
+    providerTimeoutSeconds: DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     agents: defaultAgentRuntimeConfig(),
     providers: [{
       id: defaultProviderId,
@@ -607,13 +777,34 @@ function defaultAgentRuntimeConfig(): AgentRuntimeConfig {
     releaseSubagentsAfterTask: true,
     subagentIdleTtlSeconds: 60,
     plannerTaskTimeoutSeconds: 600,
+    roleTaskTimeoutSeconds: DEFAULT_ROLE_TASK_TIMEOUT_SECONDS,
   };
+}
+
+function requiredConfigString(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Config ${name} must be a non-empty string.`);
+  }
+  return value.trim();
+}
+
+function parseFallbackMode(value: unknown): ProviderFallbackMode {
+  if (value === "strict" || value === "fallback") return value;
+  throw new Error("Config fallbackMode must be strict or fallback.");
 }
 
 function normalizeToolCallTimeoutSeconds(value: unknown): number {
   if (value === undefined || value === null) return DEFAULT_TOOL_CALL_TIMEOUT_SECONDS;
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 24 * 60 * 60) {
     throw new Error("Config toolCallTimeoutSeconds must be an integer between 1 and 86400.");
+  }
+  return value;
+}
+
+function normalizeProviderTimeoutSeconds(value: unknown): number {
+  if (value === undefined || value === null) return DEFAULT_PROVIDER_TIMEOUT_SECONDS;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 24 * 60 * 60) {
+    throw new Error("Config providerTimeoutSeconds must be an integer between 1 and 86400.");
   }
   return value;
 }
@@ -628,6 +819,7 @@ export function normalizeAgentRuntimeConfig(value: unknown): AgentRuntimeConfig 
     releaseSubagentsAfterTask: typeof input.releaseSubagentsAfterTask === "boolean" ? input.releaseSubagentsAfterTask : defaults.releaseSubagentsAfterTask,
     subagentIdleTtlSeconds: numberConfig(input.subagentIdleTtlSeconds, defaults.subagentIdleTtlSeconds, "agents.subagentIdleTtlSeconds", 0, 24 * 60 * 60),
     plannerTaskTimeoutSeconds: numberConfig(input.plannerTaskTimeoutSeconds, defaults.plannerTaskTimeoutSeconds, "agents.plannerTaskTimeoutSeconds", 1, 24 * 60 * 60),
+    roleTaskTimeoutSeconds: numberConfig(input.roleTaskTimeoutSeconds, defaults.roleTaskTimeoutSeconds, "agents.roleTaskTimeoutSeconds", 1, MAX_ROLE_TASK_TIMEOUT_SECONDS),
   };
   return config;
 }
@@ -641,10 +833,11 @@ function numberConfig(value: unknown, fallback: number, name: string, min: numbe
 }
 
 export function validateProviderConfig(config: ProviderConfig): void {
+  config = normalizeProviderConfig(config);
   if (!/^[A-Za-z0-9._-]+$/.test(config.id || "")) {
     throw new Error("Provider id must be non-empty and contain only letters, numbers, dot, underscore, or dash.");
   }
-  if (config.type !== "echo" && config.type !== "openai" && config.type !== "ollama") {
+  if (config.type !== "echo" && config.type !== "openai" && config.type !== "ollama" && config.type !== "codex") {
     throw new Error(`Invalid provider type: ${config.type}`);
   }
   if (config.enabled !== undefined && typeof config.enabled !== "boolean") {
@@ -667,13 +860,14 @@ function validateProviderConfigObject(config: ProviderConfig): void {
   const allowedKeys = new Set([
     "baseUrl",
     "apiKeyEnv",
+    "authJsonPath",
     "temperature",
-    "timeoutMs",
+    "timeoutSeconds",
     "maxRetries",
-    "retryBaseMs",
-    "retryMaxMs",
+    "retryBaseSeconds",
+    "retryMaxSeconds",
     "circuitBreakerFailureThreshold",
-    "circuitBreakerCooldownMs",
+    "circuitBreakerCooldownSeconds",
     "strictJson",
     "costPer1KInputTokens",
     "costPer1KOutputTokens",
@@ -689,13 +883,16 @@ function validateProviderConfigObject(config: ProviderConfig): void {
   if (value.apiKeyEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(value.apiKeyEnv))) {
     throw new Error("Provider apiKeyEnv must be a valid environment variable name.");
   }
+  if (value.authJsonPath !== undefined && (typeof value.authJsonPath !== "string" || !value.authJsonPath.trim())) {
+    throw new Error("Provider authJsonPath must be a non-empty string when provided.");
+  }
   assertNumberRange(value.temperature, "temperature", 0, 2);
-  assertNumberRange(value.timeoutMs, "timeoutMs", 1, 10 * 60 * 1000);
+  assertNumberRange(value.timeoutSeconds, "timeoutSeconds", 1, 24 * 60 * 60);
   assertNumberRange(value.maxRetries, "maxRetries", 0, 5);
-  assertNumberRange(value.retryBaseMs, "retryBaseMs", 1, 60000);
-  assertNumberRange(value.retryMaxMs, "retryMaxMs", 1, 120000);
+  assertNumberRange(value.retryBaseSeconds, "retryBaseSeconds", 0.001, 60);
+  assertNumberRange(value.retryMaxSeconds, "retryMaxSeconds", 0.001, 120);
   assertNumberRange(value.circuitBreakerFailureThreshold, "circuitBreakerFailureThreshold", 1, 100);
-  assertNumberRange(value.circuitBreakerCooldownMs, "circuitBreakerCooldownMs", 1000, 60 * 60 * 1000);
+  assertNumberRange(value.circuitBreakerCooldownSeconds, "circuitBreakerCooldownSeconds", 1, 60 * 60);
   if (value.strictJson !== undefined && typeof value.strictJson !== "boolean") {
     throw new Error("Provider strictJson must be a boolean when provided.");
   }
@@ -733,10 +930,32 @@ function hasUnsafeSecretField(config: Record<string, unknown>): boolean {
   return Object.keys(config).some((key) => /^(apiKey|authorization|token|secret)$/i.test(key));
 }
 
-function cloneProviderConfig(config: ProviderConfig): ProviderConfig {
-  return {
+function normalizeProviderConfig(config: ProviderConfig): ProviderConfig {
+  const next: ProviderConfig = {
     ...config,
     config: config.config ? { ...config.config } : undefined,
+  };
+  if (!next.config) return next;
+  const value = next.config as ProviderConfig["config"] & Record<string, unknown>;
+  migrateMillisecondsConfig(value, "timeoutMs", "timeoutSeconds");
+  migrateMillisecondsConfig(value, "retryBaseMs", "retryBaseSeconds");
+  migrateMillisecondsConfig(value, "retryMaxMs", "retryMaxSeconds");
+  migrateMillisecondsConfig(value, "circuitBreakerCooldownMs", "circuitBreakerCooldownSeconds");
+  return next;
+}
+
+function migrateMillisecondsConfig(config: Record<string, unknown>, legacyKey: string, secondsKey: string): void {
+  if (config[secondsKey] === undefined && typeof config[legacyKey] === "number" && Number.isFinite(config[legacyKey])) {
+    config[secondsKey] = config[legacyKey] / 1000;
+  }
+  delete config[legacyKey];
+}
+
+function cloneProviderConfig(config: ProviderConfig): ProviderConfig {
+  const normalized = normalizeProviderConfig(config);
+  return {
+    ...normalized,
+    config: normalized.config ? { ...normalized.config } : undefined,
   };
 }
 

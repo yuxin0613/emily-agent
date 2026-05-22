@@ -19,7 +19,7 @@ const provider: ProviderConfig = {
   config: {
     baseUrl: process.env.EMILY_PROVIDER_BASE_URL,
     apiKeyEnv,
-    timeoutMs: Number(process.env.EMILY_PROVIDER_TIMEOUT_MS || 15000),
+    timeoutSeconds: Number(process.env.EMILY_PROVIDER_TIMEOUT_SECONDS || 15),
     strictJson: false,
   },
 };

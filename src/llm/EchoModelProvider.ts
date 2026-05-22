@@ -25,6 +25,24 @@ export class EchoModelProvider implements ModelProvider {
           tasks: [],
         }));
       }
+      const researchPatch = /kind:\s*research_comparison|kind:\s*research/i.test(prompt);
+      const leafKey = researchPatch ? "research_slice" : "implementation";
+      const leafRole = researchPatch ? "researcher" : "developer";
+      const leafTitle = researchPatch ? "research slice" : "implementation slice";
+      const leafInput = researchPatch
+        ? "Research the first concrete evidence-gathering or synthesis slice needed to satisfy the comparison exit criteria. Return remaining research slices as next actions."
+        : "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.";
+      const leafAcceptance = researchPatch
+        ? [
+            "A concrete research slice or evidence plan is produced.",
+            "The result states what remains for later rolling waves.",
+          ]
+        : [
+            "A concrete implementation slice or precise executable design is produced.",
+            "The result states what remains for later rolling waves.",
+          ];
+      const leafTools = researchPatch ? ["read_file"] : ["read_file", "write_file", "run_tests"];
+      const leafSkills = researchPatch ? ["research", "synthesis"] : ["coding", "implementation"];
       return this.result(JSON.stringify({
         reason: "Echo adaptive graph patch from the completed parent task.",
         parentKey,
@@ -36,12 +54,12 @@ export class EchoModelProvider implements ModelProvider {
             key: "verification",
             role: "reviewer",
             title: "verification slice",
-            input: "Verify the implementation slice against the delivery exit criteria and return pass/fail/needs_user_input.",
-            parentKey: "implementation",
-            dependsOn: ["implementation"],
+            input: "Verify the leaf slice against the delivery exit criteria and return pass/fail/needs_user_input.",
+            parentKey: leafKey,
+            dependsOn: [leafKey],
             dependencyType: "finished",
             acceptanceCriteria: [
-              "The implementation result is checked against the current exit criteria.",
+              "The leaf result is checked against the current exit criteria.",
               "The verdict is explicit and actionable.",
             ],
             toolHints: [],
@@ -56,19 +74,16 @@ export class EchoModelProvider implements ModelProvider {
             maxExpansionDepth: 0,
           },
           {
-            key: "implementation",
-            role: "developer",
-            title: "implementation slice",
-            input: "Implement or specify the first concrete slice needed to satisfy the current exit criteria. Use the completed parent task result as context and return remaining work as next actions.",
+            key: leafKey,
+            role: leafRole,
+            title: leafTitle,
+            input: leafInput,
             parentKey,
             dependsOn: [parentKey],
             dependencyType: "success",
-            acceptanceCriteria: [
-              "A concrete implementation slice or precise executable design is produced.",
-              "The result states what remains for later rolling waves.",
-            ],
-            toolHints: ["read_file", "write_file", "run_tests"],
-            skillHints: ["coding", "implementation"],
+            acceptanceCriteria: leafAcceptance,
+            toolHints: leafTools,
+            skillHints: leafSkills,
             timeoutMs: 30000,
             maxRetries: 1,
             maxResultChars: 12000,
@@ -83,6 +98,44 @@ export class EchoModelProvider implements ModelProvider {
     }
 
     if (agent === "planner") {
+      if (/NEEDS_WEB_PLAN_CLARIFICATION/.test(prompt)) {
+        return this.result(JSON.stringify({
+          goal: "Clarification requested for web research despite supplied sources.",
+          deliveryLevel: "poc",
+          exitCriteria: ["The web research sources are gathered before comparison."],
+          planningMode: "rolling",
+          maxWaves: 1,
+          failureStrategy: "block_dependents",
+          tasks: [{
+            key: "scope",
+            role: "researcher",
+            title: "web research clarification",
+            input: "Wait for the user to provide web source details.",
+            dependsOn: [],
+            dependencyType: "success",
+            acceptanceCriteria: ["The missing source information is available."],
+            toolHints: [],
+            skillHints: ["research"],
+            timeoutMs: 30000,
+            maxRetries: 1,
+            maxResultChars: 12000,
+            maxMemoryCandidates: 0,
+            wave: 1,
+            expandable: false,
+            expansionGoal: "",
+            maxExpansionDepth: 0,
+          }],
+          review: {
+            required: true,
+            criteria: ["The clarification answer is available."],
+          },
+          clarificationRequired: true,
+          clarificationQuestions: [
+            "无法直接访问 https://obsidian.md/，请提供 Obsidian 的功能列表或确认是否可以通过其他方式获取信息？",
+            "是否需要对 llm_wiki 的本地代码进行深入分析？请指定重点关注的功能或模块。",
+          ],
+        }));
+      }
       if (/NEEDS_PLAN_CLARIFICATION/.test(prompt)) {
         return this.result(JSON.stringify({
           goal: "Clarification required before execution.",
@@ -127,6 +180,40 @@ export class EchoModelProvider implements ModelProvider {
     }
 
     if (agent === "developer") {
+      if (/MATERIALIZATION_REPAIR_REQUEST/.test(prompt)) {
+        const files = extractRepairRequiredFiles(prompt);
+        if (files.length) {
+          return this.result(JSON.stringify({
+            toolRequests: files.map((file) => ({
+              tool: "write_file",
+              args: {
+                path: file,
+                content: repairContentForFile(file),
+              },
+            })),
+          }, null, 2));
+        }
+      }
+      if (/EMIT_WRITE_FILE_TOOL_REQUEST/.test(prompt)) {
+        return this.result(JSON.stringify({
+          toolRequests: [{
+            tool: "write_file",
+            args: {
+              path: "generated/coding-tool-request.txt",
+              content: "written by echo developer tool request\n",
+            },
+          }],
+        }, null, 2));
+      }
+      if (/EMIT_HTML_CODE_FENCE/.test(prompt)) {
+        return this.result([
+          "Here is the HTML artifact:",
+          "```html",
+          "<!doctype html>",
+          "<html><body><canvas id=\"game\"></canvas><script>window.snakeReady = true;</script></body></html>",
+          "```",
+        ].join("\n"));
+      }
       return this.result([
         "建议当前实现保持模块化：主 agent 负责会话和编排，subagent 负责具体任务，memory 通过统一接口同时写入内存、文件和向量索引。",
         "后续接真实模型时，只需要替换 ModelProvider；接真实向量库时，只需要替换 VectorMemoryLayer。",
@@ -174,6 +261,27 @@ export class EchoModelProvider implements ModelProvider {
       model: this.model,
     };
   }
+}
+
+function extractRepairRequiredFiles(prompt: string): string[] {
+  const marker = "Missing or required files:";
+  const start = prompt.indexOf(marker);
+  if (start < 0) return [];
+  const tail = prompt.slice(start + marker.length);
+  const stop = tail.search(/\n\n[A-Z][^\n]*:/);
+  const section = stop >= 0 ? tail.slice(0, stop) : tail;
+  return [...section.matchAll(/^\s*-\s+(.+\.(?:html|css|js|jsx|ts|tsx|json|md|txt))\s*$/gim)]
+    .map((match) => match[1].trim())
+    .filter((file) => !/^infer\b/i.test(file));
+}
+
+function repairContentForFile(file: string): string {
+  if (/\.html$/i.test(file)) return "<!doctype html>\n<html><body><main>materialized</main></body></html>\n";
+  if (/\.css$/i.test(file)) return "body { font-family: system-ui, sans-serif; }\n";
+  if (/\.js$/i.test(file)) return "window.materialized = true;\n";
+  if (/\.json$/i.test(file)) return "{\n  \"materialized\": true\n}\n";
+  if (/README\.md$/i.test(file) || /\.md$/i.test(file)) return "# Materialized Artifact\n\nGenerated by materialization repair.\n";
+  return `materialized ${file}\n`;
 }
 
 function extractUserInput(prompt: string): string {

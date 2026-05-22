@@ -1,4 +1,4 @@
-import type { MemoryRecallResult, Task } from "../types.ts";
+import type { MemoryRecallResult, Metadata, Task } from "../types.ts";
 import type { ModelProvider } from "../llm/ModelProvider.ts";
 import { normalizeModelCompleteResult } from "../llm/ProviderRuntime.ts";
 import type { MemorySystem } from "../memory/MemorySystem.ts";
@@ -15,9 +15,12 @@ import { MemoryCandidatePolicy } from "../memory/MemoryCandidatePolicy.ts";
 import { createTaskGraph, createTaskGraphFromPlan } from "../tasks/TaskGraph.ts";
 import { TaskGraphExecutor, type TaskGraphPause } from "../tasks/TaskGraphExecutor.ts";
 import { taskResultSummary } from "../tasks/TaskResult.ts";
+import { ensureArtifactMaterializationPlan } from "../planning/ArtifactMaterialization.ts";
+import { ensureMinimumTaskNodePlan, requestedMinimumTaskNodes } from "../planning/MinimumTaskNodes.ts";
 import {
   createFallbackPlanSpec,
   createPlanningOnlyPlanSpec,
+  assessTaskComplexity,
   deliveryLevelQuestion,
   inferDeliveryLevel,
   parsePlanSpec,
@@ -25,6 +28,7 @@ import {
   validatePlanSpec,
   type PlanSpec,
 } from "../planning/PlanSpec.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
 
 const DEFAULT_PLANNER_TASK_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -76,6 +80,7 @@ export class MainAgent {
   hooks: LifecycleHooks | null;
   router: AgentRouter | null;
   plannerTaskTimeoutMs: number;
+  roleTaskTimeoutMs: number;
 
   constructor({
     name,
@@ -88,6 +93,7 @@ export class MainAgent {
     hooks = null,
     router = null,
     plannerTaskTimeoutMs = DEFAULT_PLANNER_TASK_TIMEOUT_MS,
+    roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS,
   }: {
     name: string;
     model: ModelProvider;
@@ -99,6 +105,7 @@ export class MainAgent {
     hooks?: LifecycleHooks | null;
     router?: AgentRouter | null;
     plannerTaskTimeoutMs?: number;
+    roleTaskTimeoutMs?: number;
   }) {
     this.name = name;
     this.model = model;
@@ -111,6 +118,7 @@ export class MainAgent {
     this.hooks = hooks;
     this.router = router;
     this.plannerTaskTimeoutMs = Math.max(1000, Math.floor(plannerTaskTimeoutMs));
+    this.roleTaskTimeoutMs = normalizeRoleTaskTimeoutMs(roleTaskTimeoutMs);
   }
 
   async handleUserMessage(input: string, context: { sessionId?: string; source?: string; permissionMode?: unknown } = {}): Promise<MainAgentResult> {
@@ -406,6 +414,7 @@ export class MainAgent {
         relevantExperiences,
         plan: delegated.plan,
         subResults,
+        reviewerVerdict,
       });
       for (const experience of relevantExperiences) {
         this.experienceStore.recordUse(experience.id);
@@ -513,7 +522,7 @@ export class MainAgent {
     const results = [];
     let reviewerVerdict: ReviewerVerdict | undefined;
 
-    const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc");
+    const planningPrompt = plannerPrompt(input, inferDeliveryLevel(input) || "poc", this.roleTaskTimeoutMs);
     const planningGraph = createTaskGraph({
       taskStore: this.taskStore,
       baseMetadata: {
@@ -525,6 +534,7 @@ export class MainAgent {
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
         permissionMode: permissionMode || "workspace_write",
+        ...runtimeWebSearchMetadata(),
       },
       spec: {
         tasks: [
@@ -573,6 +583,22 @@ export class MainAgent {
       plan = createFallbackPlanSpec(input, selectedAgents);
     }
 
+    if (plan.clarificationRequired && shouldOverridePlannerClarification(input, plan)) {
+      this.taskStore.addEvent({
+        type: "runtime.anomaly",
+        taskId: finishedPlanner.id,
+        payload: {
+          severity: "warning",
+          code: "planner_clarification_overridden",
+          message: "Planner asked for source or web-search confirmation even though the request already gave an actionable research/search instruction; fallback execution plan was used.",
+          questions: plan.clarificationQuestions,
+          runId,
+          repaired: true,
+        },
+      });
+      plan = createFallbackPlanSpec(input, selectedAgents);
+    }
+
     if (plan.clarificationRequired) {
       return {
         subResults: results,
@@ -602,7 +628,9 @@ export class MainAgent {
           permissionMode: permissionMode || "workspace_write",
           planOnly: true,
           executionState: "draft",
+          ...runtimeWebSearchMetadata(),
         },
+        roleTaskTimeoutMs: this.roleTaskTimeoutMs,
       });
       const graphId = String(Object.values(plannedTasks)[0]?.metadata.graphId || "");
       this.taskStore.refreshTaskGraphStatuses();
@@ -616,6 +644,8 @@ export class MainAgent {
       };
     }
 
+    plan = ensureMinimumTaskNodePlan(plan, input);
+    plan = ensureArtifactMaterializationPlan(plan, input);
     const executionTasks = createTaskGraphFromPlan({
       taskStore: this.taskStore,
       plan,
@@ -626,12 +656,15 @@ export class MainAgent {
         createdBy: this.name,
         planSourceTaskId: finishedPlanner.id,
         permissionMode: permissionMode || "workspace_write",
+        ...runtimeWebSearchMetadata(),
       },
+      roleTaskTimeoutMs: this.roleTaskTimeoutMs,
     });
     const executor = new TaskGraphExecutor({
       taskStore: this.taskStore,
       roleAgentManager: this.roleAgentManager,
       plan,
+      roleTaskTimeoutMs: this.roleTaskTimeoutMs,
     });
     const execution = await executor.execute(executionTasks);
     for (const task of execution.completed) {
@@ -667,6 +700,7 @@ export class MainAgent {
       if (explicitReview) {
         reviewerVerdict = parseReviewerVerdict(explicitReview.content);
       } else if (plan.review.required) {
+        const reviewInputs = results.filter((result) => result.role !== "planner");
         const reviewTask = this.taskStore.createTask({
           role: "reviewer",
           title: `reviewer: ${input.slice(0, 60)}`,
@@ -677,7 +711,7 @@ export class MainAgent {
             "Exit criteria:",
             ...plan.exitCriteria.map((item) => `- ${item}`),
             "Sub-results:",
-            ...results.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
+            ...reviewInputs.map((result) => `- ${result.role} ${result.status}: ${result.content}`),
           ].join("\n"),
           metadata: {
             sessionId,
@@ -688,9 +722,10 @@ export class MainAgent {
             graphId: execution.graphId || "",
             acceptanceCriteria: plan.review.criteria,
             permissionMode: permissionMode || "workspace_write",
+            timeoutMs: this.roleTaskTimeoutMs,
           },
         });
-        for (const result of results.filter((item) => item.role !== "planner")) {
+        for (const result of reviewInputs) {
           this.taskStore.addTaskDependency(reviewTask.id, result.taskId, "finished");
         }
         const finishedReview = await this.roleAgentManager.runTask(reviewTask);
@@ -775,6 +810,7 @@ export class MainAgent {
     relevantExperiences,
     plan,
     subResults,
+    reviewerVerdict,
   }: {
     input: string;
     runId?: string;
@@ -783,6 +819,7 @@ export class MainAgent {
     relevantExperiences: ExperienceRecallResult[];
     plan?: PlanSpec;
     subResults: Array<{ agent: string; content: string }>;
+    reviewerVerdict?: ReviewerVerdict;
   }): Promise<string> {
     const prompt = [
       `User input: ${input}`,
@@ -791,6 +828,8 @@ export class MainAgent {
       ...formatExperiences(relevantExperiences),
       "Execution plan:",
       ...(plan ? formatPlan(plan) : ["- (none)"]),
+      "Reviewer verdict:",
+      ...(reviewerVerdict ? formatReviewerVerdict(reviewerVerdict) : ["- (none)"]),
       "Sub-agent results:",
       ...subResults.map((result) => `- ${result.agent}: ${result.content}`),
       "",
@@ -805,6 +844,16 @@ export class MainAgent {
       source: sessionId ? `session:${sessionId}` : "main-agent",
       phase: "synthesize",
     });
+    if (reviewerVerdict?.verdict === "fail" && !/(未通过|失败|没有完成|未完成|不能按已完成处理)/.test(result.content)) {
+      return [
+        "这次执行未通过验证，不能按已完成处理。",
+        "",
+        result.content,
+        "",
+        "Reviewer:",
+        ...formatReviewerVerdict(reviewerVerdict),
+      ].join("\n");
+    }
     return result.content;
   }
 
@@ -911,7 +960,7 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
     return "chat";
   }
 
-  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|规划|计划|拆解|拆成|任务图|思维导图|做一个|搭建|接入|迁移|发布|提交|推送|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|plan|decompose|write|generate|analyze|summarize|search)/i.test(normalized)) {
+  if (/(?:poc|mvp|uat|production|prod|实现|开发|修复|修改|重构|调试|排查|优化|部署|安装|配置|创建|新增|删除|更新|运行|测试|检查|审查|扫描|生成|写|设计|规划|计划|拆解|拆成|任务图|思维导图|做一个|搭建|接入|迁移|发布|提交|推送|搜索|搜一下|查找|检索|联网|新闻|最新|动态|commit|push|build|implement|fix|debug|refactor|create|update|delete|run|test|review|scan|deploy|install|configure|design|plan|decompose|write|generate|analyze|summarize|search|latest|news)/i.test(normalized)) {
     return "task";
   }
   if (/(?:帮我|请你|麻烦|能不能|可以帮|需要你|我想要|我要|给我).{0,16}(?:做|写|改|查|看|跑|测|建|实现|修|设计|规划|计划|拆解|生成|分析|总结|创建|配置|部署)/.test(normalized)) {
@@ -921,7 +970,7 @@ export function classifyUserMessageIntent(input: string): "chat" | "task" {
     return "task";
   }
 
-  if (/[?？]$/.test(normalized) && !/(?:代码|文件|项目|仓库|repo|bug|接口|api|实现|修复|部署|配置|测试|报错)/i.test(normalized)) {
+  if (/[?？]$/.test(normalized) && !/(?:代码|文件|项目|仓库|repo|bug|接口|api|实现|修复|部署|配置|测试|报错|搜索|查找|联网|新闻|最新|动态|search|latest|news)/i.test(normalized)) {
     return "chat";
   }
   if ([...compact].length <= 18) return "chat";
@@ -936,8 +985,38 @@ export function isPlanningOnlyRequest(input: string): boolean {
   return /(?:不要|不用|先别|暂不|别|无需).{0,16}(?:实现|执行|开发|写代码|动手|开工|run|execute|implement|code)|(?:只|仅).{0,8}(?:规划|计划|拆解|列出)|(?:先|先帮我).{0,8}(?:规划|计划|拆解)(?!.*(?:实现|执行|开发|写代码|implement|execute))/i.test(normalized);
 }
 
+function shouldOverridePlannerClarification(input: string, plan: PlanSpec): boolean {
+  if (!plan.clarificationRequired) return false;
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind !== "research_comparison" && assessment.kind !== "research") return false;
+  if (!hasActionableResearchSource(input) && !isExplicitWebSearchRequest(input)) return false;
+  const questions = plan.clarificationQuestions.join("\n");
+  return /无法直接访问|提供.*功能列表|通过其他方式获取信息|本地代码|深入分析|当前工具限制|搜索互联网|新闻来源|允许使用.*web[_-]?search|web[_-]?search|feature list|cannot access|provide.*features|search the internet|use web[_-]?search/i.test(questions);
+}
+
+function hasActionableResearchSource(input: string): boolean {
+  return /https?:\/\/[^\s`"'<>]+/i.test(input)
+    || /(?:^|[\s`'"])(?:\/[A-Za-z0-9._-][^\s`'"]+|~\/[^\s`'"]+)/.test(input)
+    || /(?:^|[\s`'"])\.{1,2}\/[^\s`'"]+/.test(input);
+}
+
+function isExplicitWebSearchRequest(input: string): boolean {
+  return /(?:搜索|搜一下|查找|检索|联网|新闻|最新|动态|互联网|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b|\binternet\b|\bweb\b)/i.test(input);
+}
+
+function runtimeWebSearchMetadata(): Metadata {
+  const metadata: Metadata = {};
+  if (process.env.EMILY_WEB_SEARCH_PROVIDER) metadata.webSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
+  if (process.env.EMILY_WEB_SEARCH_ENDPOINT) metadata.webSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  if (process.env.EMILY_WEB_SEARCH_METHOD) metadata.webSearchMethod = process.env.EMILY_WEB_SEARCH_METHOD;
+  return metadata;
+}
+
 function isModelIdentityQuestion(input: string): boolean {
-  return /(?:现在|当前|正在|用的|使用的)?.{0,8}(?:哪个|那个|什么|啥)?.{0,6}(?:模型|model|provider)|(?:模型|model|provider).{0,8}(?:哪个|那个|什么|啥)/i.test(input);
+  const normalized = input.trim();
+  if (/(?:搜索|搜一下|查找|检索|联网|新闻|最新|动态|\bsearch\b|\blatest\b|\bnews\b|\bcurrent\b)/i.test(normalized)) return false;
+  if (!/(?:模型|model|provider)/i.test(normalized)) return false;
+  return /(?:现在|当前|正在|你|系统|主模型|使用|用的|用的是|哪个|哪一个|什么|啥).{0,20}(?:模型|model|provider)|(?:模型|model|provider).{0,20}(?:哪个|哪一个|什么|啥|版本|名称|名字|provider)/i.test(normalized);
 }
 
 function formatCurrentModelAnswer(model: ModelProvider): string {
@@ -947,7 +1026,8 @@ function formatCurrentModelAnswer(model: ModelProvider): string {
   ].join("\n");
 }
 
-function plannerPrompt(input: string, deliveryLevel: string): string {
+function plannerPrompt(input: string, deliveryLevel: string, roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS): string {
+  const assessment = assessTaskComplexity(input);
   return [
     "Create a PlanSpec JSON object for an outcome-oriented DAG.",
     "Return only JSON. Do not wrap it in markdown.",
@@ -979,7 +1059,7 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
         acceptanceCriteria: ["string"],
         toolHints: [],
         skillHints: [],
-        timeoutMs: 30000,
+        timeoutMs: roleTaskTimeoutMs,
         maxRetries: 1,
         maxResultChars: 12000,
         maxMemoryCandidates: 1,
@@ -1010,7 +1090,23 @@ function plannerPrompt(input: string, deliveryLevel: string): string {
     "- Use dependencies instead of prose ordering.",
     "- Keep the first wave small enough to execute now; use planningMode=rolling for larger goals.",
     "- Use deliveryLevel to decide exit criteria: poc, uat, production.",
+    "- Use the task assessment before choosing a decomposition. Long tasks are not only software builds; research comparisons can also be long when they require multiple evidence-gathering and synthesis nodes.",
+    "- For research_comparison, do not ask for POC/UAT/production as user-facing standards. Decompose into comparison scope, source inventory, per-subject facts, comparison matrix, synthesis, and validation.",
+    "- If the user provides a URL or local source path for research_comparison/research work, do not ask the user to paste feature lists just because a website must be fetched. Create researcher tasks with http_fetch/web_search/browser hints and let execution gather evidence.",
+    "- If the user explicitly asks to search, get news, get latest/current information, or use the internet, do not ask whether web_search is allowed. Treat that wording as the user's network-read intent and create researcher tasks with web_search hints.",
+    "- For single_long_operation, separate preparation, execution/monitoring, timeout handling, and verification only when those are real work products; do not pretend one blocking wait is many implementation nodes.",
+    "- If the user asks to create, write, generate, or save code/files to a path, include one explicit final_materialization developer leaf that depends on implementation work, names the target file path(s), requests write_file, and materializes the final artifact. Design-only or setup subtasks should not claim file creation.",
     "- task.permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when a task needs a narrower or explicit guardrail.",
+    "",
+    "Task assessment:",
+    `- kind: ${assessment.kind}`,
+    `- complexityClass: ${assessment.complexityClass}`,
+    `- longTask: ${assessment.longTask}`,
+    `- splittable: ${assessment.splittable}`,
+    `- estimatedNodes: ${assessment.estimatedNodes}`,
+    `- requestedMinimumTaskNodes: ${requestedMinimumTaskNodes(input) || "(none)"}`,
+    "- reasons:",
+    ...assessment.reasons.map((reason) => `  - ${reason}`),
     "",
     `User request: ${input}`,
   ].join("\n");
@@ -1040,7 +1136,21 @@ function formatPlan(plan: PlanSpec): string[] {
   ];
 }
 
+function formatReviewerVerdict(verdict: ReviewerVerdict): string[] {
+  return [
+    `- verdict: ${verdict.verdict}`,
+    `- confidence: ${verdict.confidence}`,
+    `- retrySuggested: ${verdict.retrySuggested}`,
+    "- reasons:",
+    ...(verdict.reasons.length ? verdict.reasons.map((reason) => `  - ${reason}`) : ["  - (none)"]),
+  ];
+}
+
 function formatPlanOnlyResponse(plan: PlanSpec, { runId, graphId }: { runId: string; graphId: string }): string {
+  const assessment = assessTaskComplexity(plan.goal);
+  const standardLabel = assessment.kind === "research_comparison" || assessment.kind === "research"
+    ? "内部深度档"
+    : "准出等级";
   const childrenByParent = new Map<string, PlanSpec["tasks"]>();
   for (const task of plan.tasks) {
     const parent = task.parentKey || "";
@@ -1057,7 +1167,7 @@ function formatPlanOnlyResponse(plan: PlanSpec, { runId, graphId }: { runId: str
     `Run: ${runId}`,
     graphId ? `Graph: ${graphId}` : "",
     `目标：${plan.goal}`,
-    `准出等级：${plan.deliveryLevel.toUpperCase()}`,
+    `${standardLabel}：${plan.deliveryLevel.toUpperCase()}`,
     `节点：${plan.tasks.length} 个，叶子任务：${leaves.length} 个`,
     "",
     "反推逻辑：先定义目标和验收结果，再拆模块，最后落到可执行叶子任务和验证节点。",
@@ -1078,6 +1188,11 @@ function unique(values: string[]): string[] {
 function legacySelectSubAgents(input: string): string[] {
   const lower = input.toLowerCase();
   const agents = ["planner"];
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind === "research_comparison" || assessment.kind === "research") {
+    agents.push("researcher");
+    return agents;
+  }
   if (/(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口)/i.test(lower)) {
     agents.push("developer");
   } else {

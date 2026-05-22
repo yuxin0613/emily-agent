@@ -3,6 +3,7 @@ import { emitKeypressEvents } from "node:readline";
 import { stdin, stdout } from "node:process";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import type { Readable, Writable } from "node:stream";
 import type { ProviderConfig, ProviderType } from "../llm/ModelProvider.ts";
 import type { ProviderRegistry } from "../llm/ProviderRegistry.ts";
@@ -193,6 +194,16 @@ const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     idSuffix: "echo",
     model: "echo-local",
     models: ["echo-local"],
+  },
+  {
+    key: "codex",
+    aliases: ["chatgpt", "subscription"],
+    label: "Codex subscription / ChatGPT login",
+    type: "codex",
+    idSuffix: "codex",
+    model: "gpt-5.5",
+    models: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2"],
+    baseUrl: "https://chatgpt.com/backend-api/codex",
   },
   {
     key: "custom",
@@ -545,7 +556,7 @@ async function selectProviderTemplate(
       rl,
       input,
       output,
-      "Provider template: openai, deepseek, dashscope/qwen, moonshot/kimi, zhipu/glm, qianfan/baidu, hunyuan/tencent, doubao, minimax, ollama, echo, or custom",
+      "Provider template: openai, codex/chatgpt, deepseek, dashscope/qwen, moonshot/kimi, zhipu/glm, qianfan/baidu, hunyuan/tencent, doubao, minimax, ollama, echo, or custom",
       "openai",
     );
     const template = resolveProviderTemplate(answer);
@@ -591,6 +602,15 @@ async function providerConfigForTemplate(
     const baseUrl = await question(rl, input, output, "Ollama base URL", defaultBaseUrlForTemplate(template));
     return { baseUrl };
   }
+  if (template.type === "codex") {
+    const authJsonPath = await question(rl, input, output, "Codex auth.json path", defaultCodexAuthJsonPath());
+    return {
+      authJsonPath,
+      baseUrl: defaultBaseUrlForTemplate(template),
+      strictJson: true,
+      maxRetries: 2,
+    };
+  }
   return undefined;
 }
 
@@ -601,7 +621,7 @@ async function selectDefaultModel(
   input: Readable,
   output: Writable,
 ): Promise<string> {
-  const fallback = template.model || defaultModelForType(template.type);
+  const fallback = await defaultModelForTemplate(template);
   if (!canUseInteractiveSelect(input, output)) {
     return question(rl, input, output, "Provider default model", fallback);
   }
@@ -768,7 +788,36 @@ function escapeRegExp(value: string): string {
 function defaultBaseUrlForTemplate(template: ProviderTemplate): string {
   if (template.baseUrl) return template.baseUrl;
   if (template.type === "ollama") return "http://127.0.0.1:11434";
+  if (template.type === "codex") return "https://chatgpt.com/backend-api/codex";
   return "https://api.openai.com/v1";
+}
+
+async function defaultModelForTemplate(template: ProviderTemplate): Promise<string> {
+  if (template.type === "codex") {
+    const configured = await readCodexConfiguredModel();
+    if (configured) return configured;
+  }
+  return template.model || defaultModelForType(template.type);
+}
+
+async function readCodexConfiguredModel(): Promise<string | null> {
+  try {
+    const raw = await readFile(path.join(codexHome(), "config.toml"), "utf8");
+    const match = raw.match(/^\s*model\s*=\s*"([^"]+)"/m);
+    return match?.[1]?.trim() || null;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") return null;
+    return null;
+  }
+}
+
+function defaultCodexAuthJsonPath(): string {
+  return path.join(codexHome(), "auth.json");
+}
+
+function codexHome(): string {
+  const configured = process.env.CODEX_HOME?.trim();
+  return configured ? path.resolve(configured) : path.join(os.homedir(), ".codex");
 }
 
 function printProviders(output: Writable, providers: ProviderConfig[]): void {
@@ -1048,11 +1097,12 @@ function isModelConfigAbortError(error: unknown): boolean {
 
 function parseProviderType(value: string): ProviderType {
   const normalized = value.trim().toLowerCase();
-  if (normalized === "openai" || normalized === "ollama" || normalized === "echo") return normalized;
+  if (normalized === "openai" || normalized === "ollama" || normalized === "echo" || normalized === "codex") return normalized;
   throw new Error(`Unsupported provider type: ${value}`);
 }
 
 function defaultModelForType(type: ProviderType): string {
+  if (type === "codex") return "gpt-5.5";
   if (type === "ollama") return "llama3.1";
   if (type === "echo") return "echo-local";
   return "gpt-4.1-mini";

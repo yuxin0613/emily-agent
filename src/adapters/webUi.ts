@@ -83,8 +83,14 @@ export function webAppHtml({ authToken = "" }: { authToken?: string } = {}): str
     .split { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 14px; }
     .form-row { display: grid; gap: 6px; margin-bottom: 10px; }
     .form-row label { font-size: 12px; color: var(--muted); }
+    .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .field-grid .form-row { margin-bottom: 0; }
+    .check-row { min-height: 34px; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+    .check-row input { width: 16px; height: 16px; }
     textarea { width: 100%; min-height: 118px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; padding: 10px; background: #fbfcfd; }
-    input.compact { height: 34px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; background: #fbfcfd; }
+    input.compact, select.compact { height: 34px; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; background: #fbfcfd; }
+    input.compact[type="number"] { min-width: 0; }
     .message { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fff; }
     .message.user { border-left: 3px solid var(--blue); }
     .message.agent { border-left: 3px solid var(--teal); }
@@ -100,6 +106,7 @@ export function webAppHtml({ authToken = "" }: { authToken?: string } = {}): str
       .brand { justify-content: center; padding: 0; }
       .nav-btn { grid-template-columns: 1fr; justify-items: center; padding: 8px 0; }
       .grid.cols-4, .grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .field-grid, .field-grid.cols-3 { grid-template-columns: 1fr; }
       .split { grid-template-columns: 1fr; }
     }
     @media (max-width: 720px) {
@@ -113,6 +120,7 @@ export function webAppHtml({ authToken = "" }: { authToken?: string } = {}): str
       .top-actions { justify-content: space-between; }
       .search { width: 100%; }
       .grid.cols-4, .grid.cols-3, .grid.cols-2 { grid-template-columns: 1fr; }
+      .field-grid, .field-grid.cols-3 { grid-template-columns: 1fr; }
       .content { padding: 12px; }
     }
   </style>
@@ -150,28 +158,36 @@ const views = [
   { id: 'chat', group: 'Workspace', label: 'Chat', icon: 'C' },
   { id: 'sessions', group: 'Workspace', label: 'Sessions', icon: 'N', countKey: 'activeSessions' },
   { id: 'timeline', group: 'Workspace', label: 'Timeline', icon: 'T' },
+  { id: 'monitor', group: 'Workspace', label: 'Monitor', icon: 'M' },
   { id: 'providers', group: 'Runtime', label: 'Providers', icon: 'P' },
   { id: 'roles', group: 'Runtime', label: 'Roles', icon: 'R' },
   { id: 'tools', group: 'Runtime', label: 'Tools', icon: 'L' },
+  { id: 'cron', group: 'Runtime', label: 'Cron', icon: 'J' },
+  { id: 'commands', group: 'Runtime', label: 'Commands', icon: 'X' },
   { id: 'skills', group: 'Knowledge', label: 'Skills', icon: 'S' },
   { id: 'candidates', group: 'Knowledge', label: 'Skill Candidates', icon: 'K', countKey: 'proposedSkillCandidates' },
   { id: 'experiences', group: 'Knowledge', label: 'Experiences', icon: 'E' },
+  { id: 'settings', group: 'System', label: 'Settings', icon: 'G' },
   { id: 'diagnostics', group: 'System', label: 'Diagnostics', icon: 'D' }
 ];
 const state = {
   view: 'dashboard',
   health: null,
+  gateway: null,
+  settings: null,
   lastRunId: '',
   sessionId: localStorage.getItem('emily.sessionId') || 'web',
   messages: [],
   events: [],
-  sessions: []
+  sessions: [],
+  timers: []
 };
 let AUTH_TOKEN = bootstrapAuthToken();
 const qs = (selector) => document.querySelector(selector);
 const api = {
   get: async (url) => request(url),
-  post: async (url, body) => request(url, { method: 'POST', headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(body || {}) })
+  post: async (url, body) => request(url, { method: 'POST', headers: authHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(body || {}) }),
+  delete: async (url) => request(url, { method: 'DELETE', headers: authHeaders() })
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -274,6 +290,7 @@ function updateNavState() {
 
 async function navigate(view, options) {
   if (!views.some((item) => item.id === view)) view = 'dashboard';
+  stopViewTimers();
   state.view = view;
   if (location.hash.replace('#', '') !== view) location.hash = view;
   qs('#page-title').textContent = views.find((item) => item.id === view).label;
@@ -289,12 +306,16 @@ async function loadView(view, options) {
     if (view === 'chat') return renderChat(content);
     if (view === 'sessions') return renderSessions(content);
     if (view === 'timeline') return renderTimeline(content);
+    if (view === 'monitor') return renderMonitor(content);
     if (view === 'providers') return renderProviders(content);
     if (view === 'roles') return renderRoles(content);
     if (view === 'tools') return renderTools(content);
+    if (view === 'cron') return renderCron(content);
+    if (view === 'commands') return renderCommands(content);
     if (view === 'skills') return renderSkills(content);
     if (view === 'candidates') return renderCandidates(content);
     if (view === 'experiences') return renderExperiences(content, options.query || '');
+    if (view === 'settings') return renderSettings(content);
     if (view === 'diagnostics') return renderDiagnostics(content);
   } catch (error) {
     content.replaceChildren(errorPanel(error));
@@ -302,8 +323,9 @@ async function loadView(view, options) {
 }
 
 async function refreshHealth() {
-  const payload = await api.get('/health');
+  const payload = await api.get('/health/detail');
   state.health = payload.runtime || {};
+  state.gateway = payload.gateway || null;
   qs('#connection-pill').textContent = 'online';
   qs('#connection-pill').className = 'pill ok';
   updateNavState();
@@ -598,6 +620,195 @@ async function renderTimeline(content) {
   if (state.lastRunId) await load();
 }
 
+async function renderMonitor(content) {
+  const interval = el('select', { className: 'compact' },
+    el('option', { value: '0' }, 'manual'),
+    el('option', { value: '5000' }, '5s'),
+    el('option', { value: '15000' }, '15s'),
+    el('option', { value: '60000' }, '60s')
+  );
+  interval.value = localStorage.getItem('emily.monitorInterval') || '5000';
+  const generatedAt = el('span', { className: 'pill' }, 'loading');
+  const body = el('div', { className: 'stack' });
+  const load = async () => {
+    await refreshHealth();
+    const [usage, providerHealth, subagents, events, cronJobs, graphs] = await Promise.all([
+      api.get('/providers/usage?limit=12').catch(() => ({ totals: {}, providers: [], recent: [] })),
+      api.get('/providers/health').catch(() => []),
+      api.get('/subagents?includeIdle=true').catch(() => []),
+      api.get('/events-snapshot?limit=80').catch(() => state.events),
+      api.get('/cron').catch(() => []),
+      api.get('/dag?activeOnly=true&limit=20').catch(() => [])
+    ]);
+    if (Array.isArray(events)) state.events = events.concat(state.events).slice(0, 80);
+    const health = state.health || {};
+    const runningSubagents = Array.isArray(subagents) ? subagents.filter((item) => item.status === 'running') : [];
+    const activeCron = Array.isArray(cronJobs) ? cronJobs.filter((job) => job.status !== 'paused') : [];
+    generatedAt.textContent = new Date().toLocaleTimeString();
+    body.replaceChildren(
+      el('div', { className: 'grid cols-4' },
+        metric('Pending Tasks', health.pendingTasks || 0, 'blue'),
+        metric('Running Tasks', health.runningTasks || 0, 'teal'),
+        metric('Subagents', runningSubagents.length + '/' + (Array.isArray(subagents) ? subagents.length : 0), runningSubagents.length ? 'amber' : 'blue'),
+        metric('Provider Calls', usage.totals && usage.totals.calls || 0, 'blue')
+      ),
+      el('div', { className: 'grid cols-2' },
+        section('Provider Health', [button('Deep Check', '', async () => {
+          const result = await api.get('/providers/health?deep=true');
+          notifyJson(result);
+          await load();
+        })], providerHealth.length ? dataTable(['Provider', 'Model', 'Status', 'Reason'], providerHealth.map((item) => [
+          codeText(item.id), item.model || '', item.ok ? statusPill('ok') : statusPill(item.disabled ? 'disabled' : 'failed'), item.reason || ''
+        ])) : el('div', { className: 'empty' }, 'No provider health')),
+        section('Usage', [], dataTable(['Provider', 'Calls', 'Success', 'Tokens', 'Cost'], (usage.providers || []).map((item) => [
+          codeText(item.providerId || item.provider || ''), String(item.calls || 0), String(item.success || 0), String(item.totalTokens || 0), Number(item.costUsd || 0).toFixed(6)
+        ])))
+      ),
+      el('div', { className: 'grid cols-2' },
+        section('Subagents', [], Array.isArray(subagents) && subagents.length ? dataTable(['Agent', 'Role', 'Status', 'Task'], subagents.map((agent) => [
+          codeText(agent.id || agent.agentId || ''), agent.role || agent.configuredRole || '', statusPill(agent.status || ''), agent.taskTitle || agent.currentTaskTitle || agent.taskId || ''
+        ])) : el('div', { className: 'empty' }, 'No subagents')),
+        section('Active Graphs', [], Array.isArray(graphs) && graphs.length ? dataTable(['Run', 'Goal', 'Nodes', 'Updated'], graphs.map((graph) => [
+          graph.runId ? codeText(graph.runId) : '', graph.goal || graph.title || '', String(graph.nodes || graph.nodeCount || ''), graph.updatedAt || graph.createdAt || ''
+        ])) : el('div', { className: 'empty' }, 'No active graphs'))
+      ),
+      el('div', { className: 'grid cols-2' },
+        section('Cron', [button('Open', '', () => navigate('cron'))], activeCron.length ? dataTable(['Name', 'Schedule', 'Status', 'Next'], activeCron.map((job) => [
+          job.name || codeText(job.id), codeText(job.schedule || ''), statusPill(job.status || ''), job.nextRunAt || ''
+        ])) : el('div', { className: 'empty' }, 'No active cron jobs')),
+        section('Recent Events', [], eventList(state.events))
+      )
+    );
+  };
+  interval.addEventListener('change', () => {
+    localStorage.setItem('emily.monitorInterval', interval.value);
+    stopViewTimers();
+    const ms = Number(interval.value || 0);
+    if (ms > 0) state.timers.push(setInterval(load, ms));
+  });
+  content.replaceChildren(
+    section('Monitor', [
+      button('Refresh', 'primary', load),
+      button('Doctor', '', async () => notifyJson(await api.get('/doctor'))),
+      button('Security', '', async () => notifyJson(await api.get('/security/audit'))),
+      interval,
+      generatedAt
+    ], el('div', { className: 'status-line' }, state.gateway ? 'gateway methods ' + state.gateway.methods : 'gateway'))
+  , body);
+  await load();
+  const ms = Number(interval.value || 0);
+  if (ms > 0) state.timers.push(setInterval(load, ms));
+}
+
+async function renderCron(content) {
+  const body = el('div', { className: 'stack' });
+  const name = el('input', { className: 'compact', placeholder: 'name' });
+  const schedule = el('input', { className: 'compact', placeholder: '@daily or 0 9 * * *' });
+  const actionType = el('select', { className: 'compact' }, el('option', { value: 'message' }, 'message'), el('option', { value: 'command' }, 'command'));
+  const message = el('textarea', { placeholder: 'message' });
+  const command = el('input', { className: 'compact', placeholder: 'maintenance.run' });
+  const args = el('input', { className: 'compact', placeholder: '["arg"]' });
+  const input = el('textarea', { placeholder: '{"key":"value"}' });
+  input.value = '{}';
+  const status = el('select', { className: 'compact' }, el('option', { value: 'active' }, 'active'), el('option', { value: 'paused' }, 'paused'));
+  const format = el('select', { className: 'compact' }, el('option', { value: 'json' }, 'json'), el('option', { value: 'text' }, 'text'));
+  const permissionMode = el('select', { className: 'compact' },
+    el('option', { value: '' }, ''),
+    el('option', { value: 'read_only' }, 'read_only'),
+    el('option', { value: 'workspace_write' }, 'workspace_write'),
+    el('option', { value: 'danger_full_access' }, 'danger_full_access')
+  );
+  const sessionId = el('input', { className: 'compact', value: 'cron', placeholder: 'session id' });
+  const load = async () => {
+    const jobs = await api.get('/cron');
+    body.replaceChildren(jobs.length ? dataTable(['Name', 'Schedule', 'Action', 'Status', 'Last Run', 'Actions'], jobs.map((job) => [
+      el('div', { className: 'stack' }, el('strong', {}, job.name || job.id), codeText(job.id)),
+      codeText(job.schedule || ''),
+      job.action && job.action.command ? codeText(job.action.command) : (job.action && job.action.message || ''),
+      statusPill(job.status || ''),
+      job.lastRunAt || '',
+      el('div', { className: 'row' },
+        button('Run', 'primary', async () => { await api.post('/cron/run', { id: job.id }); await load(); }),
+        job.status === 'paused'
+          ? button('Resume', '', async () => { await api.post('/cron/resume', { id: job.id }); await load(); })
+          : button('Pause', '', async () => { await api.post('/cron/pause', { id: job.id }); await load(); }),
+        button('Delete', 'danger', async () => {
+          if (!confirm('Delete cron job ' + job.id + '?')) return;
+          await api.delete('/cron?id=' + encodeURIComponent(job.id));
+          await load();
+        })
+      )
+    ])) : el('div', { className: 'empty' }, 'No cron jobs'));
+  };
+  const create = async () => {
+    const payload = {
+      name: name.value.trim(),
+      schedule: schedule.value.trim(),
+      status: status.value,
+      sessionId: sessionId.value.trim() || 'cron',
+      source: 'web',
+      permissionMode: permissionMode.value || undefined
+    };
+    if (actionType.value === 'command') {
+      payload.command = command.value.trim();
+      payload.args = parseJsonArray(args.value, []);
+      payload.input = parseJsonObject(input.value, {});
+      payload.format = format.value;
+    } else {
+      payload.message = message.value.trim();
+    }
+    const result = await api.post('/cron', payload);
+    notifyJson(result);
+    await load();
+  };
+  content.replaceChildren(
+    section('Create Cron', [button('Create', 'primary', create)], el('div', { className: 'stack' },
+      el('div', { className: 'field-grid cols-3' },
+        formField('Name', name),
+        formField('Schedule', schedule),
+        formField('Action', actionType),
+        formField('Status', status),
+        formField('Session', sessionId),
+        formField('Permission Mode', permissionMode)
+      ),
+      formField('Message', message),
+      el('div', { className: 'field-grid cols-3' }, formField('Command', command), formField('Args JSON', args), formField('Format', format)),
+      formField('Input JSON', input)
+    )),
+    section('Cron Jobs', [button('Refresh', '', load)], body)
+  );
+  await load();
+}
+
+async function renderCommands(content) {
+  const commands = await api.get('/commands');
+  const commandName = el('input', { className: 'compact', placeholder: 'command name' });
+  const args = el('input', { className: 'compact', placeholder: '["arg"]' });
+  const input = el('textarea', { placeholder: '{"key":"value"}' });
+  input.value = '{}';
+  const format = el('select', { className: 'compact' }, el('option', { value: 'json' }, 'json'), el('option', { value: 'text' }, 'text'));
+  const output = el('div', { className: 'stack' }, el('div', { className: 'empty' }, 'No result'));
+  const run = async () => {
+    const result = await api.post('/commands/run', {
+      name: commandName.value.trim(),
+      args: parseJsonArray(args.value, []),
+      input: parseJsonObject(input.value, {}),
+      format: format.value
+    });
+    output.replaceChildren(typeof result === 'string' ? el('pre', {}, result) : jsonBlock(result));
+  };
+  content.replaceChildren(
+    section('Run Command', [button('Run', 'primary', run)], el('div', { className: 'stack' },
+      el('div', { className: 'field-grid cols-3' }, formField('Name', commandName), formField('Args JSON', args), formField('Format', format)),
+      formField('Input JSON', input),
+      output
+    )),
+    section('Commands', [], dataTable(['Name', 'Permission', 'Description', 'Examples'], commands.map((command) => [
+      codeText(command.name), statusPill(command.permission), command.description || '', (command.inputSchema && command.inputSchema.examples || []).join(', ')
+    ])))
+  );
+}
+
 async function renderProviders(content) {
   const providers = await api.get('/providers');
   const health = await api.get('/providers/health');
@@ -720,6 +931,287 @@ async function renderExperiences(content, initialQuery) {
   await load();
 }
 
+async function renderSettings(content) {
+  const [settings, providers, roles, tools, skills] = await Promise.all([
+    api.get('/settings'),
+    api.get('/providers'),
+    api.get('/roles'),
+    api.get('/tools'),
+    api.get('/skills')
+  ]);
+  state.settings = settings;
+  const agents = settings.agents || {};
+  const defaultProvider = optionSelect(providers.map((provider) => [provider.id, provider.id]), settings.defaultProviderId || '');
+  const fallbackMode = optionSelect([['strict', 'strict'], ['fallback', 'fallback']], settings.fallbackMode || 'strict');
+  const toolTimeout = numberInput(settings.toolCallTimeoutSeconds || 3600);
+  const providerTimeout = numberInput(settings.providerTimeoutSeconds || 3600);
+  const mainAgents = numberInput(agents.mainAgents || 1);
+  const maxSubagentsPerRole = numberInput(agents.maxSubagentsPerRole || 1);
+  mainAgents.readOnly = true;
+  mainAgents.min = '1';
+  mainAgents.max = '1';
+  maxSubagentsPerRole.readOnly = true;
+  maxSubagentsPerRole.min = '1';
+  maxSubagentsPerRole.max = '1';
+  const maxConcurrentSubagents = numberInput(agents.maxConcurrentSubagents || 1);
+  const releaseSubagentsAfterTask = el('input', { type: 'checkbox', checked: agents.releaseSubagentsAfterTask !== false });
+  const subagentIdleTtlSeconds = numberInput(agents.subagentIdleTtlSeconds || 0);
+  const plannerTaskTimeoutSeconds = numberInput(agents.plannerTaskTimeoutSeconds || 600);
+  const roleTaskTimeoutSeconds = numberInput(agents.roleTaskTimeoutSeconds || 3600);
+  const saveRuntime = async () => {
+    const result = await api.post('/settings', {
+      defaultProviderId: defaultProvider.value,
+      fallbackMode: fallbackMode.value,
+      toolCallTimeoutSeconds: requiredNumber(toolTimeout, 'toolCallTimeoutSeconds'),
+      providerTimeoutSeconds: requiredNumber(providerTimeout, 'providerTimeoutSeconds'),
+      agents: {
+        mainAgents: requiredNumber(mainAgents, 'agents.mainAgents'),
+        maxSubagentsPerRole: requiredNumber(maxSubagentsPerRole, 'agents.maxSubagentsPerRole'),
+        maxConcurrentSubagents: requiredNumber(maxConcurrentSubagents, 'agents.maxConcurrentSubagents'),
+        releaseSubagentsAfterTask: releaseSubagentsAfterTask.checked,
+        subagentIdleTtlSeconds: requiredNumber(subagentIdleTtlSeconds, 'agents.subagentIdleTtlSeconds'),
+        plannerTaskTimeoutSeconds: requiredNumber(plannerTaskTimeoutSeconds, 'agents.plannerTaskTimeoutSeconds'),
+        roleTaskTimeoutSeconds: requiredNumber(roleTaskTimeoutSeconds, 'agents.roleTaskTimeoutSeconds')
+      }
+    });
+    notifyJson(result);
+    await renderSettings(content);
+  };
+  const reload = () => renderSettings(content);
+  content.replaceChildren(
+    section('Runtime Settings', [button('Save', 'primary', saveRuntime)], el('div', { className: 'field-grid cols-3' },
+      formField('Default Provider', defaultProvider),
+      formField('Fallback Mode', fallbackMode),
+      formField('Tool Timeout Seconds', toolTimeout),
+      formField('Provider Timeout Seconds', providerTimeout),
+      formField('Main Agents', mainAgents),
+      formField('Max Subagents Per Role', maxSubagentsPerRole),
+      formField('Max Concurrent Subagents', maxConcurrentSubagents),
+      formField('Release Subagents', el('label', { className: 'check-row' }, releaseSubagentsAfterTask, 'enabled')),
+      formField('Subagent Idle TTL Seconds', subagentIdleTtlSeconds),
+      formField('Planner Timeout Seconds', plannerTaskTimeoutSeconds),
+      formField('Role Task Timeout Seconds', roleTaskTimeoutSeconds)
+    )),
+    createProviderEditor(providers, reload),
+    createRoleEditor({ roles, providers, tools, skills, reload }),
+    createMaintenanceEditor()
+  );
+}
+
+function createProviderEditor(providers, reload) {
+  const byId = new Map(providers.map((provider) => [provider.id, provider]));
+  const picker = optionSelect([['', 'new provider']].concat(providers.map((provider) => [provider.id, provider.id])), '');
+  const id = el('input', { className: 'compact', placeholder: 'provider id' });
+  const type = optionSelect([['echo', 'echo'], ['openai', 'openai'], ['ollama', 'ollama']], 'echo');
+  const enabled = el('input', { type: 'checkbox', checked: true });
+  const model = el('input', { className: 'compact', placeholder: 'model' });
+  const fields = {
+    baseUrl: el('input', { className: 'compact', placeholder: 'https://api.openai.com/v1' }),
+    apiKeyEnv: el('input', { className: 'compact', placeholder: 'OPENAI_API_KEY' }),
+    temperature: numberInput(''),
+    timeoutSeconds: numberInput(''),
+    maxRetries: numberInput(''),
+    retryBaseSeconds: numberInput(''),
+    retryMaxSeconds: numberInput(''),
+    circuitBreakerFailureThreshold: numberInput(''),
+    circuitBreakerCooldownSeconds: numberInput(''),
+    strictJson: el('input', { type: 'checkbox', checked: false }),
+    costPer1KInputTokens: numberInput(''),
+    costPer1KOutputTokens: numberInput(''),
+    maxCallsPerMinute: numberInput(''),
+    maxCallsPerDay: numberInput(''),
+    maxTokensPerDay: numberInput(''),
+    maxCostUsdPerDay: numberInput('')
+  };
+  const loadProvider = () => {
+    const provider = byId.get(picker.value) || { id: '', type: 'echo', enabled: true, model: '', config: {} };
+    id.value = provider.id || '';
+    type.value = provider.type || 'echo';
+    enabled.checked = provider.enabled !== false;
+    model.value = provider.model || '';
+    const config = provider.config || {};
+    for (const [key, control] of Object.entries(fields)) {
+      if (control.type === 'checkbox') control.checked = config[key] === true;
+      else control.value = config[key] === undefined ? '' : String(config[key]);
+    }
+  };
+  picker.addEventListener('change', loadProvider);
+  const save = async () => {
+    const config = collectProviderConfig(fields);
+    const payload = {
+      id: id.value.trim(),
+      type: type.value,
+      enabled: enabled.checked,
+      model: model.value.trim() || undefined,
+      config: Object.keys(config).length ? config : undefined
+    };
+    const result = await api.post('/providers', payload);
+    notifyJson(result);
+    await reload();
+  };
+  loadProvider();
+  return section('Providers', [button('Save Provider', 'primary', save)], el('div', { className: 'stack' },
+    el('div', { className: 'field-grid cols-3' },
+      formField('Provider', picker),
+      formField('ID', id),
+      formField('Type', type),
+      formField('Enabled', el('label', { className: 'check-row' }, enabled, 'enabled')),
+      formField('Model', model),
+      formField('Base URL', fields.baseUrl),
+      formField('API Key Env', fields.apiKeyEnv),
+      formField('Temperature', fields.temperature),
+      formField('Timeout Seconds', fields.timeoutSeconds),
+      formField('Max Retries', fields.maxRetries),
+      formField('Retry Base Seconds', fields.retryBaseSeconds),
+      formField('Retry Max Seconds', fields.retryMaxSeconds),
+      formField('Circuit Failures', fields.circuitBreakerFailureThreshold),
+      formField('Circuit Cooldown Seconds', fields.circuitBreakerCooldownSeconds),
+      formField('Strict JSON', el('label', { className: 'check-row' }, fields.strictJson, 'enabled')),
+      formField('Input Cost / 1K', fields.costPer1KInputTokens),
+      formField('Output Cost / 1K', fields.costPer1KOutputTokens),
+      formField('Calls / Minute', fields.maxCallsPerMinute),
+      formField('Calls / Day', fields.maxCallsPerDay),
+      formField('Tokens / Day', fields.maxTokensPerDay),
+      formField('Cost USD / Day', fields.maxCostUsdPerDay)
+    ),
+    providers.length ? dataTable(['ID', 'Type', 'Model', 'Enabled', 'Actions'], providers.map((provider) => [
+      codeText(provider.id),
+      provider.type,
+      provider.model || '',
+      provider.enabled === false ? statusPill('disabled') : statusPill('enabled'),
+      el('div', { className: 'row' },
+        provider.enabled === false
+          ? button('Enable', '', async () => { await api.post('/providers/enable', { id: provider.id }); await reload(); })
+          : button('Disable', '', async () => { await api.post('/providers/disable', { id: provider.id }); await reload(); }),
+        button('Remove', 'danger', async () => {
+          if (!confirm('Remove provider ' + provider.id + '?')) return;
+          await api.delete('/providers?id=' + encodeURIComponent(provider.id));
+          await reload();
+        })
+      )
+    ])) : el('div', { className: 'empty' }, 'No providers')
+  ));
+}
+
+function createRoleEditor({ roles, providers, tools, skills, reload }) {
+  const roleMap = new Map(roles.map((item) => [item.name, item]));
+  const picker = optionSelect([['', 'new role']].concat(roles.map((item) => [item.name, item.name])), '');
+  const provider = optionSelect([['', 'inherit']].concat(providers.map((item) => [item.id, item.id])), '');
+  const name = el('input', { className: 'compact', placeholder: 'name' });
+  const role = el('input', { className: 'compact', placeholder: 'role' });
+  const model = el('input', { className: 'compact', placeholder: 'model' });
+  const temperature = numberInput('');
+  const allowedTools = el('input', { className: 'compact', placeholder: tools.map((tool) => tool.name).join(',') });
+  const forbiddenTools = el('input', { className: 'compact', placeholder: 'tool names' });
+  const capabilities = el('input', { className: 'compact', placeholder: 'capability names' });
+  const skillNames = el('input', { className: 'compact', placeholder: skills.map((skill) => skill.name).join(',') });
+  const skillAllowlist = el('input', { className: 'compact', placeholder: 'skill names' });
+  const outputContract = el('input', { className: 'compact', placeholder: 'output contract' });
+  const instructions = el('textarea', { placeholder: 'instructions' });
+  const loadRole = () => {
+    const selected = roleMap.get(picker.value) || {};
+    name.value = selected.name || '';
+    role.value = selected.role || selected.name || '';
+    provider.value = selected.provider || '';
+    model.value = selected.model || '';
+    temperature.value = selected.temperature === undefined ? '' : String(selected.temperature);
+    allowedTools.value = (selected.allowedTools || []).join(', ');
+    forbiddenTools.value = (selected.forbiddenTools || []).join(', ');
+    capabilities.value = (selected.capabilities || []).join(', ');
+    skillNames.value = (selected.skills || []).join(', ');
+    skillAllowlist.value = (selected.skillAllowlist || []).join(', ');
+    outputContract.value = selected.outputContract || '';
+    instructions.value = selected.instructions || '';
+  };
+  picker.addEventListener('change', loadRole);
+  const save = async () => {
+    const payload = {
+      name: name.value.trim(),
+      role: role.value.trim() || name.value.trim(),
+      provider: provider.value || undefined,
+      model: model.value.trim() || undefined,
+      temperature: optionalNumber(temperature),
+      allowedTools: splitList(allowedTools.value),
+      forbiddenTools: splitList(forbiddenTools.value),
+      capabilities: splitList(capabilities.value),
+      skills: splitList(skillNames.value),
+      skillAllowlist: splitList(skillAllowlist.value),
+      outputContract: outputContract.value.trim() || undefined,
+      instructions: instructions.value.trim() || 'Follow the task requirements and return a concise result.'
+    };
+    const result = await api.post('/roles', payload);
+    notifyJson(result);
+    await reload();
+  };
+  loadRole();
+  return section('Roles', [
+    button('Save Role', 'primary', save),
+    button('Initialize Defaults', '', async () => { await api.post('/roles/defaults', { overwrite: false }); await reload(); })
+  ], el('div', { className: 'stack' },
+    el('div', { className: 'field-grid cols-3' },
+      formField('Role', picker),
+      formField('Name', name),
+      formField('Title', role),
+      formField('Provider', provider),
+      formField('Model', model),
+      formField('Temperature', temperature),
+      formField('Allowed Tools', allowedTools),
+      formField('Forbidden Tools', forbiddenTools),
+      formField('Capabilities', capabilities),
+      formField('Skills', skillNames),
+      formField('Skill Allowlist', skillAllowlist),
+      formField('Output Contract', outputContract)
+    ),
+    formField('Instructions', instructions),
+    roles.length ? dataTable(['Name', 'Provider', 'Model', 'Tools', 'Skills'], roles.map((item) => [
+      codeText(item.name), item.provider || '', item.model || '', (item.allowedTools || []).join(', '), (item.skills || []).join(', ')
+    ])) : el('div', { className: 'empty' }, 'No roles')
+  ));
+}
+
+function createMaintenanceEditor() {
+  const fields = {
+    day: el('input', { className: 'compact', placeholder: 'YYYY-MM-DD' }),
+    staleRunMs: numberInput(''),
+    maxEvents: numberInput(''),
+    pruneMemoryCandidateDays: numberInput(''),
+    maxFileMemoryRecords: numberInput(''),
+    maxVectorMemoryRecords: numberInput(''),
+    pruneArchivedExperienceVectorDays: numberInput(''),
+    sessionTrashDays: numberInput(''),
+    skillLookbackDays: numberInput(''),
+    skillMinOccurrences: numberInput(''),
+    skillMinScore: numberInput(''),
+    skillDailyLimit: numberInput('')
+  };
+  const run = async () => {
+    const payload = {};
+    for (const [key, control] of Object.entries(fields)) {
+      if (key === 'day') {
+        if (control.value.trim()) payload[key] = control.value.trim();
+      } else {
+        const value = optionalNumber(control);
+        if (value !== undefined) payload[key] = value;
+      }
+    }
+    notifyJson(await api.post('/maintenance', payload));
+  };
+  return section('Maintenance', [button('Run', 'primary', run)], el('div', { className: 'field-grid cols-3' },
+    formField('Day', fields.day),
+    formField('Stale Run MS', fields.staleRunMs),
+    formField('Max Events', fields.maxEvents),
+    formField('Prune Memory Days', fields.pruneMemoryCandidateDays),
+    formField('Max File Memory', fields.maxFileMemoryRecords),
+    formField('Max Vector Memory', fields.maxVectorMemoryRecords),
+    formField('Prune Experience Days', fields.pruneArchivedExperienceVectorDays),
+    formField('Session Trash Days', fields.sessionTrashDays),
+    formField('Skill Lookback Days', fields.skillLookbackDays),
+    formField('Skill Min Occurrences', fields.skillMinOccurrences),
+    formField('Skill Min Score', fields.skillMinScore),
+    formField('Skill Daily Limit', fields.skillDailyLimit)
+  ));
+}
+
 async function renderDiagnostics(content) {
   await refreshHealth();
   const diagnostics = await api.get('/diagnostics');
@@ -762,6 +1254,74 @@ function startEventStream() {
   };
   source.addEventListener('stored-event', pushEvent);
   source.addEventListener('runtime-event', pushEvent);
+}
+
+function stopViewTimers() {
+  for (const timer of state.timers) clearInterval(timer);
+  state.timers = [];
+}
+
+function formField(label, control) {
+  return el('div', { className: 'form-row' }, el('label', {}, label), control);
+}
+
+function optionSelect(options, value) {
+  const select = el('select', { className: 'compact' }, ...options.map(([optionValue, label]) => el('option', { value: optionValue }, label)));
+  select.value = value;
+  return select;
+}
+
+function numberInput(value) {
+  return el('input', { className: 'compact', type: 'number', value: value === undefined || value === null ? '' : String(value), step: 'any' });
+}
+
+function parseJsonArray(value, fallback) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return fallback;
+  const parsed = JSON.parse(trimmed);
+  if (!Array.isArray(parsed)) throw new Error('Expected JSON array');
+  return parsed;
+}
+
+function parseJsonObject(value, fallback) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return fallback;
+  const parsed = JSON.parse(trimmed);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Expected JSON object');
+  return parsed;
+}
+
+function requiredNumber(input, name) {
+  const value = optionalNumber(input);
+  if (value === undefined) throw new Error(name + ' is required');
+  return value;
+}
+
+function optionalNumber(input) {
+  const value = String(input.value || '').trim();
+  if (!value) return undefined;
+  const number = Number(value);
+  if (!Number.isFinite(number)) throw new Error('Invalid number: ' + value);
+  return number;
+}
+
+function splitList(value) {
+  return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function collectProviderConfig(fields) {
+  const config = {};
+  for (const [key, control] of Object.entries(fields)) {
+    if (control.type === 'checkbox') {
+      if (control.checked) config[key] = true;
+      continue;
+    }
+    const value = String(control.value || '').trim();
+    if (!value) continue;
+    if (control.type === 'number') config[key] = optionalNumber(control);
+    else config[key] = value;
+  }
+  return config;
 }
 
 function section(title, actions, body) {
@@ -846,6 +1406,8 @@ function el(tag, props, ...children) {
     else if (key === 'placeholder') node.placeholder = value;
     else if (key === 'id') node.id = value;
     else if (key === 'type') node.type = value;
+    else if (key === 'checked') node.checked = Boolean(value);
+    else if (key === 'disabled') node.disabled = Boolean(value);
     else node.setAttribute(key, value);
   }
   for (const child of children.flat()) {

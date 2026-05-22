@@ -57,6 +57,8 @@ const BUSY_SAFE_COMMANDS = new Set([
 ]);
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
+const TUI_MIN_FRAME_WIDTH = 88;
+const TUI_FRAME_MARGIN_COLUMNS = 2;
 
 type TuiHelpMode = "common" | "all";
 type TuiHelpSection = [string, string[][]];
@@ -69,11 +71,22 @@ type QueuedTuiMessage = {
   content: string;
   recorded?: boolean;
 };
+type TuiActiveTask = {
+  id: string;
+  role: string;
+  status: string;
+  title: string;
+  assignedAgentId?: string;
+  queuedAtMs: number;
+  runningAtMs?: number;
+  updatedAtMs: number;
+};
 type TuiState = {
   sessionId: string;
   lastRunId: string;
   permissionMode: string;
   runLog: string[];
+  activeTasks: Record<string, TuiActiveTask>;
   transcript: TuiTranscriptEntry[];
   contextQueue: QueuedTuiMessage[];
   nextContextQueueId: number;
@@ -120,6 +133,8 @@ type TuiTaskLike = {
   title?: string;
   assignedAgentId?: string;
   error?: string;
+  createdAt?: string;
+  updatedAt?: string;
   metadata?: {
     sessionId?: string;
     lastError?: string;
@@ -257,6 +272,7 @@ export async function startTui({ runtime }: { runtime: TuiRuntime }): Promise<vo
     lastRunId: "",
     permissionMode: "workspace_write",
     runLog: [],
+    activeTasks: {},
     transcript: [],
     contextQueue: [],
     nextContextQueueId: 1,
@@ -309,6 +325,7 @@ function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<str
   return new Promise((resolve) => {
     let closed = false;
     let buffer = "";
+    let cursorIndex = 0;
     const promptRenderState = createPromptRenderState();
     const restoreInput = enterRawPromptMode(rl);
     const finish = (value: string | null) => {
@@ -320,15 +337,38 @@ function readRawPromptLine(rl: readline.Interface, state: TuiState): Promise<str
       resolve(value);
     };
     const render = () => {
-      if (!closed) renderPromptBlock(state, buffer, promptRenderState);
+      if (!closed) renderPromptBlock(state, buffer, promptRenderState, cursorIndex);
     };
     const decoder = createPromptInputDecoder({
       appendText(text) {
-        buffer += normalizePastedText(text);
+        const normalized = normalizePastedText(text);
+        buffer = insertTextAtCharIndex(buffer, cursorIndex, normalized);
+        cursorIndex += charCount(normalized);
         render();
       },
       backspace() {
-        buffer = removeLastChar(buffer);
+        if (cursorIndex > 0) {
+          buffer = removeCharRange(buffer, cursorIndex - 1, cursorIndex);
+          cursorIndex -= 1;
+        }
+        render();
+      },
+      deleteForward() {
+        if (cursorIndex < charCount(buffer)) {
+          buffer = removeCharRange(buffer, cursorIndex, cursorIndex + 1);
+        }
+        render();
+      },
+      moveCursor(delta) {
+        cursorIndex = clamp(cursorIndex + delta, 0, charCount(buffer));
+        render();
+      },
+      moveToStart() {
+        cursorIndex = 0;
+        render();
+      },
+      moveToEnd() {
+        cursorIndex = charCount(buffer);
         render();
       },
       submit() {
@@ -417,32 +457,36 @@ function clearPromptBlock(renderState: PromptRenderState): void {
   renderState.cursorOffsetFromBottom = 0;
 }
 
-function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRenderState = createPromptRenderState()): void {
+function renderPromptBlock(state: TuiState, buffer = "", renderState: PromptRenderState = createPromptRenderState(), cursorIndex = charCount(buffer)): void {
   clearPromptBlock(renderState);
   output.write("\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
   const prompt = promptFor(state);
-  const bodyLines = formatPromptBufferPreviewLines(buffer, promptPreviewWidth(prompt));
+  const frameWidth = tuiFrameWidth();
+  const bodyWidth = promptPreviewWidth(prompt, frameWidth);
+  const bodyLines = formatPromptBufferPreviewLines(buffer, bodyWidth);
   const indent = " ".repeat(visibleLength(prompt));
-  const divider = style("─".repeat(Math.max(20, terminalWidth() - 2)), "yellow");
+  const divider = style("─".repeat(frameWidth), "yellow");
   const renderedLines = [
     divider,
     ...bodyLines.map((line, index) => `${index === 0 ? prompt : indent}${line}`),
     divider,
   ];
   output.write(renderedLines.join("\n"));
-  output.write("\x1b[1A");
-  const lastInputLine = renderedLines[renderedLines.length - 2] || prompt;
-  cursorTo(output, visibleLength(lastInputLine));
+  const cursor = promptCursorPosition(buffer, cursorIndex, bodyWidth);
+  const cursorOffsetFromBottom = Math.max(1, bodyLines.length - cursor.lineIndex);
+  output.write(`\x1b[${cursorOffsetFromBottom}A`);
+  const cursorPrefixWidth = cursor.lineIndex === 0 ? visibleLength(prompt) : visibleLength(indent);
+  cursorTo(output, cursorPrefixWidth + cursor.column);
   renderState.lineCount = renderedLines.length;
-  renderState.cursorOffsetFromBottom = 1;
+  renderState.cursorOffsetFromBottom = cursorOffsetFromBottom;
 }
 
 export function formatPromptBufferPreviewLines(buffer: string, width: number): string[] {
   return wrapBlock(normalizePastedText(buffer), Math.max(8, width));
 }
 
-function promptPreviewWidth(prompt: string): number {
-  return Math.max(8, terminalWidth() - visibleLength(prompt) - 4);
+function promptPreviewWidth(prompt: string, frameWidth = tuiFrameWidth()): number {
+  return Math.max(8, frameWidth - visibleLength(prompt));
 }
 
 function enterRawPromptMode(rl: readline.Interface): () => void {
@@ -458,9 +502,13 @@ function enterRawPromptMode(rl: readline.Interface): () => void {
   };
 }
 
-function createPromptInputDecoder(handlers: {
+export function createPromptInputDecoder(handlers: {
   appendText: (text: string) => void;
   backspace: () => void;
+  deleteForward?: () => void;
+  moveCursor?: (delta: number) => void;
+  moveToStart?: () => void;
+  moveToEnd?: () => void;
   submit: () => void;
   abort: () => void;
   isClosed: () => boolean;
@@ -471,7 +519,10 @@ function createPromptInputDecoder(handlers: {
     let text = pending + chunk.toString();
     pending = "";
     while (text && !handlers.isClosed()) {
-      if (text === "\x1b" || BRACKETED_PASTE_START.startsWith(text) || BRACKETED_PASTE_END.startsWith(text)) {
+      if (text === "\x1b"
+        || /^\x1b\[[0-9;?]*$/.test(text)
+        || BRACKETED_PASTE_START.startsWith(text)
+        || BRACKETED_PASTE_END.startsWith(text)) {
         pending = text;
         return;
       }
@@ -494,6 +545,7 @@ function createPromptInputDecoder(handlers: {
       }
       if (text.startsWith("\x1b")) {
         const escapeSequence = text.match(/^\x1b\[[0-9;?]*[A-Za-z~]/)?.[0] || text.slice(0, 1);
+        handlePromptEscapeSequence(escapeSequence, handlers);
         text = text.slice(escapeSequence.length);
         continue;
       }
@@ -532,10 +584,63 @@ function normalizePastedText(value: string): string {
   return String(value || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function removeLastChar(value: string): string {
+function handlePromptEscapeSequence(escapeSequence: string, handlers: {
+  deleteForward?: () => void;
+  moveCursor?: (delta: number) => void;
+  moveToStart?: () => void;
+  moveToEnd?: () => void;
+}): void {
+  if (/\x1b\[[0-9;?]*D$/.test(escapeSequence)) {
+    handlers.moveCursor?.(-1);
+    return;
+  }
+  if (/\x1b\[[0-9;?]*C$/.test(escapeSequence)) {
+    handlers.moveCursor?.(1);
+    return;
+  }
+  if (/\x1b\[(?:H|1~|7~)$/.test(escapeSequence)) {
+    handlers.moveToStart?.();
+    return;
+  }
+  if (/\x1b\[(?:F|4~|8~)$/.test(escapeSequence)) {
+    handlers.moveToEnd?.();
+    return;
+  }
+  if (/\x1b\[3~$/.test(escapeSequence)) {
+    handlers.deleteForward?.();
+  }
+}
+
+function promptCursorPosition(buffer: string, cursorIndex: number, width: number): { lineIndex: number; column: number } {
+  const marker = "\uE000";
+  const normalized = normalizePastedText(buffer);
+  const safeCursorIndex = clamp(cursorIndex, 0, charCount(normalized));
+  const marked = insertTextAtCharIndex(normalized, safeCursorIndex, marker);
+  const markerLines = formatPromptBufferPreviewLines(marked, width);
+  const foundLineIndex = markerLines.findIndex((line) => line.includes(marker));
+  if (foundLineIndex < 0) return { lineIndex: 0, column: 0 };
+  const line = markerLines[foundLineIndex] || "";
+  return {
+    lineIndex: foundLineIndex,
+    column: visibleLength(line.slice(0, line.indexOf(marker))),
+  };
+}
+
+function charCount(value: string): number {
+  return [...value].length;
+}
+
+function insertTextAtCharIndex(value: string, charIndex: number, text: string): string {
   const chars = [...value];
-  chars.pop();
-  return chars.join("");
+  const index = clamp(charIndex, 0, chars.length);
+  return [...chars.slice(0, index), text, ...chars.slice(index)].join("");
+}
+
+function removeCharRange(value: string, start: number, end: number): string {
+  const chars = [...value];
+  const safeStart = clamp(start, 0, chars.length);
+  const safeEnd = clamp(end, safeStart, chars.length);
+  return [...chars.slice(0, safeStart), ...chars.slice(safeEnd)].join("");
 }
 
 function isCommand(message: string): boolean {
@@ -800,13 +905,14 @@ function attachBusyInputReader(
   let closed = false;
   let promptVisible = false;
   let buffer = "";
+  let cursorIndex = 0;
   const promptRenderState = createPromptRenderState();
   const queuedMessages: QueuedTuiMessage[] = [];
   const pending = new Set<Promise<void>>();
   const restoreInput = enterRawPromptMode(rl);
   const writeReadyPrompt = () => {
     if (closed) return;
-    renderPromptBlock(state, buffer, promptRenderState);
+    renderPromptBlock(state, buffer, promptRenderState, cursorIndex);
     promptVisible = true;
   };
   const clearReadyPrompt = () => {
@@ -818,6 +924,7 @@ function attachBusyInputReader(
     if (closed) return;
     const message = buffer.trim();
     buffer = "";
+    cursorIndex = 0;
     clearReadyPrompt();
     promptVisible = false;
     if (!message) {
@@ -856,11 +963,34 @@ function attachBusyInputReader(
   };
   const decoder = createPromptInputDecoder({
     appendText(text) {
-      buffer += normalizePastedText(text);
+      const normalized = normalizePastedText(text);
+      buffer = insertTextAtCharIndex(buffer, cursorIndex, normalized);
+      cursorIndex += charCount(normalized);
       writeReadyPrompt();
     },
     backspace() {
-      buffer = removeLastChar(buffer);
+      if (cursorIndex > 0) {
+        buffer = removeCharRange(buffer, cursorIndex - 1, cursorIndex);
+        cursorIndex -= 1;
+      }
+      writeReadyPrompt();
+    },
+    deleteForward() {
+      if (cursorIndex < charCount(buffer)) {
+        buffer = removeCharRange(buffer, cursorIndex, cursorIndex + 1);
+      }
+      writeReadyPrompt();
+    },
+    moveCursor(delta) {
+      cursorIndex = clamp(cursorIndex + delta, 0, charCount(buffer));
+      writeReadyPrompt();
+    },
+    moveToStart() {
+      cursorIndex = 0;
+      writeReadyPrompt();
+    },
+    moveToEnd() {
+      cursorIndex = charCount(buffer);
       writeReadyPrompt();
     },
     submit: submitBuffer,
@@ -1624,7 +1754,14 @@ function attachProgressReporter(
 ): () => void {
   const manager = runtime.roleAgentManager;
   if (!manager?.on || !manager?.off) return () => undefined;
+  state.activeTasks ||= {};
   const seen = new Set<string>();
+  const refreshTimer = output.isTTY ? setInterval(() => {
+    if (!Object.keys(state.activeTasks || {}).length) return;
+    beforePrint();
+    afterPrint();
+  }, 5000) : null;
+  refreshTimer?.unref?.();
   const handler = (envelope: TuiEventEnvelope) => {
     const event = envelope?.event || null;
     const task = envelope?.task || null;
@@ -1634,16 +1771,24 @@ function attachProgressReporter(
     if (seen.has(eventKey)) return;
     seen.add(eventKey);
     if (task?.metadata?.sessionId && task.metadata.sessionId !== state.sessionId) return;
+    const activeChanged = updateActiveTasks(state, type, task, event);
     const line = formatProgressEvent(type, task, event);
     if (line) {
       appendRunLog(state, line);
       beforePrint();
       if (!output.isTTY) output.write(`${style(TUI_GLYPHS.assistant, "gray")} ${style(line, "gray")}\n`);
       afterPrint();
+    } else if (activeChanged && output.isTTY) {
+      beforePrint();
+      afterPrint();
     }
   };
   manager.on("event", handler);
-  return () => manager.off?.("event", handler);
+  return () => {
+    manager.off?.("event", handler);
+    if (refreshTimer) clearInterval(refreshTimer);
+    state.activeTasks = {};
+  };
 }
 
 function shouldShowProgressEvent(type: string): boolean {
@@ -1653,6 +1798,59 @@ function shouldShowProgressEvent(type: string): boolean {
     || type.startsWith("task_graph.")
     || type.startsWith("tool.execution.")
     || type === "runtime.anomaly";
+}
+
+const TUI_ACTIVE_TASK_STATUSES = new Set(["pending", "queued", "running", "blocked", "needs_inspection"]);
+const TUI_TERMINAL_TASK_STATUSES = new Set(["done", "failed", "cancelled", "dead_letter"]);
+
+function updateActiveTasks(
+  state: Pick<TuiState, "activeTasks">,
+  type: string,
+  task?: TuiTaskLike | null,
+  event?: TuiEventLike | null,
+): boolean {
+  if (!type.startsWith("task.") || !task?.id) return false;
+  const status = task.status || type.replace(/^task\./, "");
+  const taskId = String(task.id);
+  const existing = state.activeTasks?.[taskId];
+  if (TUI_TERMINAL_TASK_STATUSES.has(status)) {
+    if (!existing) return false;
+    delete state.activeTasks[taskId];
+    return true;
+  }
+  if (!TUI_ACTIVE_TASK_STATUSES.has(status)) return false;
+
+  const now = Date.now();
+  const timestamp = timestampMs(event?.createdAt, task.updatedAt, task.createdAt) || now;
+  const queuedAtMs = existing?.queuedAtMs || timestamp;
+  const runningAtMs = status === "running" ? existing?.runningAtMs || timestamp : existing?.runningAtMs;
+  const next: TuiActiveTask = {
+    id: taskId,
+    role: task.role || existing?.role || "task",
+    status,
+    title: task.title || existing?.title || "(untitled)",
+    assignedAgentId: task.assignedAgentId || event?.agentId || existing?.assignedAgentId,
+    queuedAtMs,
+    runningAtMs,
+    updatedAtMs: timestamp,
+  };
+  const changed = !existing
+    || existing.status !== next.status
+    || existing.role !== next.role
+    || existing.title !== next.title
+    || existing.assignedAgentId !== next.assignedAgentId
+    || existing.runningAtMs !== next.runningAtMs;
+  state.activeTasks[taskId] = next;
+  return changed;
+}
+
+function timestampMs(...values: Array<string | undefined>): number | null {
+  for (const value of values) {
+    if (!value) continue;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
 }
 
 export function formatProgressEvent(type: string, task?: TuiTaskLike | null, event?: TuiEventLike | null): string {
@@ -1822,7 +2020,7 @@ export function formatTuiCommandHints(prefix = "/", query = ""): string {
 }
 
 export function formatTuiHome({
-  state = { sessionId: "tui", lastRunId: "", permissionMode: "workspace_write" },
+  state = { sessionId: "tui", lastRunId: "", permissionMode: "workspace_write", activeTasks: {} },
   health = null,
   provider = null,
   tools = [],
@@ -1836,6 +2034,7 @@ export function formatTuiHome({
     lastRunId: string;
     permissionMode: string;
     runLog?: string[];
+    activeTasks?: Record<string, TuiActiveTask>;
     transcript?: TuiTranscriptEntry[];
     contextQueue?: QueuedTuiMessage[];
   };
@@ -1847,18 +2046,17 @@ export function formatTuiHome({
   transcript?: TuiTranscriptEntry[];
   contextQueue?: QueuedTuiMessage[];
 } = {}): string {
-  const width = Math.max(88, terminalWidth());
-  const boxWidth = Math.min(width - 2, 178);
-  const wideLayout = boxWidth >= 100;
-  const contentWidth = boxWidth - 4;
-  const leftWidth = wideLayout ? Math.max(48, Math.min(62, Math.floor((boxWidth - 7) * 0.38))) : contentWidth;
-  const logWidth = wideLayout ? Math.max(28, boxWidth - leftWidth - 7) : 0;
+  const frameWidth = tuiFrameWidth();
+  const wideLayout = frameWidth >= 100;
+  const contentWidth = frameWidth - 4;
+  const leftWidth = wideLayout ? Math.max(48, Math.min(62, Math.floor((frameWidth - 7) * 0.38))) : contentWidth;
+  const logWidth = wideLayout ? Math.max(28, frameWidth - leftWidth - 7) : 0;
   const lines: string[] = [];
   lines.push("");
   for (const line of EMILY_WORDMARK) lines.push(style(line, "gray"));
   lines.push("");
-  lines.push(`${"─".repeat(Math.max(2, Math.floor((boxWidth - 36) / 2)))} ${style("Emily AgentOS terminal workspace", "gray")} ${"─".repeat(12)}`);
-  lines.push(`┌${"─".repeat(boxWidth - 2)}┐`);
+  lines.push(formatCenteredDivider("Emily AgentOS terminal workspace", frameWidth));
+  lines.push(`┌${"─".repeat(frameWidth - 2)}┐`);
 
   const workspace = [
     sectionTitle("Available Tools:"),
@@ -1867,7 +2065,12 @@ export function formatTuiHome({
     sectionTitle("Available Skills:"),
     ...formatSkillGroups(skills).slice(0, 13),
   ];
-  const log = formatRunLogLines(runLog.length ? runLog : state.runLog || [], wideLayout ? logWidth : contentWidth).slice(0, 18);
+  const log = formatRunLogLines(
+    runLog.length ? runLog : state.runLog || [],
+    wideLayout ? logWidth : contentWidth,
+    18,
+    state.activeTasks || {},
+  );
   const rowCount = Math.max(workspace.length + 3, log.length, 20);
   const summary = `${tools.length} tools · ${skills.length} skills · /help for commands`;
   const leftRows = [...workspace];
@@ -1886,15 +2089,15 @@ export function formatTuiHome({
       lines.push(`│ ${cell} │`);
     }
   }
-  lines.push(`└${"─".repeat(boxWidth - 2)}┘`);
-  lines.push(formatTuiStatusLine({ state, health, provider, width: boxWidth }));
+  lines.push(`└${"─".repeat(frameWidth - 2)}┘`);
+  lines.push(formatTuiStatusLine({ state, health, provider, width: frameWidth }));
   lines.push("");
   lines.push(style("Welcome to Emily Agent! Type your message or /help for commands.", "gray"));
-  const transcriptLines = formatTuiTranscript(transcript.length ? transcript : state.transcript || [], boxWidth);
+  const transcriptLines = formatTuiTranscript(transcript.length ? transcript : state.transcript || [], frameWidth);
   if (transcriptLines.length) {
     lines.push(...transcriptLines);
   }
-  const contextQueueLines = formatTuiContextQueue(contextQueue.length ? contextQueue : state.contextQueue || [], boxWidth);
+  const contextQueueLines = formatTuiContextQueue(contextQueue.length ? contextQueue : state.contextQueue || [], frameWidth);
   if (contextQueueLines.length) {
     lines.push(...contextQueueLines);
   }
@@ -1933,8 +2136,7 @@ function appendTranscript(state: TuiState, role: TuiTranscriptEntry["role"], con
 
 function formatTuiTranscript(entries: TuiTranscriptEntry[], width: number, maxLines = 18): string[] {
   if (!entries.length) return [];
-  const contentWidth = Math.max(32, width - 4);
-  const groups = entries.slice(-8).map((entry) => formatTuiTranscriptEntry(entry, contentWidth));
+  const groups = entries.slice(-8).map((entry) => formatTuiTranscriptEntry(entry, width));
   const kept: string[] = [];
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = groups[index];
@@ -1946,7 +2148,7 @@ function formatTuiTranscript(entries: TuiTranscriptEntry[], width: number, maxLi
   }
   return [
     "",
-    style("─".repeat(Math.min(width, 96)), "yellow"),
+    style("─".repeat(width), "yellow"),
     ...kept,
   ];
 }
@@ -1965,13 +2167,29 @@ function formatTuiTranscriptEntry(entry: TuiTranscriptEntry, width: number): str
     ];
   }
   const label = ` ${style("Emily", "yellow")} `;
-  const top = `┌─${label}${"─".repeat(Math.max(4, width - visibleLength(label) - 3))}`;
-  const bottom = `└${"─".repeat(Math.max(4, width - 1))}`;
+  const bodyWidth = Math.max(24, width - 4);
+  const top = formatTopBorder(label, width);
+  const bottom = `└${"─".repeat(width - 2)}┘`;
   return [
     top,
-    ...wrapBlock(entry.content, Math.max(24, width - 4)).map((line) => `│ ${line}`),
+    ...wrapBlock(entry.content, bodyWidth).map((line) => `│ ${pad(line, bodyWidth)} │`),
     bottom,
   ];
+}
+
+function formatTopBorder(label: string, width: number): string {
+  const left = "┌─";
+  const right = "┐";
+  const fill = Math.max(0, width - visibleLength(left) - visibleLength(label) - visibleLength(right));
+  return `${left}${label}${"─".repeat(fill)}${right}`;
+}
+
+function formatCenteredDivider(label: string, width: number): string {
+  const content = ` ${style(label, "gray")} `;
+  const fill = Math.max(0, width - visibleLength(content));
+  const left = Math.floor(fill / 2);
+  const right = fill - left;
+  return `${"─".repeat(left)}${content}${"─".repeat(right)}`;
 }
 
 function formatTuiContextQueue(queue: QueuedTuiMessage[], width: number, maxRows = 5): string[] {
@@ -2018,23 +2236,91 @@ function formatSkillGroups(skills: Array<{ name?: string; title?: string; capabi
     .map(([category, names]) => `${category}: ${names.slice(0, 5).join(", ")}${names.length > 5 ? ", ..." : ""}`);
 }
 
-function formatRunLogLines(runLog: string[], width: number, maxLines = 18): string[] {
+function formatRunLogLines(
+  runLog: string[],
+  width: number,
+  maxLines = 18,
+  activeTasks: Record<string, TuiActiveTask> = {},
+): string[] {
   const lines = [sectionTitle("Run Log:")];
+  const activeLines = formatActiveTaskLines(activeTasks, Math.max(20, width), Math.min(7, Math.max(2, maxLines - 6)));
+  if (activeLines.length) {
+    lines.push(...activeLines);
+    lines.push("");
+  }
   const entries = runLog.slice(-12);
   if (!entries.length) {
-    lines.push(style("waiting for activity", "brightGreen"));
-    lines.push(style("subagent/task/tool events appear here", "brightGreen"));
-    return lines;
+    if (!activeLines.length) {
+      lines.push(style("waiting for activity", "brightGreen"));
+      lines.push(style("subagent/task/tool events appear here", "brightGreen"));
+    }
+    return lines.slice(0, maxLines);
   }
   const groups = entries.map((entry) => formatRunLogEntry(entry, Math.max(20, width)));
   const body: string[] = [];
+  const remainingLines = Math.max(2, maxLines - lines.length);
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = groups[index];
-    if (body.length + group.length > maxLines - 1) continue;
+    if (body.length + group.length > remainingLines) continue;
     body.unshift(...group);
   }
   lines.push(...body);
+  return lines.slice(0, maxLines);
+}
+
+function formatActiveTaskLines(activeTasks: Record<string, TuiActiveTask>, width: number, maxLines = 6): string[] {
+  const tasks = Object.values(activeTasks)
+    .sort((left, right) => activeTaskRank(left) - activeTaskRank(right) || left.updatedAtMs - right.updatedAtMs);
+  if (!tasks.length) return [];
+  const running = tasks.filter((task) => task.status === "running").length;
+  const queued = tasks.filter((task) => task.status === "queued" || task.status === "pending").length;
+  const waiting = tasks.length - running - queued;
+  const summaryParts = [`${running} running`];
+  if (queued) summaryParts.push(`${queued} queued`);
+  if (waiting) summaryParts.push(`${waiting} waiting`);
+  const lines = [style(`Active: ${tasks.length} task${tasks.length === 1 ? "" : "s"} (${summaryParts.join(" · ")})`, "brightGreen")];
+  const now = Date.now();
+  let shownTasks = 0;
+  for (const task of tasks) {
+    const entry = formatActiveTaskEntry(task, width, now);
+    if (lines.length + entry.length > maxLines) break;
+    lines.push(...entry);
+    shownTasks += 1;
+  }
+  if (shownTasks < tasks.length && lines.length < maxLines) {
+    lines.push(`  ... ${tasks.length - shownTasks} more active tasks`);
+  }
   return lines;
+}
+
+function formatActiveTaskEntry(task: TuiActiveTask, width: number, now: number): string[] {
+  const status = activeTaskStatusLabel(task.status);
+  const elapsedAnchor = task.status === "running" ? task.runningAtMs || task.queuedAtMs : task.queuedAtMs;
+  const elapsed = formatDuration(Math.max(0, now - elapsedAnchor));
+  const agent = task.assignedAgentId ? ` · subagent ${shortId(task.assignedAgentId, 16)}` : "";
+  const meta = `  ${status.padEnd(8)} ${elapsed.padStart(7)}  ${task.role}${agent} · task ${shortId(task.id, 8)}`;
+  const lines = [truncate(meta, width)];
+  const title = task.title.replace(/\s+/g, " ").trim();
+  if (!title) return lines;
+  const detailWidth = Math.max(18, width - 4);
+  const wrapped = wrapBlock(title, detailWidth);
+  for (const line of wrapped.slice(0, 2)) lines.push(`    ${line}`);
+  if (wrapped.length > 2) lines[lines.length - 1] = truncate(`${lines[lines.length - 1]} ...`, width);
+  return lines;
+}
+
+function activeTaskRank(task: TuiActiveTask): number {
+  if (task.status === "running") return 0;
+  if (task.status === "queued") return 1;
+  if (task.status === "pending") return 2;
+  if (task.status === "needs_inspection") return 3;
+  if (task.status === "blocked") return 4;
+  return 5;
+}
+
+function activeTaskStatusLabel(status: string): string {
+  if (status === "needs_inspection") return "inspect";
+  return status;
 }
 
 function sectionTitle(label: string): string {
@@ -2186,7 +2472,11 @@ function stripAnsi(value: string): string {
 }
 
 function terminalWidth(): number {
-  return Math.max(60, Math.min(180, output.columns || 88));
+  return Math.max(60, Math.floor(output.columns || TUI_MIN_FRAME_WIDTH));
+}
+
+function tuiFrameWidth(width = terminalWidth()): number {
+  return Math.max(TUI_MIN_FRAME_WIDTH, Math.floor(width) - TUI_FRAME_MARGIN_COLUMNS);
 }
 
 function wrapBlock(content: string, width: number): string[] {

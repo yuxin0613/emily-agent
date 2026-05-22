@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { classifyUserMessageIntent, isPlanningOnlyRequest } from "../src/agents/MainAgent.ts";
+import { assessTaskComplexity, requiresDeliveryLevelClarification } from "../src/planning/PlanSpec.ts";
+import { AgentRouter } from "../src/routing/AgentRouter.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-chat-routing-"));
 const runtime = await createRuntime({ dataDir });
@@ -13,8 +15,23 @@ try {
   assert.equal(classifyUserMessageIntent("你好"), "chat");
   assert.equal(classifyUserMessageIntent("帮我测试这个接口"), "task");
   assert.equal(classifyUserMessageIntent("帮我规划一个 Todo 应用，不要立即实现"), "task");
+  assert.equal(classifyUserMessageIntent("搜索nvidia的新闻"), "task");
+  assert.equal(classifyUserMessageIntent("搜索nvidia大模型的新闻"), "task");
+  assert.equal(assessTaskComplexity("搜索nvidia的新闻").kind, "research");
+  assert.equal(assessTaskComplexity("搜索nvidia大模型的新闻").kind, "research");
+  const searchRoute = new AgentRouter().route("搜索nvidia的新闻");
+  assert.ok(searchRoute.selectedRoles.includes("researcher"));
+  const modelNewsRoute = new AgentRouter().route("搜索nvidia大模型的新闻");
+  assert.ok(modelNewsRoute.selectedRoles.includes("researcher"));
+  const codingRoute = new AgentRouter().route("写一个web的贪吃蛇游戏，保存到 ~/2_project/demo");
+  assert.ok(codingRoute.selectedRoles.includes("developer"));
+  assert.ok(!codingRoute.selectedRoles.includes("researcher"));
+  assert.equal(assessTaskComplexity("写一个web的贪吃蛇游戏，保存到 ~/2_project/demo").kind, "software_delivery");
   assert.equal(isPlanningOnlyRequest("帮我规划一个 Todo 应用 POC，不要立即实现"), true);
   assert.equal(isPlanningOnlyRequest("帮我做一个 Todo 应用 POC"), false);
+  assert.equal(classifyUserMessageIntent("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同"), "task");
+  assert.equal(assessTaskComplexity("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同").kind, "research_comparison");
+  assert.equal(requiresDeliveryLevelClarification("查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同"), false);
 
   const response = await runtime.handleUserMessage("测试消息", {
     sessionId: "chat-routing",

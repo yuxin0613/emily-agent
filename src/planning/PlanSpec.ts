@@ -1,8 +1,14 @@
 import type { Metadata, PermissionMode, TaskDependency } from "../types.ts";
+import { MAX_ROLE_TASK_TIMEOUT_MS } from "../runtime/RoleTaskTimeout.ts";
 
 export type DeliveryLevel = "poc" | "uat" | "production";
 export type PlanningMode = "single_wave" | "rolling";
+
 export type GraphFailureStrategy = "fail_graph" | "block_dependents" | "replan";
+export type TaskKind = "software_delivery" | "research_comparison" | "research" | "fix" | "general_execution";
+export type TaskComplexityClass = "simple" | "many_nodes" | "single_long_operation";
+
+const DEFAULT_PLAN_TASK_TIMEOUT_MS = 30000;
 
 export interface PlanTaskSpec {
   key: string;
@@ -59,6 +65,16 @@ export interface PlanValidationResult {
   errors: string[];
 }
 
+export interface TaskComplexityAssessment {
+  kind: TaskKind;
+  complexityClass: TaskComplexityClass;
+  longTask: boolean;
+  splittable: boolean;
+  estimatedNodes: number;
+  reasons: string[];
+  needsDeliveryLevelClarification: boolean;
+}
+
 const DELIVERY_LEVELS = new Set<DeliveryLevel>(["poc", "uat", "production"]);
 const PLANNING_MODES = new Set<PlanningMode>(["single_wave", "rolling"]);
 const FAILURE_STRATEGIES = new Set<GraphFailureStrategy>(["fail_graph", "block_dependents", "replan"]);
@@ -79,7 +95,8 @@ export function parseGraphPatchSpec(raw: string, { parentKey }: { parentKey: str
 
 export function createFallbackPlanSpec(input: string, selectedAgents: string[]): PlanSpec {
   const deliveryLevel = inferDeliveryLevel(input) || "poc";
-  const longGoal = isOutcomeOrLongTask(input);
+  const assessment = assessTaskComplexity(input);
+  const longGoal = assessment.longTask;
   const targetRole = selectedAgents.includes("developer") ? "developer" : "researcher";
   const goal = input.trim();
   const exitCriteria = defaultExitCriteria(deliveryLevel, goal);
@@ -117,7 +134,7 @@ export function createFallbackPlanSpec(input: string, selectedAgents: string[]):
     wave: 1,
     skillHints: ["planning", "architecture"],
     expandable: longGoal,
-    expansionGoal: "Expand architecture from coarse modules into concrete feature slices and verification leaves.",
+    expansionGoal: fallbackExpansionGoal(assessment.kind),
     maxExpansionDepth: longGoal ? 3 : 0,
   });
 
@@ -269,8 +286,17 @@ export function createFallbackGraphPatch({
   if (parentKey !== "architecture") {
     return emptyPatch(parentKey, "No fallback expansion is defined for this task.");
   }
-  const implementationKey = uniqueKey("implementation", existingKeys);
+  const assessment = assessTaskComplexity(plan.goal);
+  const researchLike = assessment.kind === "research_comparison" || assessment.kind === "research";
+  const leafKeyBase = researchLike ? "research_slice" : "implementation";
+  const implementationKey = uniqueKey(leafKeyBase, existingKeys);
   const verificationKey = uniqueKey("verification", new Set([...existingKeys, implementationKey]));
+  const leafRole = researchLike ? "researcher" : "developer";
+  const leafSkillHints = researchLike ? ["research", "synthesis"] : ["coding", "implementation"];
+  const leafToolHints = researchLike ? ["read_file"] : ["read_file", "write_file", "run_tests"];
+  const leafInstruction = researchLike
+    ? `Research or specify the first concrete evidence-gathering/synthesis leaf under ${parentKey}. Keep scope narrow and return remaining comparison or research slices as next actions.`
+    : `Implement or specify the first concrete leaf slice under ${parentKey}. Keep scope narrow and return remaining sibling/child slices as next actions.`;
   const taskInputPrefix = [
     `Goal: ${plan.goal}`,
     `Delivery level: ${plan.deliveryLevel}`,
@@ -289,17 +315,19 @@ export function createFallbackGraphPatch({
       planTask({
         key: implementationKey,
         parentKey,
-        role: "developer",
-        title: `implementation: ${plan.goal.slice(0, 60)}`,
-        input: `${taskInputPrefix}Implement or specify the first concrete leaf slice under ${parentKey}. Keep scope narrow and return remaining sibling/child slices as next actions.`,
+        role: leafRole,
+        title: `${leafKeyBase}: ${plan.goal.slice(0, 60)}`,
+        input: `${taskInputPrefix}${leafInstruction}`,
         dependsOn: [parentKey],
         acceptanceCriteria: [
-          "A concrete implementation slice or precise executable design is produced.",
+          researchLike
+            ? "A concrete research slice or precise evidence plan is produced."
+            : "A concrete implementation slice or precise executable design is produced.",
           "The result states what remains for later rolling waves.",
         ],
         wave: 2,
-        skillHints: ["coding", "implementation"],
-        toolHints: ["read_file", "write_file", "run_tests"],
+        skillHints: leafSkillHints,
+        toolHints: leafToolHints,
       }),
       planTask({
         key: verificationKey,
@@ -336,7 +364,7 @@ export function validatePlanSpec(spec: PlanSpec): PlanValidationResult {
     if (!task.title.trim()) errors.push(`title is required for ${task.key}`);
     if (!task.input.trim()) errors.push(`input is required for ${task.key}`);
     if (!task.acceptanceCriteria.length) errors.push(`acceptanceCriteria is required for ${task.key}`);
-    if (task.timeoutMs < 1000 || task.timeoutMs > 10 * 60 * 1000) errors.push(`timeoutMs out of range for ${task.key}`);
+    if (task.timeoutMs < 1000 || task.timeoutMs > MAX_ROLE_TASK_TIMEOUT_MS) errors.push(`timeoutMs out of range for ${task.key}`);
     if (task.maxRetries < 0 || task.maxRetries > 5) errors.push(`maxRetries out of range for ${task.key}`);
     if (task.maxResultChars < 1000 || task.maxResultChars > 100000) errors.push(`maxResultChars out of range for ${task.key}`);
     if (task.maxMemoryCandidates < 0 || task.maxMemoryCandidates > 20) errors.push(`maxMemoryCandidates out of range for ${task.key}`);
@@ -388,7 +416,7 @@ export function validateGraphPatchSpec(
     if (!task.title.trim()) errors.push(`title is required for ${task.key}`);
     if (!task.input.trim()) errors.push(`input is required for ${task.key}`);
     if (!task.acceptanceCriteria.length) errors.push(`acceptanceCriteria is required for ${task.key}`);
-    if (task.timeoutMs < 1000 || task.timeoutMs > 10 * 60 * 1000) errors.push(`timeoutMs out of range for ${task.key}`);
+    if (task.timeoutMs < 1000 || task.timeoutMs > MAX_ROLE_TASK_TIMEOUT_MS) errors.push(`timeoutMs out of range for ${task.key}`);
     if (task.maxRetries < 0 || task.maxRetries > 5) errors.push(`maxRetries out of range for ${task.key}`);
     if (task.maxResultChars < 1000 || task.maxResultChars > 100000) errors.push(`maxResultChars out of range for ${task.key}`);
     if (task.maxMemoryCandidates < 0 || task.maxMemoryCandidates > 20) errors.push(`maxMemoryCandidates out of range for ${task.key}`);
@@ -418,19 +446,116 @@ export function inferDeliveryLevel(input: string): DeliveryLevel | null {
   return null;
 }
 
+export function assessTaskComplexity(input: string): TaskComplexityAssessment {
+  const normalized = input.trim();
+  const lower = normalized.toLowerCase();
+  const comparisonIntent = /比较|对比|差异|不同|优缺点|取舍|选型|竞品|功能.*不同|\bcompare\b|\bcomparison\b|\bvs\.?\b|versus|trade[- ]?off/i.test(normalized);
+  const researchIntent = /查找|搜索|搜一下|检索|联网|新闻|最新|动态|调研|研究|分析|总结|报告|资料|文档|梳理|了解|\bsearch\b|\blatest\b|\bnews\b|\bresearch\b|\banaly[sz]e\b|\bsummarize\b|\breport\b/i.test(normalized);
+  const fixIntent = /修复|排查|调试|定位|报错|失败|崩溃|\bfix\b|\bdebug\b|\bbug\b|error|exception|stack trace/i.test(normalized);
+  const implementationIntent = /做一个|开发|实现|构建|搭建|创建|新增|写一个|接入|迁移|部署|配置|重构|\bbuild\b|\bimplement\b|\bdevelop\b|\bcreate\b|\bdeploy\b|\bconfigure\b|\brefactor\b/i.test(normalized);
+  const designIntent = /设计|规划|计划|拆解|架构|\bdesign\b|\bplan\b|\bdecompose\b/i.test(normalized);
+  const softwareDomain = /软件|代码|仓库|\brepo\b|应用|\bapp\b|系统|平台|网站|\bweb\b|\bapi\b|\bcli\b|\bagent\b|服务|数据库|后端|前端|项目|功能|接口|模块|架构|插件|\bsdk\b|库|框架/i.test(normalized);
+  const broadScope = /大型|复杂|完整|全面|系统性|端到端|多模块|多阶段|一系列|很多|大量|几十|几百|长期|耗时|长任务|深入|详细|深度|全量|所有|整个|完整比较|全面比较/i.test(normalized);
+  const multipleSubjects = /两者|两个|多个|多种|分别|逐个|和.+(?:比较|对比|差异|不同)|(?:比较|对比).+和/i.test(normalized);
+  const singleLongOperation = /下载大文件|全量索引|全量构建|完整编译|训练模型|跑完整测试|长时间运行|等待部署|\btrain\b|\bcompile chromium\b|\bfull build\b/i.test(lower);
+  const strongDeliveryQuestionSignal = /做一个|开发|实现|构建|搭建|创建|新增|写一个|应用|系统|平台|接口|服务|\bbuild\b|\bimplement\b|\bdevelop\b|\bcreate\b/i.test(normalized);
+
+  const kind: TaskKind = fixIntent
+    ? "fix"
+    : comparisonIntent
+      ? "research_comparison"
+      : implementationIntent || (softwareDomain && designIntent)
+        ? "software_delivery"
+        : researchIntent
+          ? "research"
+          : "general_execution";
+
+  const reasons: string[] = [];
+  let estimatedNodes = 1;
+
+  if (kind === "software_delivery") {
+    estimatedNodes += implementationIntent ? 5 : 3;
+    reasons.push("software/project work usually needs scope, design, execution slices, and verification");
+  }
+  if (kind === "research_comparison") {
+    estimatedNodes += 5;
+    reasons.push("comparison work needs source discovery, per-subject facts, dimensions, synthesis, and validation");
+  }
+  if (kind === "research") {
+    estimatedNodes += 2;
+    reasons.push("research work needs question framing, source strategy, synthesis, and evidence checks");
+  }
+  if (kind === "fix") {
+    estimatedNodes += 3;
+    reasons.push("fix work needs reproduce, isolate, patch, and regression validation");
+  }
+  if (softwareDomain && (implementationIntent || comparisonIntent || /项目|应用|系统|平台|功能|接口|模块/i.test(normalized))) {
+    estimatedNodes += 2;
+    reasons.push("software project/domain scope suggests multiple components or feature areas");
+  }
+  if (broadScope) {
+    estimatedNodes += 2;
+    reasons.push("the request uses broad or exhaustive scope language");
+  }
+  if (multipleSubjects) {
+    estimatedNodes += 2;
+    reasons.push("multiple subjects imply parallel fact gathering before synthesis");
+  }
+  if (singleLongOperation) {
+    estimatedNodes = Math.max(estimatedNodes, 2);
+    reasons.push("the main cost looks like one long-running operation");
+  }
+
+  estimatedNodes = Math.min(12, Math.max(1, estimatedNodes));
+  const complexityClass: TaskComplexityClass = singleLongOperation
+    ? "single_long_operation"
+    : estimatedNodes >= 5 || broadScope
+      ? "many_nodes"
+      : "simple";
+  const splittable = complexityClass === "many_nodes";
+  const longTask = splittable || complexityClass === "single_long_operation";
+  const needsDeliveryLevelClarification = kind === "software_delivery"
+    && longTask
+    && strongDeliveryQuestionSignal
+    && !inferDeliveryLevel(input);
+
+  return {
+    kind,
+    complexityClass,
+    longTask,
+    splittable,
+    estimatedNodes,
+    reasons: reasons.length ? reasons : ["no strong multi-node signal detected"],
+    needsDeliveryLevelClarification,
+  };
+}
+
 export function isOutcomeOrLongTask(input: string): boolean {
-  return /(做一个|开发一个|实现一个|构建|完整|应用|系统|平台|项目|几十|几百|模块|功能|接口|测试用例|生产|uat|poc)/i.test(input);
+  return assessTaskComplexity(input).longTask;
 }
 
 export function requiresDeliveryLevelClarification(input: string): boolean {
-  return isOutcomeOrLongTask(input) && !inferDeliveryLevel(input);
+  return assessTaskComplexity(input).needsDeliveryLevelClarification;
 }
 
 export function deliveryLevelQuestion(input: string): string {
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind === "research_comparison" || assessment.kind === "research") {
+    return [
+      "这是可拆分的研究任务，调研深度会影响资料范围、验证力度和输出形态。",
+      "",
+      "请确认交付深度：",
+      "- 快速概览：抓核心资料，给出主要结论和明显不确定点。",
+      "- 标准比对：明确资料来源、比对维度、证据链和结论摘要。",
+      "- 深度报告：覆盖更多来源、版本差异、边界条件、反例和验证说明。",
+      "",
+      `当前需求：${input.trim()}`,
+    ].join("\n");
+  }
   return [
-    "这个需求看起来是结果导向的长任务，我需要先确认准出标准再开始自动拆分执行。",
+    "这是软件交付类长任务，交付深度会影响拆分范围、验证力度和风险边界。",
     "",
-    "请确认目标等级：",
+    "请确认准出标准：",
     "- POC：跑通核心链路，允许简化实现和少量手工验证。",
     "- UAT：面向验收，核心功能完整，有接口/状态/错误处理和测试说明。",
     "- 生产：面向上线，需要可靠性、可观测性、恢复策略、安全边界和较完整测试。",
@@ -495,7 +620,7 @@ function normalizeTaskSpec(item: unknown, index: number, defaultParentKey?: stri
     acceptanceCriteria: listValue(item.acceptanceCriteria, ["Task produces a useful result for the graph."]),
     toolHints: listValue(item.toolHints, []),
     skillHints: listValue(item.skillHints, []),
-    timeoutMs: boundedInteger(item.timeoutMs, 30000, 1000, 10 * 60 * 1000),
+    timeoutMs: boundedInteger(item.timeoutMs, DEFAULT_PLAN_TASK_TIMEOUT_MS, 1000, MAX_ROLE_TASK_TIMEOUT_MS),
     maxRetries: boundedInteger(item.maxRetries, 1, 0, 5),
     maxResultChars: boundedInteger(item.maxResultChars, 12000, 1000, 100000),
     maxMemoryCandidates: boundedInteger(item.maxMemoryCandidates, 1, 0, 20),
@@ -525,7 +650,7 @@ function planTask(input: Partial<PlanTaskSpec> & {
     acceptanceCriteria: input.acceptanceCriteria || ["Task produces a useful result for the graph."],
     toolHints: input.toolHints || [],
     skillHints: input.skillHints || [],
-    timeoutMs: input.timeoutMs || 30000,
+    timeoutMs: input.timeoutMs || DEFAULT_PLAN_TASK_TIMEOUT_MS,
     maxRetries: input.maxRetries ?? 1,
     maxResultChars: input.maxResultChars || 12000,
     maxMemoryCandidates: input.maxMemoryCandidates ?? 1,
@@ -561,10 +686,12 @@ interface PlanningTemplate {
 
 function planningTemplatesFor(goal: string, selectedAgents: string[]): PlanningTemplate[] {
   const normalized = goal.toLowerCase();
+  const assessment = assessTaskComplexity(goal);
   if (/todo|待办|任务清单|cli|命令行/.test(normalized)) return todoCliPlanningTemplates();
+  if (assessment.kind === "research_comparison") return comparisonPlanningTemplates();
+  if (assessment.kind === "research") return researchPlanningTemplates();
+  if (assessment.kind === "fix") return fixPlanningTemplates();
   if (/(应用|app|系统|平台|网站|web|api|工具|项目|product)/i.test(goal)) return applicationPlanningTemplates(selectedAgents);
-  if (/(bug|报错|修复|排查|debug|fix|崩溃|失败)/i.test(goal)) return fixPlanningTemplates();
-  if (/(调研|研究|分析|总结|报告|文档|research|report|document)/i.test(goal)) return researchPlanningTemplates();
   return generalPlanningTemplates(selectedAgents);
 }
 
@@ -716,11 +843,23 @@ function fixPlanningTemplates(): PlanningTemplate[] {
   ];
 }
 
+function comparisonPlanningTemplates(): PlanningTemplate[] {
+  const webResearchTools = ["read_file", "http_fetch", "web_search", "browser"];
+  return [
+    simpleTemplate("comparison_scope", "planner", "比对范围", "Define the subjects, comparison depth, output shape, and explicit non-goals.", ["Subjects and comparison dimensions are explicit."]),
+    simpleTemplate("source_inventory", "researcher", "资料盘点", "Identify primary repositories, docs, release notes, and freshness requirements before comparing claims.", ["Sources are listed with freshness and reliability notes."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("subject_profiles", "researcher", "对象画像", "Extract factual capabilities, constraints, and product/project positioning for each subject.", ["Each subject has evidence-backed capability notes."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("comparison_matrix", "researcher", "差异矩阵", "Compare the subjects across the requested functional dimensions and note uncertainty.", ["Differences are mapped dimension by dimension."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("synthesis_validation", "reviewer", "综合验证", "Cross-check important claims and summarize material differences, tradeoffs, and caveats.", ["The synthesis is auditable and directly answers the comparison request."]),
+  ];
+}
+
 function researchPlanningTemplates(): PlanningTemplate[] {
+  const webResearchTools = ["read_file", "http_fetch", "web_search", "browser"];
   return [
     simpleTemplate("research_questions", "researcher", "研究问题", "Turn the goal into answerable questions and decision criteria.", ["Questions map to the desired deliverable."]),
-    simpleTemplate("source_strategy", "researcher", "资料路径", "Define primary sources, search strategy, and freshness requirements.", ["Source requirements are explicit."]),
-    simpleTemplate("synthesis", "researcher", "综合分析", "Define comparison dimensions and synthesis output.", ["The synthesis will support a decision or clear answer."]),
+    simpleTemplate("source_strategy", "researcher", "资料路径", "Define primary sources, search strategy, and freshness requirements.", ["Source requirements are explicit."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
+    simpleTemplate("synthesis", "researcher", "综合分析", "Define comparison dimensions and synthesis output.", ["The synthesis will support a decision or clear answer."], { toolHints: webResearchTools, skillHints: ["research", "web-search"] }),
     simpleTemplate("validation", "reviewer", "验证", "Define cross-checks, uncertainty notes, and citation expectations.", ["Findings can be audited." ]),
   ];
 }
@@ -735,15 +874,24 @@ function generalPlanningTemplates(selectedAgents: string[]): PlanningTemplate[] 
   ];
 }
 
-function simpleTemplate(key: string, role: string, title: string, moduleInstruction: string, acceptanceCriteria: string[]): PlanningTemplate {
+function simpleTemplate(
+  key: string,
+  role: string,
+  title: string,
+  moduleInstruction: string,
+  acceptanceCriteria: string[],
+  options: Partial<Pick<PlanningTemplate, "toolHints" | "skillHints">> = {},
+): PlanningTemplate {
+  const defaultToolHints = role === "developer" ? ["read_file"] : role === "researcher" ? ["read_file"] : [];
+  const defaultSkillHints = role === "reviewer" ? ["review"] : role === "developer" ? ["coding"] : role === "researcher" ? ["research"] : ["planning"];
   return {
     key,
     role,
     title,
     moduleInstruction,
     acceptanceCriteria,
-    toolHints: role === "developer" ? ["read_file"] : [],
-    skillHints: role === "reviewer" ? ["review"] : role === "developer" ? ["coding"] : ["planning"],
+    toolHints: options.toolHints || defaultToolHints,
+    skillHints: options.skillHints || defaultSkillHints,
     leaves: [
       {
         key: `${key}_define`,
@@ -790,15 +938,19 @@ export function sanitizePlannerMetadata(value: unknown): Metadata | undefined {
 
 const PLANNER_METADATA_ALLOWLIST = new Set([
   "area",
+  "artifactOutputDirectory",
   "category",
   "component",
   "feature",
+  "materializationTask",
   "module",
   "notes",
   "owner",
   "priority",
   "references",
+  "requiredFiles",
   "risk",
+  "skipFileMaterialization",
   "slice",
   "tags",
   "target",
@@ -832,6 +984,19 @@ function emptyPatch(parentKey: string, reason: string): GraphPatchSpec {
   };
 }
 
+function fallbackExpansionGoal(kind: TaskKind): string {
+  if (kind === "research_comparison") {
+    return "Expand from comparison scope into source inventory, per-subject fact gathering, comparison dimensions, synthesis, and validation leaves.";
+  }
+  if (kind === "research") {
+    return "Expand from research scope into source strategy, evidence gathering, synthesis, and validation leaves.";
+  }
+  if (kind === "fix") {
+    return "Expand from failure scope into reproduce, isolate, patch, and regression validation leaves.";
+  }
+  return "Expand architecture from coarse modules into concrete feature slices and verification leaves.";
+}
+
 function uniqueKey(base: string, existingKeys: Set<string>): string {
   if (!existingKeys.has(base)) return base;
   for (let index = 2; index < 1000; index += 1) {
@@ -850,6 +1015,29 @@ function normalizeReview(input: unknown, fallbackCriteria: string[]): PlanReview
 }
 
 function defaultExitCriteria(deliveryLevel: DeliveryLevel, goal: string): string[] {
+  const assessment = assessTaskComplexity(goal);
+  if (assessment.kind === "research_comparison") {
+    return [
+      "The comparison scope and dimensions are explicit.",
+      "Claims about each subject are traceable to repository, documentation, or clearly marked uncertainty.",
+      "Functional differences are synthesized into a concise comparison that directly answers the request.",
+      "Important caveats, freshness limits, and follow-up checks are documented.",
+    ];
+  }
+  if (assessment.kind === "research") {
+    return [
+      "Research questions and source boundaries are explicit.",
+      "Key claims are backed by evidence or marked uncertain.",
+      "The final synthesis answers the requested question without expanding into unrelated scope.",
+    ];
+  }
+  if (assessment.complexityClass === "single_long_operation") {
+    return [
+      "The long-running operation is bounded with clear start, progress, and completion signals.",
+      "Failure or timeout handling is documented.",
+      "The result includes a concise verification note.",
+    ];
+  }
   if (deliveryLevel === "production") {
     return [
       "Core user-facing requirements are implemented or explicitly blocked.",

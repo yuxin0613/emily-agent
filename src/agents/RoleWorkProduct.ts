@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import type { MemoryRecallResult, Metadata, SkillHintResolution, Task, ToolHintResolution } from "../types.ts";
+import { assessTaskComplexity, inferDeliveryLevel } from "../planning/PlanSpec.ts";
+import type { ToolExecutionResult } from "../tools/ToolExecutor.ts";
 
 export interface RoleWorkProductInput {
   role: string;
@@ -9,6 +11,7 @@ export interface RoleWorkProductInput {
   relevantMemory: MemoryRecallResult;
   toolResolution: ToolHintResolution;
   skillResolution: SkillHintResolution;
+  toolExecutionResults?: ToolExecutionResult[];
   workspaceDir?: string;
   canReadFiles?: boolean;
 }
@@ -20,14 +23,15 @@ export function buildRoleWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
+  toolExecutionResults = [],
   workspaceDir = process.cwd(),
   canReadFiles = true,
 }: RoleWorkProductInput): string {
   if (role === "developer") {
-    return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
+    return buildDeveloperWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, toolExecutionResults, workspaceDir, canReadFiles });
   }
   if (role === "researcher") {
-    return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, workspaceDir, canReadFiles });
+    return buildResearcherWorkProduct({ task, providerContent, relevantMemory, toolResolution, skillResolution, toolExecutionResults, workspaceDir, canReadFiles });
   }
   if (role === "reviewer") {
     return buildReviewerWorkProduct({ task, providerContent });
@@ -41,6 +45,7 @@ function buildDeveloperWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
+  toolExecutionResults = [],
   workspaceDir = process.cwd(),
   canReadFiles = true,
 }: Omit<RoleWorkProductInput, "role">): string {
@@ -69,6 +74,10 @@ function buildDeveloperWorkProduct({
     "## Implementation Strategy",
     ...implementationStrategy(task.input, fileRefs),
     "",
+    "## Tool Execution Evidence",
+    ...formatToolExecutionContext(toolExecutionResults),
+    ...fileWriteEvidenceWarnings(task, toolExecutionResults),
+    "",
     "## Verification Plan",
     ...verificationPlan(packageInfo, task.metadata),
     "",
@@ -89,6 +98,7 @@ function buildResearcherWorkProduct({
   relevantMemory,
   toolResolution,
   skillResolution,
+  toolExecutionResults = [],
   workspaceDir = process.cwd(),
   canReadFiles = true,
 }: Omit<RoleWorkProductInput, "role">): string {
@@ -110,6 +120,7 @@ function buildResearcherWorkProduct({
     "",
     "## Decision-Relevant Context",
     ...(memoryHighlights.length ? memoryHighlights.map((item) => `- Memory: ${item}`) : ["- No relevant memory was found."]),
+    ...formatToolExecutionContext(toolExecutionResults),
     ...formatFileContexts(fileRefs),
     "",
     "## Open Questions",
@@ -136,7 +147,7 @@ function buildReviewerWorkProduct({ task, providerContent }: Pick<RoleWorkProduc
   if (hasCoverageBlockerSignal(reviewedEvidence)) {
     reasons.push("The reviewed output mentions missing coverage or blockers.");
   }
-  if (!/sub-results?:|subagent|developer|researcher|planner|review/i.test(input)) {
+  if (expectsSubagentEvidence(task.input) && !/sub-results?:|subagent|developer|researcher|planner|review/i.test(input)) {
     reasons.push("The review input does not include enough subagent result evidence.");
   }
 
@@ -162,6 +173,10 @@ function buildReviewerWorkProduct({ task, providerContent }: Pick<RoleWorkProduc
   return JSON.stringify(value, null, 2);
 }
 
+function expectsSubagentEvidence(input: string): boolean {
+  return /graph outputs?|sub-results?|subagent|sub-agent|子任务结果|子代理结果|执行结果汇总|图执行结果/i.test(input);
+}
+
 function extractReviewedEvidence(input: string): string {
   const marker = input.match(/Sub-results?:\s*([\s\S]*)/i);
   if (marker?.[1]) return marker[1];
@@ -173,7 +188,7 @@ function extractReviewedEvidence(input: string): string {
 function hasExecutionFailureSignal(text: string): boolean {
   return signalLines(text).some((line) => {
     if (isNegatedSignalLine(line)) return false;
-    return /\bfailed\b|\bfail\b|dead_letter|没有完成|任务执行失败|error:|exception|traceback/.test(line);
+    return /\bfailed\b|\bfail\b|dead_letter|没有完成|任务执行失败|error:|exception|traceback|no successful write_file|no write_file execution succeeded|not treat this as implemented/.test(line);
   });
 }
 
@@ -340,6 +355,42 @@ function formatFileContexts(files: FileContext[]): string[] {
   });
 }
 
+function formatToolExecutionContext(results: ToolExecutionResult[]): string[] {
+  if (!results.length) return ["- Tool execution results: none."];
+  const lines = ["- Tool execution results:"];
+  for (const result of results.slice(0, 5)) {
+    if (!result.ok) {
+      lines.push(`  - ${result.tool}: failed${result.error ? ` (${truncate(result.error, 180)})` : ""}`);
+      continue;
+    }
+    if (result.tool === "web_search") {
+      lines.push(...formatWebSearchToolResult(result));
+      continue;
+    }
+    lines.push(`  - ${result.tool}: ok${result.output === undefined ? "" : ` - ${truncate(JSON.stringify(result.output), 300)}`}`);
+  }
+  return lines;
+}
+
+function formatWebSearchToolResult(result: ToolExecutionResult): string[] {
+  const output = isRecord(result.output) ? result.output : {};
+  const query = typeof output.query === "string" ? output.query : "";
+  const provider = typeof output.provider === "string" ? output.provider : "";
+  const rawResults = Array.isArray(output.results) ? output.results : [];
+  const lines = [
+    `  - web_search: ok${provider ? `, provider=${provider}` : ""}${query ? `, query="${truncate(query, 120)}"` : ""}, results=${rawResults.length}`,
+  ];
+  for (const item of rawResults.slice(0, 5)) {
+    if (!isRecord(item)) continue;
+    const title = typeof item.title === "string" ? item.title : "(untitled)";
+    const url = typeof item.url === "string" ? item.url : "";
+    const siteName = typeof item.siteName === "string" ? item.siteName : "";
+    const snippet = typeof item.snippet === "string" ? item.snippet : "";
+    lines.push(`    - ${truncate(title, 180)}${siteName ? ` (${siteName})` : ""}${url ? `: ${url}` : ""}${snippet ? ` - ${truncate(snippet, 260)}` : ""}`);
+  }
+  return lines;
+}
+
 function implementationStrategy(input: string, fileRefs: FileContext[]): string[] {
   const lower = input.toLowerCase();
   const steps = [
@@ -378,6 +429,16 @@ function developerRisks(task: Task, toolResolution: ToolHintResolution, fileRefs
   return risks.length ? risks : ["- No blocking risk detected from local context."];
 }
 
+function fileWriteEvidenceWarnings(task: Task, toolExecutionResults: ToolExecutionResult[]): string[] {
+  if (!requiresFileMaterialization(task)) return [];
+  const writeResults = toolExecutionResults.filter((result) => result.tool === "write_file");
+  if (writeResults.some((result) => result.ok)) return [];
+  if (!writeResults.length) {
+    return ["- No write_file execution succeeded; do not treat this as implemented."];
+  }
+  return ["- No successful write_file execution succeeded; do not treat this as implemented."];
+}
+
 function researchFacts({
   task,
   fileRefs,
@@ -414,7 +475,8 @@ function researchAssumptions(input: string): string[] {
 
 function openQuestions(input: string): string[] {
   const questions = [];
-  if (!/poc|uat|production|生产|验收|准出/.test(input.toLowerCase())) {
+  const assessment = assessTaskComplexity(input);
+  if (assessment.kind === "software_delivery" && !inferDeliveryLevel(input)) {
     questions.push("- What delivery level or exit standard should be used?");
   }
   if (/选择|比较|方案|tradeoff/i.test(input)) {
@@ -442,6 +504,22 @@ function stringMetadata(metadata: Metadata, key: string): string {
 
 function readStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
+function requiresFileMaterialization(task: Task): boolean {
+  if (task.metadata.skipFileMaterialization === true) return false;
+  const text = [
+    task.title,
+    task.input,
+    Array.isArray(task.metadata.acceptanceCriteria) ? task.metadata.acceptanceCriteria.join("\n") : "",
+  ].join("\n");
+  if (/(?:^|[\s`'"])(?:~\/|\/|\.{1,2}\/)?[A-Za-z0-9_./-]+\.(?:html|css|js|jsx|ts|tsx|json|md|txt)(?:[:\s`'",)]|$)/i.test(text)) return true;
+  return /(?:保存|保存到|输出到|写入|落盘|生成|编写|写一个|写代码|创建|新建|修改|更新|编辑).{0,40}(?:文件|代码|源码|网页|页面|HTML|html|index|artifact|file|code|source)/i.test(text)
+    || /(?:write|create|generate|edit|update|scaffold).{0,40}(?:file|code|source|html|page|artifact)/i.test(text);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function collectMatches(text: string, pattern: RegExp, limit: number): string[] {

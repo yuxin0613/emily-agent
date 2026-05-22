@@ -6,6 +6,7 @@ import { createRuntime } from "../src/runtime/createRuntime.ts";
 import { normalizeAgentRuntimeConfig } from "../src/llm/ProviderRegistry.ts";
 import { workerExecArgv } from "../src/tasks/RoleAgentManager.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_SECONDS } from "../src/runtime/RoleTaskTimeout.ts";
 
 assert.deepEqual(workerExecArgv([
   "--input-type=module",
@@ -18,8 +19,11 @@ assert.throws(() => normalizeAgentRuntimeConfig({ mainAgents: 2 }), /agents\.mai
 assert.throws(() => normalizeAgentRuntimeConfig({ maxSubagentsPerRole: 2 }), /agents\.maxSubagentsPerRole/);
 assert.equal(normalizeAgentRuntimeConfig({ maxConcurrentSubagents: 2 }).maxConcurrentSubagents, 2);
 assert.equal(normalizeAgentRuntimeConfig({}).plannerTaskTimeoutSeconds, 600);
+assert.equal(normalizeAgentRuntimeConfig({}).roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
 assert.equal(normalizeAgentRuntimeConfig({ plannerTaskTimeoutSeconds: 1200 }).plannerTaskTimeoutSeconds, 1200);
+assert.equal(normalizeAgentRuntimeConfig({ roleTaskTimeoutSeconds: 42 }).roleTaskTimeoutSeconds, 42);
 assert.throws(() => normalizeAgentRuntimeConfig({ plannerTaskTimeoutSeconds: 0 }), /agents\.plannerTaskTimeoutSeconds/);
+assert.throws(() => normalizeAgentRuntimeConfig({ roleTaskTimeoutSeconds: 0 }), /agents\.roleTaskTimeoutSeconds/);
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-core-"));
 const runtime = await createRuntime({
@@ -29,10 +33,16 @@ const runtime = await createRuntime({
     releaseSubagentsAfterTask: true,
     subagentIdleTtlSeconds: 0,
     plannerTaskTimeoutSeconds: 1200,
+    roleTaskTimeoutSeconds: 42,
   },
 });
 assert.equal(runtime.roleAgentManager.maxSubagentsPerRole, 1);
 assert.equal(runtime.roleAgentManager.maxConcurrentSubagents, 2);
+assert.equal(runtime.roleAgentManager.roleTaskTimeoutMs, 42_000);
+assert.equal(runtime.mainAgent.roleTaskTimeoutMs, 42_000);
+await runtime.updateSettings({ agents: { roleTaskTimeoutSeconds: 43 } });
+assert.equal(runtime.roleAgentManager.roleTaskTimeoutMs, 43_000);
+assert.equal(runtime.mainAgent.roleTaskTimeoutMs, 43_000);
 
 const cancellable = runtime.taskStore.createTask({
   role: "developer",

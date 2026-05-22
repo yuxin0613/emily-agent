@@ -1,12 +1,32 @@
 import assert from "node:assert/strict";
+import http from "node:http";
 import { mkdtemp } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
-import { parseGraphPatchSpec, validateGraphPatchSpec } from "../src/planning/PlanSpec.ts";
+import {
+  assessTaskComplexity,
+  parseGraphPatchSpec,
+  requiresDeliveryLevelClarification,
+  validateGraphPatchSpec,
+} from "../src/planning/PlanSpec.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS } from "../src/runtime/RoleTaskTimeout.ts";
 
 const dataDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-planner-graph-"));
+const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
+const previousSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
+const previousSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
+process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 const runtime = await createRuntime({ dataDir });
+
+const projectComparison = "查找项目 llm_wiki和obsidian做一下比较，看看两者功能有什么不同";
+const comparisonAssessment = assessTaskComplexity(projectComparison);
+assert.equal(comparisonAssessment.kind, "research_comparison");
+assert.equal(comparisonAssessment.longTask, true);
+assert.equal(comparisonAssessment.splittable, true);
+assert.equal(requiresDeliveryLevelClarification(projectComparison), false);
+assert.equal(requiresDeliveryLevelClarification("我要做一个应用，支持用户注册登录"), true);
 
 const clarification = await runtime.handleUserMessage("我要做一个应用，支持用户注册登录", {
   sessionId: "planner-graph",
@@ -15,6 +35,79 @@ const clarification = await runtime.handleUserMessage("我要做一个应用，�
 assert.match(clarification.content, /准出标准/);
 assert.deepEqual(clarification.delegatedTo, []);
 assert.equal(runtime.taskStore.getRun(clarification.runId!)?.status, "waiting_user");
+
+const comparisonResponse = await runtime.handleUserMessage(projectComparison, {
+  sessionId: "planner-comparison",
+  source: "test",
+});
+assert.ok(comparisonResponse.plan);
+assert.equal(runtime.taskStore.getRun(comparisonResponse.runId!)?.status, "done");
+assert.ok(comparisonResponse.delegatedTo.includes("researcher"));
+assert.ok(!comparisonResponse.delegatedTo.includes("developer"));
+assert.doesNotMatch(comparisonResponse.content, /请确认目标等级/);
+
+await runtime.updateSettings({ toolCallTimeoutSeconds: 7 });
+const webServer = http.createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+  response.end("<html><head><title>Obsidian Features</title></head><body><h1>Obsidian</h1><p>Markdown notes, backlinks, graph view, canvas, plugins, sync.</p></body></html>");
+});
+await new Promise<void>((resolve) => webServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = webServer.address() as AddressInfo;
+  const localUrl = `http://127.0.0.1:${address.port}/features`;
+  const webComparison = await runtime.handleUserMessage(`NEEDS_WEB_PLAN_CLARIFICATION 比较 ${localUrl} 和 /Users/yuxin/0_code/llm_wiki 的功能差异`, {
+    sessionId: "planner-web-comparison",
+    source: "test",
+  });
+  assert.equal(runtime.taskStore.getRun(webComparison.runId!)?.status, "done");
+  assert.ok(webComparison.delegatedTo.includes("researcher"));
+  assert.ok(!webComparison.needsUserInput);
+  const webTimeline = runtime.getTimeline({ runId: webComparison.runId! });
+  assert.ok(webTimeline.events.some((event) => event.type === "runtime.anomaly"
+    && event.payload.code === "planner_clarification_overridden"));
+  assert.ok(webTimeline.events.some((event) => event.type === "tool.execution.completed"
+    && event.payload.tool === "http_fetch"));
+  assert.equal(webTimeline.events.find((event) => event.type === "tool.execution.started"
+    && event.payload.tool === "http_fetch")?.payload.timeoutMs, 7000);
+} finally {
+  await new Promise<void>((resolve, reject) => webServer.close((error) => error ? reject(error) : resolve()));
+}
+
+const searchServer = http.createServer((_request, response) => {
+  response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+  response.end(JSON.stringify({
+    results: [{
+      title: "NVIDIA model news",
+      url: "https://example.com/nvidia-model-news",
+      content: "NVIDIA announced a new model update.",
+    }],
+  }));
+});
+await new Promise<void>((resolve) => searchServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = searchServer.address() as AddressInfo;
+  process.env.EMILY_WEB_SEARCH_PROVIDER = "endpoint";
+  process.env.EMILY_WEB_SEARCH_ENDPOINT = `http://127.0.0.1:${address.port}/search`;
+  const explicitSearch = await runtime.handleUserMessage("NEEDS_WEB_PLAN_CLARIFICATION 搜索nvidia最新大模型的新闻", {
+    sessionId: "planner-explicit-web-search",
+    source: "test",
+  });
+  assert.equal(runtime.taskStore.getRun(explicitSearch.runId!)?.status, "done");
+  assert.ok(!explicitSearch.needsUserInput);
+  assert.ok(explicitSearch.delegatedTo.includes("researcher"));
+  const searchTimeline = runtime.getTimeline({ runId: explicitSearch.runId! });
+  assert.ok(searchTimeline.events.some((event) => event.type === "runtime.anomaly"
+    && event.payload.code === "planner_clarification_overridden"));
+  assert.ok(searchTimeline.events.some((event) => event.type === "tool.execution.completed"
+    && event.payload.tool === "web_search"
+    && event.payload.ok === true));
+} finally {
+  await new Promise<void>((resolve, reject) => searchServer.close((error) => error ? reject(error) : resolve()));
+  if (previousSearchProvider === undefined) delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+  else process.env.EMILY_WEB_SEARCH_PROVIDER = previousSearchProvider;
+  if (previousSearchEndpoint === undefined) delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousSearchEndpoint;
+}
 
 const response = await runtime.handleUserMessage("我要做一个应用，支持用户注册登录，先达到 POC，跑通核心链路即可", {
   sessionId: "planner-graph",
@@ -46,7 +139,9 @@ const verificationTask = timeline.tasks.find((task) => task.metadata.graphKey ==
 assert.ok(implementationTask);
 assert.ok(verificationTask);
 assert.equal(implementationTask.metadata.parentKey, "architecture");
+assert.equal(implementationTask.metadata.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS);
 assert.equal(verificationTask.metadata.parentKey, "implementation");
+assert.equal(verificationTask.metadata.timeoutMs, DEFAULT_ROLE_TASK_TIMEOUT_MS);
 assert.ok(timeline.events.some((event) => event.type === "task.dependency.created"
   && event.taskId === verificationTask.id
   && event.payload.dependsOnTaskId === implementationTask.id));
@@ -162,5 +257,11 @@ assert.ok(failedExpansionPlanner);
 assert.notEqual(failedExpansionPlanner.metadata.graphId, fallbackExpanded.payload.graphId);
 
 await runtime.shutdown();
+if (previousPrivateEgress === undefined) delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
+else process.env.EMILY_HTTP_ALLOW_PRIVATE = previousPrivateEgress;
+if (previousSearchProvider === undefined) delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+else process.env.EMILY_WEB_SEARCH_PROVIDER = previousSearchProvider;
+if (previousSearchEndpoint === undefined) delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousSearchEndpoint;
 
 console.log("planner graph test passed");

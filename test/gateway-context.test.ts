@@ -76,8 +76,9 @@ assert.ok(beforeRun >= 1);
 assert.ok(afterRun >= 1);
 
 const audit = await runtime.securityAudit();
-assert.ok(["pass", "warn", "fail"].includes(audit.status));
+assert.equal(audit.status, "pass");
 assert.ok(audit.summary.providers >= 1);
+assert.deepEqual(audit.findings.map((finding) => finding.id), ["provider.default_echo"]);
 
 const server = await startWebServer({
   runtime,

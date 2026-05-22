@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { ToolExecutor } from "../src/tools/ToolExecutor.ts";
+import { ToolExecutor, type ToolExecutionEvent } from "../src/tools/ToolExecutor.ts";
 import { createDefaultToolRegistry } from "../src/tools/ToolRegistry.ts";
+import { createTaskGraph } from "../src/tasks/TaskGraph.ts";
 import { TaskStore } from "../src/tasks/TaskStore.ts";
 import type { RoleDefinition } from "../src/types.ts";
 
@@ -56,11 +57,21 @@ const timedOut = await timeoutExecutor.execute({
 assert.equal(timedOut.ok, false);
 assert.match(String(timedOut.error || ""), /timed out after 10ms/);
 
-const deniedByMode = await executor.execute({
+const approvalRequiredInWorkspaceMode = await executor.execute({
   tool: "http_fetch",
   args: { url: "https://example.com" },
   roleDefinition: role,
   permissionMode: "workspace_write",
+  sessionId: "tool-executor",
+});
+assert.equal(approvalRequiredInWorkspaceMode.ok, false);
+assert.match(String(approvalRequiredInWorkspaceMode.error || ""), /network_read/);
+
+const deniedByMode = await executor.execute({
+  tool: "http_fetch",
+  args: { url: "https://example.com" },
+  roleDefinition: role,
+  permissionMode: "read_only",
   sessionId: "tool-executor",
 });
 assert.equal(deniedByMode.ok, false);
@@ -95,6 +106,49 @@ const llmWikiReadApprovalRequired = await executor.execute({
 });
 assert.equal(llmWikiReadApprovalRequired.ok, false);
 assert.match(String(llmWikiReadApprovalRequired.error || ""), /network_read/);
+
+const auditEvents: ToolExecutionEvent[] = [];
+const auditExecutor = new ToolExecutor({
+  workspaceDir: process.cwd(),
+  taskStore,
+  registry: createDefaultToolRegistry(),
+  onEvent: (event) => auditEvents.push(event),
+});
+const eventsBeforeAudit = taskStore.getLatestEvents({ limit: 1000 });
+const beforeAuditEventId = eventsBeforeAudit.length ? eventsBeforeAudit[eventsBeforeAudit.length - 1].id : 0;
+const secretToken = "super-secret-token-value";
+const llmWikiSecretApprovalRequired = await auditExecutor.execute({
+  tool: "llm_wiki",
+  args: {
+    action: "query",
+    query: "agentos",
+    token: secretToken,
+    headers: {
+      Authorization: `Bearer ${secretToken}`,
+      "X-API-Key": secretToken,
+    },
+    nested: {
+      apiKey: secretToken,
+      body: `hidden ${secretToken}`,
+    },
+  },
+  roleDefinition: role,
+  permissionMode: "danger_full_access",
+  sessionId: "tool-executor",
+});
+assert.equal(llmWikiSecretApprovalRequired.ok, false);
+const auditStarted = taskStore.getLatestEvents({ afterId: beforeAuditEventId, limit: 20 })
+  .find((event) => event.type === "tool.execution.started" && event.payload.tool === "llm_wiki");
+assert.ok(auditStarted);
+const auditArgs = auditStarted.payload.args as Record<string, unknown>;
+const auditHeaders = auditArgs.headers as Record<string, unknown>;
+const auditNested = auditArgs.nested as Record<string, unknown>;
+assert.equal(auditArgs.token, "[redacted]");
+assert.equal(auditHeaders.Authorization, "[redacted]");
+assert.equal(auditHeaders["X-API-Key"], "[redacted]");
+assert.equal(auditNested.apiKey, "[redacted]");
+assert.doesNotMatch(JSON.stringify(auditStarted.payload), /super-secret-token-value/);
+assert.doesNotMatch(JSON.stringify(auditEvents), /super-secret-token-value/);
 
 const llmWikiWriteApprovalRequired = await executor.execute({
   tool: "llm_wiki",
@@ -178,6 +232,60 @@ const localNetworkBlocked = await executor.execute({
 assert.equal(localNetworkBlocked.ok, false);
 assert.match(String(localNetworkBlocked.error || ""), /private|local/);
 
+const allowlistServer = http.createServer((request, response) => {
+  if (request.url === "/redirect-localhost") {
+    const address = allowlistServer.address() as AddressInfo;
+    response.writeHead(302, { location: `http://localhost:${address.port}/private` });
+    response.end();
+    return;
+  }
+  response.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+  response.end("allowlisted local response");
+});
+await new Promise<void>((resolve) => allowlistServer.listen(0, "127.0.0.1", resolve));
+const allowlistAddress = allowlistServer.address() as AddressInfo;
+const previousBrowserEgressAllowlist = process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+try {
+  process.env.EMILY_HTTP_EGRESS_ALLOWLIST = `http://127.0.0.1:${allowlistAddress.port}`;
+  const allowlistedPrivate = await executor.execute({
+    tool: "http_fetch",
+    args: { url: `http://127.0.0.1:${allowlistAddress.port}/` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "explicit allowlist test" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(allowlistedPrivate.ok, true);
+  assert.match(String((allowlistedPrivate.output as { body?: string }).body || ""), /allowlisted local response/);
+
+  const redirectedPrivate = await executor.execute({
+    tool: "http_fetch",
+    args: { url: `http://127.0.0.1:${allowlistAddress.port}/redirect-localhost` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "redirect allowlist test" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(redirectedPrivate.ok, false);
+  assert.match(String(redirectedPrivate.error || ""), /private|local/);
+
+  process.env.EMILY_HTTP_EGRESS_ALLOWLIST = "*.0.0.1";
+  const malformedWildcard = await executor.execute({
+    tool: "http_fetch",
+    args: { url: `http://127.0.0.1:${allowlistAddress.port}/` },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "malformed wildcard deny test" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(malformedWildcard.ok, false);
+  assert.match(String(malformedWildcard.error || ""), /private|local/);
+} finally {
+  if (previousBrowserEgressAllowlist === undefined) delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  else process.env.EMILY_HTTP_EGRESS_ALLOWLIST = previousBrowserEgressAllowlist;
+  await new Promise<void>((resolve, reject) => allowlistServer.close((error) => error ? reject(error) : resolve()));
+}
+
 const mappedLoopbackBlocked = await executor.execute({
   tool: "http_fetch",
   args: { url: "http://[::ffff:7f00:1]:9/" },
@@ -207,7 +315,152 @@ const symlinkRead = await symlinkExecutor.execute({
 assert.equal(symlinkRead.ok, false);
 assert.match(String(symlinkRead.error || ""), /symlink|escapes workspace/);
 
+const homeWorkspaceDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-home-"));
+const previousHome = process.env.HOME;
+process.env.HOME = homeWorkspaceDir;
+try {
+  const homeExecutor = new ToolExecutor({
+    workspaceDir: homeWorkspaceDir,
+    registry: createDefaultToolRegistry(),
+  });
+  const writeRole: RoleDefinition = {
+    ...role,
+    allowedTools: ["write_file", "read_file"],
+    forbiddenTools: [],
+  };
+  const tildeWrite = await homeExecutor.execute({
+    tool: "write_file",
+    args: { path: "~/nested/tilde.txt", content: "tilde-expanded" },
+    roleDefinition: writeRole,
+    permissionMode: "workspace_write",
+    sessionId: "tool-executor",
+  });
+  assert.equal(tildeWrite.ok, true);
+  assert.equal(await readFile(path.join(homeWorkspaceDir, "nested", "tilde.txt"), "utf8"), "tilde-expanded");
+} finally {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+}
+
+const graphTasks = createTaskGraph({
+  taskStore,
+  baseMetadata: { runId: "tool-create-task", sessionId: "tool-executor" },
+  spec: {
+    tasks: [{
+      key: "root",
+      role: "planner",
+      title: "Root graph task",
+      input: "Root graph task.",
+    }],
+  },
+});
+const createTaskRole: RoleDefinition = {
+  ...role,
+  allowedTools: ["create_task"],
+  forbiddenTools: [],
+};
+const createdGraphTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "child",
+    role: "developer",
+    title: "Child graph task",
+    input: "Implement the child graph task.",
+    acceptanceCriteria: ["Child graph task exists."],
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(createdGraphTask.ok, true);
+assert.equal(((createdGraphTask.output as { metadata?: Record<string, unknown> }).metadata || {}).graphKey, "child");
+
+const duplicateGraphTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "child",
+    role: "developer",
+    title: "Duplicate graph task",
+    input: "This duplicate should be rejected.",
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(duplicateGraphTask.ok, false);
+assert.match(String(duplicateGraphTask.error || ""), /graphKey already exists/);
+
+const missingParentGraphTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "orphan",
+    parentKey: "missing_parent",
+    role: "developer",
+    title: "Orphan graph task",
+    input: "This orphan should be rejected.",
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(missingParentGraphTask.ok, false);
+assert.match(String(missingParentGraphTask.error || ""), /unknown parentKey/);
+
+const invalidGraphKeyTask = await executor.execute({
+  tool: "create_task",
+  args: {
+    graphKey: "bad key",
+    role: "developer",
+    title: "Invalid graph task",
+    input: "This invalid key should be rejected.",
+  },
+  roleDefinition: createTaskRole,
+  permissionMode: "workspace_write",
+  task: graphTasks.root,
+  runId: "tool-create-task",
+  sessionId: "tool-executor",
+});
+assert.equal(invalidGraphKeyTask.ok, false);
+assert.match(String(invalidGraphKeyTask.error || ""), /invalid graphKey/);
+
+const ollamaSearchPaths: string[] = [];
+let ollamaExperimentalSearchAvailable = true;
 const browserServer = http.createServer((request, response) => {
+  if (request.url === "/api/experimental/web_search" && request.method === "POST") {
+    ollamaSearchPaths.push(request.url);
+    if (!ollamaExperimentalSearchAvailable) {
+      response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "experimental endpoint unavailable" }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      results: [{
+        title: "Ollama local search",
+        url: "https://example.com/ollama-local",
+        content: "Local Ollama proxy result.",
+      }],
+    }));
+    return;
+  }
+  if (request.url === "/api/web_search" && request.method === "POST") {
+    ollamaSearchPaths.push(request.url);
+    response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({
+      results: [{
+        title: "Ollama hosted-compatible search",
+        url: "https://example.com/ollama-hosted",
+        content: "Hosted-compatible Ollama search result.",
+      }],
+    }));
+    return;
+  }
   if (request.url === "/v1/query" && request.method === "POST") {
     response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({
@@ -249,6 +502,10 @@ const browserServer = http.createServer((request, response) => {
 await new Promise<void>((resolve) => browserServer.listen(0, "127.0.0.1", resolve));
 const address = browserServer.address() as AddressInfo;
 const previousPrivateEgress = process.env.EMILY_HTTP_ALLOW_PRIVATE;
+const previousWebSearchProvider = process.env.EMILY_WEB_SEARCH_PROVIDER;
+const previousWebSearchEndpoint = process.env.EMILY_WEB_SEARCH_ENDPOINT;
+const previousOllamaBaseUrl = process.env.EMILY_OLLAMA_BASE_URL;
+const previousEgressAllowlist = process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
 process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
 try {
   const webSearch = await executor.execute({
@@ -264,6 +521,77 @@ try {
   assert.equal(webSearchOutput.count, 1);
   assert.equal(webSearchOutput.results?.[0]?.title, "AgentOS launch notes");
   assert.equal(webSearchOutput.results?.[0]?.snippet, "Bounded external search result for launch readiness.");
+
+  const ollamaSearch = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "ollama", baseUrl: `http://127.0.0.1:${address.port}`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test ollama search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(ollamaSearch.ok, true);
+  const ollamaSearchOutput = ollamaSearch.output as { count?: number; results?: Array<{ title?: string; snippet?: string }> };
+  assert.equal(ollamaSearchOutput.count, 1);
+  assert.equal(ollamaSearchOutput.results?.[0]?.title, "Ollama local search");
+  assert.equal(ollamaSearchOutput.results?.[0]?.snippet, "Local Ollama proxy result.");
+  assert.equal(ollamaSearchPaths.at(-1), "/api/experimental/web_search");
+
+  delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
+  delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  const endpointPrivateBlocked = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "endpoint", endpoint: `http://127.0.0.1:${address.port}/web-search`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local endpoint private egress should remain blocked" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(endpointPrivateBlocked.ok, false);
+  assert.match(String(endpointPrivateBlocked.error || ""), /private or local address is blocked/);
+
+  const localOllamaWithoutGlobalPrivateAccess = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "ollama", baseUrl: `http://127.0.0.1:${address.port}`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "scoped local Ollama web search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(localOllamaWithoutGlobalPrivateAccess.ok, true);
+  assert.equal((localOllamaWithoutGlobalPrivateAccess.output as { results?: Array<{ title?: string }> }).results?.[0]?.title, "Ollama local search");
+  process.env.EMILY_HTTP_ALLOW_PRIVATE = "true";
+
+  delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+  delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  process.env.EMILY_OLLAMA_BASE_URL = `http://127.0.0.1:${address.port}`;
+  const defaultOllamaSearch = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos default search", count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test default ollama search" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(defaultOllamaSearch.ok, true);
+  const defaultOllamaSearchOutput = defaultOllamaSearch.output as { provider?: string; results?: Array<{ title?: string }> };
+  assert.equal(defaultOllamaSearchOutput.provider, "ollama");
+  assert.equal(defaultOllamaSearchOutput.results?.[0]?.title, "Ollama local search");
+
+  ollamaExperimentalSearchAvailable = false;
+  const ollamaHostedFallback = await executor.execute({
+    tool: "web_search",
+    args: { query: "agentos launch", provider: "ollama", baseUrl: `http://127.0.0.1:${address.port}`, count: 3 },
+    roleDefinition: role,
+    permissionMode: "danger_full_access",
+    approval: { approved: true, template: "network_read", reason: "local test ollama hosted fallback" },
+    sessionId: "tool-executor",
+  });
+  assert.equal(ollamaHostedFallback.ok, true);
+  const ollamaHostedFallbackOutput = ollamaHostedFallback.output as { count?: number; results?: Array<{ title?: string; snippet?: string }> };
+  assert.equal(ollamaHostedFallbackOutput.count, 1);
+  assert.equal(ollamaHostedFallbackOutput.results?.[0]?.title, "Ollama hosted-compatible search");
+  assert.deepEqual(ollamaSearchPaths.slice(-2), ["/api/experimental/web_search", "/api/web_search"]);
 
   const wikiQuery = await executor.execute({
     tool: "llm_wiki",
@@ -302,6 +630,14 @@ try {
 } finally {
   if (previousPrivateEgress === undefined) delete process.env.EMILY_HTTP_ALLOW_PRIVATE;
   else process.env.EMILY_HTTP_ALLOW_PRIVATE = previousPrivateEgress;
+  if (previousWebSearchProvider === undefined) delete process.env.EMILY_WEB_SEARCH_PROVIDER;
+  else process.env.EMILY_WEB_SEARCH_PROVIDER = previousWebSearchProvider;
+  if (previousWebSearchEndpoint === undefined) delete process.env.EMILY_WEB_SEARCH_ENDPOINT;
+  else process.env.EMILY_WEB_SEARCH_ENDPOINT = previousWebSearchEndpoint;
+  if (previousOllamaBaseUrl === undefined) delete process.env.EMILY_OLLAMA_BASE_URL;
+  else process.env.EMILY_OLLAMA_BASE_URL = previousOllamaBaseUrl;
+  if (previousEgressAllowlist === undefined) delete process.env.EMILY_HTTP_EGRESS_ALLOWLIST;
+  else process.env.EMILY_HTTP_EGRESS_ALLOWLIST = previousEgressAllowlist;
   await new Promise<void>((resolve, reject) => browserServer.close((error) => error ? reject(error) : resolve()));
 }
 

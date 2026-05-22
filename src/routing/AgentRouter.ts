@@ -1,3 +1,5 @@
+import { assessTaskComplexity } from "../planning/PlanSpec.ts";
+
 export interface RouteMatch {
   role: string;
   reason: string;
@@ -24,16 +26,16 @@ const ROUTE_RULES: RouteRule[] = [
   {
     id: "developer-code",
     role: "developer",
-    reason: "request mentions implementation, code, APIs, UI, architecture, or project build work",
+    reason: "request mentions implementation, code, web/UI, APIs, architecture, or project build work",
     weight: 4,
-    pattern: /(code|bug|fix|实现|开发|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口|测试|优化|修复)/i,
+    pattern: /(code|coding|bug|fix|implement|build|create|generate|web|html|frontend|game|实现|开发|创建|新增|生成|编写|代码|写一个|写代码|网页|前端|游戏|报错|架构|node|api|webui|tui|应用|系统|平台|项目|功能|接口|测试|优化|修复)/i,
   },
   {
     id: "researcher-context",
     role: "researcher",
     reason: "request asks for research, comparison, explanation, or context gathering",
     weight: 3,
-    pattern: /(research|compare|explain|调研|比较|对比|解释|分析|总结|建议|设计|借鉴)/i,
+    pattern: /(research|compare|explain|search|latest|news|调研|比较|对比|解释|分析|总结|建议|设计|借鉴|搜索|搜一下|查找|检索|联网|新闻|最新|动态)/i,
   },
   {
     id: "reviewer-review",
@@ -54,8 +56,11 @@ const ROUTE_RULES: RouteRule[] = [
 export class AgentRouter {
   route(input: string, options: { availableRoles?: string[]; includeReviewer?: boolean } = {}): AgentRouteDecision {
     const available = new Set(options.availableRoles || []);
+    const assessment = assessTaskComplexity(input);
+    const researchOnly = assessment.kind === "research_comparison" || assessment.kind === "research";
     const matches = ROUTE_RULES
       .filter((rule) => !available.size || available.has(rule.role))
+      .filter((rule) => !(researchOnly && rule.role === "developer"))
       .filter((rule) => rule.pattern.test(input))
       .map((rule) => ({
         role: rule.role,
@@ -66,6 +71,9 @@ export class AgentRouter {
       .sort((a, b) => b.score - a.score || a.role.localeCompare(b.role));
 
     const selected = new Set<string>(["planner"]);
+    if (!researchOnly && (assessment.kind === "software_delivery" || assessment.kind === "fix")) {
+      selected.add("developer");
+    }
     for (const match of matches) {
       if (match.role === "reviewer" && !options.includeReviewer) continue;
       if (match.role === "memory-curator") continue;

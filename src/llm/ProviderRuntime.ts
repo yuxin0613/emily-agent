@@ -1,6 +1,7 @@
 import type { ModelCompleteInput, ModelCompleteResult, ModelProvider, ProviderConfig, ProviderErrorCode } from "./ModelProvider.ts";
 import { ProviderCallError } from "./ModelProvider.ts";
 import { jsonInstruction, normalizeProviderJsonOutput } from "./ProviderJson.ts";
+import { circuitBreakerCooldownMs, retryBaseMs, retryMaxMs } from "./ProviderTiming.ts";
 import type { ProviderUsageStore } from "./ProviderUsageStore.ts";
 
 interface CircuitState {
@@ -65,8 +66,8 @@ export class ResilientModelProvider implements ModelProvider {
     }
 
     const maxRetries = boundedNumber(this.config.config?.maxRetries, 1, 0, 5);
-    const retryBaseMs = boundedNumber(this.config.config?.retryBaseMs, 200, 1, 60000);
-    const retryMaxMs = boundedNumber(this.config.config?.retryMaxMs, 5000, retryBaseMs, 120000);
+    const retryBaseDelayMs = retryBaseMs(this.config);
+    const retryMaxDelayMs = retryMaxMs(this.config, retryBaseDelayMs);
     let lastError: ProviderCallError | null = null;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -105,7 +106,7 @@ export class ResilientModelProvider implements ModelProvider {
           this.usageStore?.recordFailure(this.config, callInput, lastError, Date.now() - startedAt, attempt + 1);
           throw lastError;
         }
-        await sleep(backoffMs(attempt, retryBaseMs, retryMaxMs));
+        await sleep(backoffMs(attempt, retryBaseDelayMs, retryMaxDelayMs));
       }
     }
 
@@ -204,7 +205,7 @@ function recordProviderFailure(providerId: string, config: ProviderConfig): void
   state.failures += 1;
   const threshold = boundedNumber(config.config?.circuitBreakerFailureThreshold, 5, 1, 100);
   if (state.failures >= threshold) {
-    state.openedUntil = Date.now() + boundedNumber(config.config?.circuitBreakerCooldownMs, 60000, 1000, 60 * 60 * 1000);
+    state.openedUntil = Date.now() + circuitBreakerCooldownMs(config);
   }
 }
 

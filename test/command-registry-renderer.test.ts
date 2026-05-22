@@ -21,6 +21,44 @@ try {
   const healthText = String(await runtime.runCommand("health", { format: "text" }));
   assert.match(healthText, /Runtime Health/);
 
+  const commandPermissions = new Map(runtime.listCommands().map((command) => [command.name, command.permission]));
+  for (const name of [
+    "session.create",
+    "session.clear",
+    "session.restore",
+    "session.trash",
+    "provider.add",
+    "provider.enable",
+    "provider.disable",
+    "provider.remove",
+    "role.add",
+    "role.update_provider",
+    "role.initialize_defaults",
+    "graph.add",
+    "graph.add_before",
+    "graph.add_after",
+    "graph.update",
+    "graph.delete",
+    "skills.candidates.build",
+    "skills.candidates.approve",
+    "skills.candidates.reject",
+    "cron.create",
+    "cron.update",
+    "cron.pause",
+    "cron.resume",
+    "cron.delete",
+    "cron.run",
+    "diagnostics.repair",
+    "maintenance.run",
+    "experiences.build_daily",
+    "experiences.feedback",
+    "task.cancel",
+    "run.cancel",
+    "tool.execute",
+  ]) {
+    assert.notEqual(commandPermissions.get(name), "read", `${name} must not be exposed as a read command`);
+  }
+
   const toolsText = String(await runtime.runCommand("tools", { format: "text" }));
   assert.match(toolsText, /Tools/);
   assert.match(toolsText, /read_file/);
@@ -85,6 +123,42 @@ try {
     params: {},
   }, { maxPermission: "read" });
   assert.equal(toolsListReadToken.ok, true);
+
+  const gatewayDangerChatWrite = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "chat-danger-write-1",
+    method: "chat.send",
+    params: { message: "hi", permissionMode: "danger_full_access" },
+  }, { maxPermission: "write" });
+  assert.equal(gatewayDangerChatWrite.ok, false);
+  assert.match(String(gatewayDangerChatWrite.error?.message || ""), /requires danger permission/);
+
+  await assert.rejects(
+    runtime.runCommand("cron.create", {
+      input: {
+        name: "danger cron",
+        schedule: "@hourly",
+        message: "hi",
+        permissionMode: "danger_full_access",
+      },
+      maxPermission: "write",
+    }),
+    /requires danger permission/,
+  );
+
+  const gatewayDangerCronWrite = await dispatchGatewayRequest(runtime as never, {
+    type: "request",
+    id: "cron-danger-write-1",
+    method: "cron.create",
+    params: {
+      name: "danger cron gateway",
+      schedule: "@hourly",
+      message: "hi",
+      permissionMode: "danger_full_access",
+    },
+  }, { maxPermission: "write" });
+  assert.equal(gatewayDangerCronWrite.ok, false);
+  assert.match(String(gatewayDangerCronWrite.error?.message || ""), /requires danger permission/);
 
   const toolRun = await dispatchGatewayRequest(runtime as never, {
     type: "request",

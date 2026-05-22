@@ -7,6 +7,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { domainToASCII } from "node:url";
 import { promisify } from "node:util";
 import type { Metadata, PermissionMode, RoleDefinition, Task, ToolPermission } from "../types.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
@@ -70,6 +71,12 @@ interface WebSearchResult {
   url: string;
   snippet: string;
   siteName?: string;
+}
+
+interface OllamaWebSearchAttempt {
+  baseUrl: URL;
+  path: string;
+  apiKey?: string;
 }
 
 export interface ToolExecutionResult {
@@ -197,12 +204,12 @@ export class ToolExecutor {
   }
 
   private async executeAllowed(tool: ToolPermission, args: Record<string, unknown>, request: ToolExecutionRequest): Promise<unknown> {
-    if (tool === "read_file") return this.readFile(args);
-    if (tool === "write_file") return this.writeFile(args);
+    if (tool === "read_file") return this.readFile(args, request);
+    if (tool === "write_file") return this.writeFile(args, request);
     if (tool === "run_tests") return this.runTests(args);
     if (tool === "inspect_task") return this.inspectTask(args);
     if (tool === "create_task") return this.createTask(args, request);
-    if (tool === "delete_file") return this.deleteFile(args);
+    if (tool === "delete_file") return this.deleteFile(args, request);
     if (tool === "http_fetch") return this.httpFetch(args);
     if (tool === "web_search") return this.webSearch(args);
     if (tool === "browser") return this.browser(args);
@@ -222,36 +229,42 @@ export class ToolExecutor {
     throw new ToolApprovalRequiredError(`${requirement.reason || `Tool ${request.tool} requires explicit approval before execution`}${suffix}.`, requirement.template);
   }
 
-  private async readFile(args: Record<string, unknown>): Promise<{ path: string; content: string; bytes: number; truncated: boolean }> {
-    const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path, "path"));
+  private async readFile(args: Record<string, unknown>, request: ToolExecutionRequest): Promise<{ path: string; content: string; bytes: number; truncated: boolean }> {
+    const filePath = await this.resolveReadableWorkspacePath(requiredString(args.path, "path"), {
+      allowOutsideWorkspace: canAccessOutsideWorkspace(request),
+    });
     const maxBytes = positiveNumber(args.maxBytes, 128000);
     const content = await readFile(filePath, "utf8");
     const truncated = Buffer.byteLength(content, "utf8") > maxBytes;
     const output = truncated ? content.slice(0, maxBytes) : content;
     return {
-      path: path.relative(this.workspaceDir, filePath),
+      path: this.formatToolPath(filePath),
       content: output,
       bytes: Buffer.byteLength(content, "utf8"),
       truncated,
     };
   }
 
-  private async writeFile(args: Record<string, unknown>): Promise<{ path: string; bytes: number }> {
-    const filePath = await this.resolveWritableWorkspacePath(requiredString(args.path, "path"));
+  private async writeFile(args: Record<string, unknown>, request: ToolExecutionRequest): Promise<{ path: string; bytes: number }> {
+    const filePath = await this.resolveWritableWorkspacePath(requiredString(args.path, "path"), {
+      allowOutsideWorkspace: canAccessOutsideWorkspace(request),
+    });
     const content = String(args.content ?? "");
     await mkdir(path.dirname(filePath), { recursive: true });
     await writeFile(filePath, content, "utf8");
     return {
-      path: path.relative(this.workspaceDir, filePath),
+      path: this.formatToolPath(filePath),
       bytes: Buffer.byteLength(content, "utf8"),
     };
   }
 
-  private async deleteFile(args: Record<string, unknown>): Promise<{ path: string; deleted: boolean }> {
-    const filePath = await this.resolveDeletableWorkspacePath(requiredString(args.path, "path"));
+  private async deleteFile(args: Record<string, unknown>, request: ToolExecutionRequest): Promise<{ path: string; deleted: boolean }> {
+    const filePath = await this.resolveDeletableWorkspacePath(requiredString(args.path, "path"), {
+      allowOutsideWorkspace: canAccessOutsideWorkspace(request),
+    });
     await rm(filePath, { force: false, recursive: false });
     return {
-      path: path.relative(this.workspaceDir, filePath),
+      path: this.formatToolPath(filePath),
       deleted: true,
     };
   }
@@ -553,27 +566,41 @@ export class ToolExecutor {
     externalContent: { untrusted: boolean; source: string; provider: string };
     results: WebSearchResult[];
   }> {
-    const baseUrl = new URL(String(args.baseUrl || process.env.EMILY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"));
-    const endpoint = new URL("/api/experimental/web_search", baseUrl);
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "User-Agent": "Emily-AgentOS/0.1 web_search",
-    };
-    if (process.env.EMILY_OLLAMA_API_KEY) headers.Authorization = `Bearer ${process.env.EMILY_OLLAMA_API_KEY}`;
-    const response = await fetchWithPinnedEgress(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ query, max_results: count }),
-      signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
-    });
-    if (response.status === 401) throw new Error("Ollama web search authentication failed. Run ollama signin or configure EMILY_OLLAMA_API_KEY.");
-    if (response.status === 403) throw new Error("Ollama web search is unavailable on the configured host.");
-    if (!response.ok) {
-      const detail = await readResponseText(response, 64000);
-      throw new Error(`Ollama web search failed (${response.status}): ${detail.text || ""}`.trim());
+    const baseUrl = parseHttpUrl(String(args.baseUrl || process.env.EMILY_OLLAMA_BASE_URL || process.env.OLLAMA_HOST || "http://127.0.0.1:11434"));
+    const configuredApiKey = firstString(args.apiKey, process.env.EMILY_OLLAMA_API_KEY);
+    const envApiKey = String(process.env.OLLAMA_API_KEY || "").trim() || undefined;
+    const attempts = buildOllamaWebSearchAttempts({ baseUrl, configuredApiKey, envApiKey });
+    const body = JSON.stringify({ query, max_results: count });
+    let lastError: Error | null = null;
+
+    for (const attempt of attempts) {
+      const endpoint = new URL(attempt.path, attempt.baseUrl);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "User-Agent": "Emily-AgentOS/0.1 web_search",
+      };
+      if (attempt.apiKey) headers.Authorization = `Bearer ${attempt.apiKey}`;
+      const response = await fetchWithPinnedEgress(endpoint, {
+        method: "POST",
+        headers,
+        body,
+        allowPrivateEgress: isLocalOllamaWebSearchEndpoint(endpoint),
+        signal: AbortSignal.timeout(positiveNumber(args.timeoutMs, 15000)),
+      });
+      if (response.status === 401) throw new Error("Ollama web search authentication failed. Run ollama signin or configure EMILY_OLLAMA_API_KEY/OLLAMA_API_KEY.");
+      if (response.status === 403) throw new Error("Ollama web search is unavailable on the configured host.");
+      if (!response.ok) {
+        const detail = await readResponseText(response, 64000);
+        const message = `Ollama web search failed (${response.status}): ${detail.text || ""}`.trim();
+        lastError = new Error(message);
+        if (response.status === 404) continue;
+        throw lastError;
+      }
+      const payload = parseJsonPayload((await readResponseText(response, 256000)).text, "Ollama web search response");
+      return webSearchResponse(query, "ollama", normalizeWebSearchPayload(payload, count), startedAt);
     }
-    const payload = parseJsonPayload((await readResponseText(response, 256000)).text, "Ollama web search response");
-    return webSearchResponse(query, "ollama", normalizeWebSearchPayload(payload, count), startedAt);
+
+    throw lastError || new Error("Ollama web search failed");
   }
 
   private async duckDuckGoWebSearch(query: string, count: number, startedAt: number): Promise<{
@@ -631,6 +658,14 @@ export class ToolExecutor {
     const parentGraphKey = typeof args.parentKey === "string" && args.parentKey.trim()
       ? args.parentKey.trim()
       : typeof request.task?.metadata.graphKey === "string" ? request.task.metadata.graphKey : "";
+    if (graphKey) {
+      validateCreateTaskGraphNode({
+        taskStore: this.taskStore,
+        requestTask: request.task || null,
+        graphKey,
+        parentGraphKey,
+      });
+    }
     const inheritedGraph: Metadata = graphKey ? {
       graphKey,
       graphId: typeof request.task?.metadata.graphId === "string" ? request.task.metadata.graphId : "",
@@ -680,24 +715,25 @@ export class ToolExecutor {
     return task;
   }
 
-  private resolveLexicalWorkspacePath(input: string): string {
-    const resolved = path.resolve(this.workspaceDir, input);
-    if (resolved !== this.workspaceDir && !resolved.startsWith(`${this.workspaceDir}${path.sep}`)) {
+  private resolveLexicalWorkspacePath(input: string, { allowOutsideWorkspace = false }: { allowOutsideWorkspace?: boolean } = {}): string {
+    const expanded = expandHomePath(input);
+    const resolved = path.resolve(this.workspaceDir, expanded);
+    if (!allowOutsideWorkspace && resolved !== this.workspaceDir && !resolved.startsWith(`${this.workspaceDir}${path.sep}`)) {
       throw new Error(`Path escapes workspace: ${input}`);
     }
     return resolved;
   }
 
-  private async resolveReadableWorkspacePath(input: string): Promise<string> {
-    const resolved = this.resolveLexicalWorkspacePath(input);
+  private async resolveReadableWorkspacePath(input: string, options: { allowOutsideWorkspace?: boolean } = {}): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input, options);
     const real = await realpath(resolved);
-    await this.assertRealPathInsideWorkspace(real, input);
+    if (!options.allowOutsideWorkspace) await this.assertRealPathInsideWorkspace(real, input);
     return real;
   }
 
-  private async resolveWritableWorkspacePath(input: string): Promise<string> {
-    const resolved = this.resolveLexicalWorkspacePath(input);
-    await this.assertParentInsideWorkspace(path.dirname(resolved), input);
+  private async resolveWritableWorkspacePath(input: string, options: { allowOutsideWorkspace?: boolean } = {}): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input, options);
+    if (!options.allowOutsideWorkspace) await this.assertParentInsideWorkspace(path.dirname(resolved), input);
     const stats = await lstat(resolved).catch((error) => {
       if (isNodeError(error) && error.code === "ENOENT") return null;
       throw error;
@@ -705,15 +741,15 @@ export class ToolExecutor {
     if (stats?.isSymbolicLink()) {
       throw new Error(`Refusing to write through workspace symlink: ${input}`);
     }
-    if (stats) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
+    if (stats && !options.allowOutsideWorkspace) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
     return resolved;
   }
 
-  private async resolveDeletableWorkspacePath(input: string): Promise<string> {
-    const resolved = this.resolveLexicalWorkspacePath(input);
-    await this.assertParentInsideWorkspace(path.dirname(resolved), input);
+  private async resolveDeletableWorkspacePath(input: string, options: { allowOutsideWorkspace?: boolean } = {}): Promise<string> {
+    const resolved = this.resolveLexicalWorkspacePath(input, options);
+    if (!options.allowOutsideWorkspace) await this.assertParentInsideWorkspace(path.dirname(resolved), input);
     const stats = await lstat(resolved);
-    if (!stats.isSymbolicLink()) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
+    if (!stats.isSymbolicLink() && !options.allowOutsideWorkspace) await this.assertRealPathInsideWorkspace(await realpath(resolved), input);
     return resolved;
   }
 
@@ -729,17 +765,28 @@ export class ToolExecutor {
     }
   }
 
+  private formatToolPath(filePath: string): string {
+    const relative = path.relative(this.workspaceDir, filePath);
+    return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : filePath;
+  }
+
   private addEvent(type: string, request: ToolExecutionRequest, payload: Record<string, unknown>): number | null {
+    const sanitizedPayload = sanitizeEventRecord(payload);
     const eventId = this.taskStore?.addEvent({
       type,
       taskId: request.task?.id || null,
       payload: {
-        ...payload,
+        ...sanitizedPayload,
         runId: request.runId || request.task?.metadata.runId || "",
         sessionId: request.sessionId || request.task?.metadata.sessionId || "",
       },
     }) ?? null;
-    if (eventId) this.onEvent?.({ eventId, type, request, payload });
+    if (eventId) this.onEvent?.({
+      eventId,
+      type,
+      request: sanitizeRequestForEvent(request),
+      payload: sanitizedPayload,
+    });
     return eventId;
   }
 }
@@ -818,6 +865,7 @@ interface PinnedFetchInit {
   headers?: Record<string, string>;
   body?: string | Buffer | Uint8Array;
   signal?: AbortSignal;
+  allowPrivateEgress?: boolean;
 }
 
 interface HttpEgressTarget {
@@ -828,18 +876,18 @@ interface HttpEgressTarget {
 }
 
 async function fetchWithPinnedEgress(url: URL, init: PinnedFetchInit = {}, redirectCount = 0): Promise<Response> {
-  const target = await resolveHttpEgressTarget(url);
+  const target = await resolveHttpEgressTarget(url, { allowPrivateEgress: init.allowPrivateEgress === true });
   return nativeHttpRequest(target, init, redirectCount);
 }
 
-async function resolveHttpEgressTarget(url: URL): Promise<HttpEgressTarget> {
+async function resolveHttpEgressTarget(url: URL, options: { allowPrivateEgress?: boolean } = {}): Promise<HttpEgressTarget> {
   assertHttpUrlSafe(url);
   const hostname = url.hostname.toLowerCase();
   const literalIp = ipAddressFromHost(hostname);
   const hostHeader = url.host;
   const servername = literalIp ? undefined : url.hostname;
 
-  if (isHttpEgressAllowedByPolicy(url)) {
+  if (options.allowPrivateEgress || isHttpEgressAllowedByPolicy(url)) {
     const connectHostname = literalIp || await firstResolvedAddress(hostname);
     return { url, connectHostname, hostHeader, servername };
   }
@@ -883,8 +931,9 @@ function nativeHttpRequest(target: HttpEgressTarget, init: PinnedFetchInit, redi
       if (isRedirectStatus(status) && location && redirectCount < 5) {
         response.resume();
         const nextUrl = new URL(location, target.url);
+        const nextInit = { ...redirectInit(init, status, method), allowPrivateEgress: false };
         resolveHttpEgressTarget(nextUrl)
-          .then((nextTarget) => nativeHttpRequest(nextTarget, redirectInit(init, status, method), redirectCount + 1))
+          .then((nextTarget) => nativeHttpRequest(nextTarget, nextInit, redirectCount + 1))
           .then(resolve, reject);
         return;
       }
@@ -1012,14 +1061,9 @@ function multipartToken(value: string): string {
 
 function isHttpEgressAllowedByPolicy(url: URL): boolean {
   if (process.env.EMILY_HTTP_ALLOW_PRIVATE === "true") return true;
-  const hostname = url.hostname.toLowerCase();
-  const origin = url.origin.toLowerCase();
-  return parseCsvEnv("EMILY_HTTP_EGRESS_ALLOWLIST").some((entry) => {
-    const normalized = entry.toLowerCase();
-    if (normalized === hostname || normalized === origin) return true;
-    if (normalized.startsWith("*.")) return hostname.endsWith(normalized.slice(1));
-    return false;
-  });
+  const hostname = canonicalHostname(url.hostname);
+  const origin = canonicalOrigin(url);
+  return parseCsvEnv("EMILY_HTTP_EGRESS_ALLOWLIST").some((entry) => allowlistEntryMatches(entry, hostname, origin));
 }
 
 function parseCsvEnv(name: string): string[] {
@@ -1027,6 +1071,64 @@ function parseCsvEnv(name: string): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+type HttpEgressAllowlistEntry =
+  | { kind: "host"; hostname: string }
+  | { kind: "origin"; origin: string }
+  | { kind: "wildcard"; suffix: string };
+
+function allowlistEntryMatches(entry: string, hostname: string, origin: string): boolean {
+  const normalized = normalizeAllowlistEntry(entry);
+  if (!normalized) return false;
+  if (normalized.kind === "origin") return normalized.origin === origin;
+  if (normalized.kind === "wildcard") return hostname !== normalized.suffix && hostname.endsWith(`.${normalized.suffix}`);
+  return normalized.hostname === hostname;
+}
+
+function normalizeAllowlistEntry(entry: string): HttpEgressAllowlistEntry | null {
+  const raw = entry.trim().toLowerCase();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return null;
+      return { kind: "origin", origin: canonicalOrigin(url) };
+    } catch {
+      return null;
+    }
+  }
+  if (raw.startsWith("*.")) {
+    const suffix = canonicalHostname(raw.slice(2));
+    if (!suffix || suffix.includes("*") || suffix.includes(":") || !/[a-z]/i.test(suffix)) return null;
+    return { kind: "wildcard", suffix };
+  }
+  const hostname = canonicalHostname(raw);
+  if (!hostname || hostname.includes("*") || hostname.includes(":")) return null;
+  return { kind: "host", hostname };
+}
+
+function isLocalOllamaWebSearchEndpoint(url: URL): boolean {
+  const hostname = canonicalHostname(url.hostname);
+  const localHost = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  return localHost
+    && (url.protocol === "http:" || url.protocol === "https:")
+    && (url.pathname === OLLAMA_LOCAL_WEB_SEARCH_PROXY_PATH || url.pathname === OLLAMA_HOSTED_WEB_SEARCH_PATH);
+}
+
+function canonicalHostname(hostname: string): string {
+  const stripped = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+  if (!stripped) return "";
+  const literalIp = ipAddressFromHost(stripped);
+  if (literalIp) return literalIp.toLowerCase();
+  return (domainToASCII(stripped) || stripped).toLowerCase();
+}
+
+function canonicalOrigin(url: URL): string {
+  const hostname = canonicalHostname(url.hostname);
+  const literalIp = ipAddressFromHost(hostname);
+  const host = literalIp && isIP(literalIp) === 6 ? `[${literalIp}]` : hostname;
+  return `${url.protocol}//${host}${url.port ? `:${url.port}` : ""}`;
 }
 
 function ipAddressFromHost(hostname: string): string | null {
@@ -1224,11 +1326,58 @@ function llmWikiActionCategory(args: Record<string, unknown>): "read" | "write" 
 }
 
 function parseWebSearchProvider(value: unknown): "endpoint" | "ollama" | "duckduckgo" {
-  const raw = String(value || process.env.EMILY_WEB_SEARCH_PROVIDER || (process.env.EMILY_WEB_SEARCH_ENDPOINT ? "endpoint" : "duckduckgo")).trim().toLowerCase();
+  const raw = String(value || process.env.EMILY_WEB_SEARCH_PROVIDER || (process.env.EMILY_WEB_SEARCH_ENDPOINT ? "endpoint" : "ollama")).trim().toLowerCase();
   if (raw === "endpoint" || raw === "custom") return "endpoint";
   if (raw === "ollama") return "ollama";
   if (raw === "duckduckgo" || raw === "ddg") return "duckduckgo";
   throw new Error(`Unsupported web_search provider: ${raw}`);
+}
+
+const OLLAMA_HOSTED_WEB_SEARCH_PATH = "/api/web_search";
+const OLLAMA_LOCAL_WEB_SEARCH_PROXY_PATH = "/api/experimental/web_search";
+const OLLAMA_CLOUD_BASE_URL = "https://ollama.com";
+
+function buildOllamaWebSearchAttempts({
+  baseUrl,
+  configuredApiKey,
+  envApiKey,
+}: {
+  baseUrl: URL;
+  configuredApiKey?: string;
+  envApiKey?: string;
+}): OllamaWebSearchAttempt[] {
+  if (isOllamaCloudBaseUrl(baseUrl)) {
+    return [{
+      baseUrl,
+      path: OLLAMA_HOSTED_WEB_SEARCH_PATH,
+      apiKey: configuredApiKey || envApiKey,
+    }];
+  }
+
+  const attempts: OllamaWebSearchAttempt[] = [
+    {
+      baseUrl,
+      path: OLLAMA_LOCAL_WEB_SEARCH_PROXY_PATH,
+      apiKey: configuredApiKey,
+    },
+    {
+      baseUrl,
+      path: OLLAMA_HOSTED_WEB_SEARCH_PATH,
+      apiKey: configuredApiKey,
+    },
+  ];
+  if (envApiKey) {
+    attempts.push({
+      baseUrl: new URL(OLLAMA_CLOUD_BASE_URL),
+      path: OLLAMA_HOSTED_WEB_SEARCH_PATH,
+      apiKey: envApiKey,
+    });
+  }
+  return attempts;
+}
+
+function isOllamaCloudBaseUrl(baseUrl: URL): boolean {
+  return baseUrl.protocol === "https:" && canonicalHostname(baseUrl.hostname) === "ollama.com";
 }
 
 function webSearchResponse(
@@ -1665,15 +1814,104 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
+const GRAPH_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+function validateCreateTaskGraphNode({
+  taskStore,
+  requestTask,
+  graphKey,
+  parentGraphKey,
+}: {
+  taskStore: TaskStore;
+  requestTask: Task | null;
+  graphKey: string;
+  parentGraphKey: string;
+}): void {
+  if (!GRAPH_KEY_PATTERN.test(graphKey)) throw new Error(`invalid graphKey: ${graphKey}`);
+  if (!parentGraphKey) throw new Error("parentKey is required when graphKey is provided.");
+  if (!GRAPH_KEY_PATTERN.test(parentGraphKey)) throw new Error(`invalid parentKey: ${parentGraphKey}`);
+  if (parentGraphKey === graphKey) throw new Error(`task cannot be its own parent: ${graphKey}`);
+
+  const graphId = typeof requestTask?.metadata.graphId === "string" ? requestTask.metadata.graphId : "";
+  if (!graphId) throw new Error("create_task graphKey requires an existing graph task context.");
+
+  const existingKeys = new Set(taskStore.getTasksForGraph(graphId).map(taskGraphKey).filter(Boolean));
+  if (existingKeys.has(graphKey)) throw new Error(`graphKey already exists: ${graphKey}`);
+  if (!existingKeys.has(parentGraphKey)) throw new Error(`unknown parentKey for ${graphKey}: ${parentGraphKey}`);
+}
+
+function taskGraphKey(task: Task): string {
+  return typeof task.metadata.graphKey === "string" ? task.metadata.graphKey : "";
+}
+
+function sanitizeRequestForEvent(request: ToolExecutionRequest): ToolExecutionRequest {
+  return {
+    ...request,
+    args: request.args ? summarizeArgs(request.args) : request.args,
+    approval: request.approval ? sanitizeEventRecord(request.approval as Record<string, unknown>) as ToolApproval : request.approval,
+  };
+}
+
 function summarizeArgs(args: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeEventRecord(args);
+}
+
+function sanitizeEventRecord(record: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(args)) {
-    const normalized = key.toLowerCase();
-    result[key] = normalized.includes("content") || normalized.includes("body")
-      ? `[${String(value).length} chars]`
-      : value;
+  const seen = new WeakSet<object>();
+  for (const [key, value] of Object.entries(record)) {
+    result[key] = sanitizeEventValue(key, value, seen);
   }
   return result;
+}
+
+function sanitizeEventValue(key: string, value: unknown, seen: WeakSet<object>): unknown {
+  if (isSensitiveEventKey(key)) return "[redacted]";
+  if (isLargeEventKey(key)) return `[${String(value).length} chars]`;
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeEventValue("", item, seen));
+  }
+  if (isObject(value)) {
+    if (seen.has(value)) return "[circular]";
+    seen.add(value);
+    const result: Record<string, unknown> = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      result[childKey] = sanitizeEventValue(childKey, childValue, seen);
+    }
+    seen.delete(value);
+    return result;
+  }
+  return value;
+}
+
+function isSensitiveEventKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized.includes("token")
+    || normalized.includes("apikey")
+    || normalized.includes("authorization")
+    || normalized.includes("password")
+    || normalized.includes("secret")
+    || normalized.includes("credential")
+    || normalized.includes("privatekey")
+    || normalized.includes("cookie");
+}
+
+function isLargeEventKey(key: string): boolean {
+  const normalized = key.toLowerCase();
+  return normalized.includes("content") || normalized.includes("body");
+}
+
+function canAccessOutsideWorkspace(request: ToolExecutionRequest): boolean {
+  return parsePermissionMode(request.permissionMode) === "danger_full_access";
+}
+
+function expandHomePath(input: string): string {
+  if (input === "~") return process.env.HOME || input;
+  if (input.startsWith(`~${path.sep}`)) {
+    const home = process.env.HOME;
+    if (home) return path.join(home, input.slice(2));
+  }
+  return input;
 }
 
 function summarizeOutput(output: unknown): unknown {

@@ -3,7 +3,7 @@ import type { SkillRegistry } from "../skills/SkillRegistry.ts";
 import type { TaskStore } from "../tasks/TaskStore.ts";
 import type { ToolRegistry } from "../tools/ToolRegistry.ts";
 import type { ProviderRegistry } from "../llm/ProviderRegistry.ts";
-import type { ToolPermission } from "../types.ts";
+import type { RoleDefinition, ToolPermission } from "../types.ts";
 
 export interface SecurityAuditFinding {
   id: string;
@@ -30,6 +30,7 @@ export interface SecurityAuditReport {
 
 const HIGH_RISK_TOOLS = new Set<ToolPermission>(["git_reset", "delete_file"]);
 const APPROVAL_TOOLS = new Set<ToolPermission>(["shell", "network", "http_fetch", "web_search", "browser", "github"]);
+const RESEARCH_NETWORK_TOOLS = new Set<ToolPermission>(["http_fetch", "web_search", "browser"]);
 const SECRET_KEY_PATTERN = /(apiKey|authorization|token|secret|password)/i;
 
 export async function runSecurityAudit({
@@ -64,7 +65,7 @@ export async function runSecurityAudit({
           remediation: "Remove the tool from allowed_tools and require an explicit audited approval path for destructive operations.",
         });
       }
-      if (APPROVAL_TOOLS.has(tool)) {
+      if (APPROVAL_TOOLS.has(tool) && !isScopedResearchNetworkTool(role, tool)) {
         findings.push({
           id: `role.${role.name}.approval_tool.${tool}`,
           severity: "warning",
@@ -148,4 +149,13 @@ export async function runSecurityAudit({
     });
   }
   return report;
+}
+
+function isScopedResearchNetworkTool(role: RoleDefinition, tool: ToolPermission): boolean {
+  if (role.name !== "researcher" || !RESEARCH_NETWORK_TOOLS.has(tool)) return false;
+  const forbidden = new Set(role.forbiddenTools);
+  const skills = new Set(role.skills);
+  return forbidden.has("write_file")
+    && forbidden.has("shell")
+    && (skills.has("research") || skills.has("web-search"));
 }

@@ -117,6 +117,161 @@ async function runPermissionClampTest(): Promise<void> {
   store.close();
 }
 
+async function runMaterializationWaitsForDynamicExpansionTest(): Promise<void> {
+  const { store, plan, tasksByKey } = await createDynamicFixture("dynamic-materialization");
+  plan.tasks.push(planTask({
+    key: "final_materialization",
+    role: "developer",
+    title: "final materialization",
+    input: "Write the final application artifact.",
+    parentKey: "architecture",
+    dependsOn: ["architecture"],
+    acceptanceCriteria: ["Final artifacts are written after implementation leaves."],
+    wave: 4,
+    metadata: {
+      materializationTask: true,
+      requiredFiles: ["./demo/index.html"],
+    },
+  }));
+  const materialization = store.createTask({
+    role: "developer",
+    title: "final materialization",
+    input: "Write the final application artifact.",
+    metadata: {
+      ...tasksByKey.architecture.metadata,
+      graphKey: "final_materialization",
+      graphRole: "developer",
+      parentKey: "architecture",
+      acceptanceCriteria: ["Final artifacts are written after implementation leaves."],
+      materializationTask: true,
+      requiredFiles: ["./demo/index.html"],
+    },
+  });
+  tasksByKey.final_materialization = materialization;
+  store.addTaskDependency(materialization.id, tasksByKey.architecture.id, "success");
+
+  const manager = new FakeRoleAgentManager(store, "forward_reference");
+  const executor = new TaskGraphExecutor({
+    taskStore: store,
+    roleAgentManager: manager as unknown as RoleAgentManager,
+    plan,
+  });
+
+  const result = await executor.execute(tasksByKey);
+  const graphId = result.graphId!;
+  const graphTasks = store.getTasksForGraph(graphId);
+  const implementation = findGraphTask(graphTasks, "implement_slice");
+  const finalTask = findGraphTask(graphTasks, "final_materialization");
+  const dependencies = store.getDependencies(finalTask.id);
+
+  assert.equal(result.pause, null);
+  assert.equal(finalTask.status, "done");
+  assert.ok(dependencies.some((dependency) => dependency.dependsOnTaskId === implementation.id
+    && dependency.dependencyType === "finished"));
+  assert.ok(manager.finishedOrder.indexOf("implement_slice") < manager.finishedOrder.indexOf("final_materialization"));
+  store.close();
+}
+
+async function runMaterializationRunsAfterFailedImplementationTest(): Promise<void> {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "dynamic-materialization-failed-"));
+  const store = await TaskStore.create({ dataDir });
+  const plan: PlanSpec = {
+    goal: "Generate final artifact after advisory implementation slices finish.",
+    deliveryLevel: "uat",
+    exitCriteria: ["Final artifact is materialized."],
+    planningMode: "single_wave",
+    maxWaves: 2,
+    failureStrategy: "block_dependents",
+    tasks: [
+      planTask({
+        key: "implementation",
+        role: "developer",
+        title: "implementation slice",
+        input: "Produce an advisory implementation slice.",
+        acceptanceCriteria: ["The slice finished or failed before final materialization."],
+        wave: 1,
+      }),
+      planTask({
+        key: "final_materialization",
+        role: "developer",
+        title: "final materialization",
+        input: "Write final files using the original goal.",
+        dependsOn: ["implementation"],
+        dependencyType: "finished",
+        acceptanceCriteria: ["Final files are written even if advisory slices failed."],
+        wave: 2,
+        metadata: {
+          materializationTask: true,
+          requiredFiles: ["./demo/index.html"],
+        },
+      }),
+    ],
+    review: {
+      required: false,
+      criteria: [],
+    },
+    clarificationRequired: false,
+    clarificationQuestions: [],
+  };
+  const tasksByKey = createTaskGraphFromPlan({
+    taskStore: store,
+    plan,
+    baseMetadata: {
+      runId: "dynamic-materialization-failed",
+      sessionId: "dynamic-materialization-failed",
+      source: "test",
+      createdBy: "dynamic-task-test",
+    },
+  });
+  const manager = new FakeRoleAgentManager(store, "implementation_failure");
+  const executor = new TaskGraphExecutor({
+    taskStore: store,
+    roleAgentManager: manager as unknown as RoleAgentManager,
+    plan,
+  });
+
+  const result = await executor.execute(tasksByKey);
+  const graphTasks = store.getTasksForGraph(result.graphId!);
+  const implementation = findGraphTask(graphTasks, "implementation");
+  const finalTask = findGraphTask(graphTasks, "final_materialization");
+
+  assert.equal(result.pause, null);
+  assert.equal(implementation.status, "failed");
+  assert.equal(finalTask.status, "done");
+  assert.ok(manager.finishedOrder.indexOf("implementation") < manager.finishedOrder.indexOf("final_materialization"));
+  store.close();
+}
+
+async function runDynamicDeveloperWritePermissionPromotionTest(): Promise<void> {
+  const { store, plan, tasksByKey } = await createDynamicFixture("dynamic-write-permission");
+  plan.tasks[0] = {
+    ...plan.tasks[0],
+    permissionMode: "read_only",
+  };
+  const architecture = tasksByKey.architecture;
+  store.updateTaskMetadata(architecture.id, {
+    ...architecture.metadata,
+    permissionMode: "read_only",
+    runPermissionMode: "workspace_write",
+  }, { reason: "simulate read-only planning node in writable run" });
+  tasksByKey.architecture = store.getTaskOrThrow(architecture.id);
+
+  const manager = new FakeRoleAgentManager(store, "forward_reference");
+  const executor = new TaskGraphExecutor({
+    taskStore: store,
+    roleAgentManager: manager as unknown as RoleAgentManager,
+    plan,
+  });
+
+  const result = await executor.execute(tasksByKey);
+  const implementation = findGraphTask(store.getTasksForGraph(result.graphId!), "implement_slice");
+
+  assert.equal(result.pause, null);
+  assert.equal(implementation.status, "done");
+  assert.equal(implementation.metadata.permissionMode, "workspace_write");
+  store.close();
+}
+
 async function createDynamicFixture(runId: string): Promise<{
   store: TaskStore;
   plan: PlanSpec;
@@ -196,9 +351,10 @@ function findGraphTask(tasks: Task[], graphKey: string): Task {
 
 class FakeRoleAgentManager {
   private readonly store: TaskStore;
-  private readonly mode: "forward_reference" | "planner_failure" | "needs_user_input";
+  private readonly mode: "forward_reference" | "planner_failure" | "needs_user_input" | "implementation_failure";
+  readonly finishedOrder: string[] = [];
 
-  constructor(store: TaskStore, mode: "forward_reference" | "planner_failure" | "needs_user_input") {
+  constructor(store: TaskStore, mode: "forward_reference" | "planner_failure" | "needs_user_input" | "implementation_failure") {
     this.store = store;
     this.mode = mode;
   }
@@ -218,12 +374,23 @@ class FakeRoleAgentManager {
       });
       return this.store.getTaskOrThrow(task.id);
     }
+    if (task.metadata.graphKey === "implementation" && this.mode === "implementation_failure") {
+      this.store.failTask(task.id, {
+        error: "implementation slice failed",
+        result: taskResult("implementation slice failed"),
+        agentId,
+        leaseToken: claimed.leaseToken,
+      });
+      this.finishedOrder.push(String(task.metadata.graphKey || task.title));
+      return this.store.getTaskOrThrow(task.id);
+    }
 
     this.store.finishTask(task.id, {
       result: taskResult(this.summaryFor(task)),
       agentId,
       leaseToken: claimed.leaseToken,
     });
+    this.finishedOrder.push(String(task.metadata.graphKey || task.title));
     return this.store.getTaskOrThrow(task.id);
   }
 
@@ -281,5 +448,8 @@ await runForwardReferenceDependencyTest();
 await runFallbackClosureTest();
 await runUserInputPauseTest();
 await runPermissionClampTest();
+await runMaterializationWaitsForDynamicExpansionTest();
+await runMaterializationRunsAfterFailedImplementationTest();
+await runDynamicDeveloperWritePermissionPromotionTest();
 
 console.log("dynamic task test passed");

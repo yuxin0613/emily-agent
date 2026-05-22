@@ -2,9 +2,53 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { webAppHtml } from "../src/adapters/webUi.ts";
-import { flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError, mergeContextQueueToIndex } from "../src/adapters/tui.ts";
+import { createPromptInputDecoder, flattenDagEditorNodes, formatDagEditorView, formatProgressEvent, formatPromptBufferPreviewLines, formatThinkingFrame, formatTranscriptMessage, formatTuiCommandHints, formatTuiHelp, formatTuiHome, formatTuiSubmittedInput, isTuiAbortError, mergeContextQueueToIndex } from "../src/adapters/tui.ts";
 
 const execFileAsync = promisify(execFile);
+
+function stripAnsi(value: string): string {
+  return String(value || "").replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function visibleLength(value: string): number {
+  let width = 0;
+  for (const char of stripAnsi(value)) width += charDisplayWidth(char);
+  return width;
+}
+
+function charDisplayWidth(char: string): number {
+  const code = char.codePointAt(0) || 0;
+  if (code === 0) return 0;
+  if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0;
+  if (code >= 0x300 && code <= 0x36f) return 0;
+  if (isWideCodePoint(code)) return 2;
+  return 1;
+}
+
+function isWideCodePoint(code: number): boolean {
+  return (code >= 0x1100 && code <= 0x115f)
+    || code === 0x2329
+    || code === 0x232a
+    || (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f)
+    || (code >= 0xac00 && code <= 0xd7a3)
+    || (code >= 0xf900 && code <= 0xfaff)
+    || (code >= 0xfe10 && code <= 0xfe19)
+    || (code >= 0xfe30 && code <= 0xfe6f)
+    || (code >= 0xff00 && code <= 0xff60)
+    || (code >= 0xffe0 && code <= 0xffe6)
+    || (code >= 0x1f300 && code <= 0x1faff);
+}
+
+function framedLineWidths(value: string): number[] {
+  return stripAnsi(value)
+    .split("\n")
+    .filter((line) => line.startsWith("┌")
+      || line.startsWith("└")
+      || line.startsWith("│")
+      || /^─+$/.test(line)
+      || /^─+ Emily AgentOS terminal workspace ─+$/.test(line))
+    .map(visibleLength);
+}
 
 const html = webAppHtml();
 
@@ -12,10 +56,15 @@ assert.match(html, /Emily AgentOS/);
 assert.match(html, /id="nav"/);
 assert.match(html, /id="content"/);
 assert.match(html, /Sessions/);
+assert.match(html, /Monitor/);
+assert.match(html, /Settings/);
 assert.match(html, /\/sessions\/clear/);
 assert.match(html, /\/sessions\/messages/);
 assert.match(html, /\/sessions\/restore/);
 assert.match(html, /\/skill-candidates\/build/);
+assert.match(html, /\/settings/);
+assert.match(html, /\/subagents/);
+assert.match(html, /\/cron/);
 assert.match(html, /\/chat/);
 assert.ok(!html.includes("${undefined}"));
 
@@ -104,6 +153,56 @@ assert.match(tuiHome, /Context Queue/);
 assert.match(tuiHome, /第一条新 context/);
 assert.match(tuiHome, /merge: \/queue merge 2/);
 assert.ok(!tuiHome.includes("undefined"));
+const tuiHomeFrameWidths = framedLineWidths(tuiHome);
+assert.ok(tuiHomeFrameWidths.length > 20);
+assert.deepEqual([...new Set(tuiHomeFrameWidths)], [178]);
+process.stdout.columns = 160;
+const activeNow = Date.now();
+const activeTaskHome = formatTuiHome({
+  state: {
+    sessionId: "active-session",
+    lastRunId: "run_active",
+    permissionMode: "workspace_write",
+    activeTasks: {
+      "task-running": {
+        id: "task-running",
+        role: "developer",
+        status: "running",
+        title: "Implement run log active task summary",
+        assignedAgentId: "developer-12345",
+        queuedAtMs: activeNow - 185000,
+        runningAtMs: activeNow - 125000,
+        updatedAtMs: activeNow - 5000,
+      },
+      "task-queued": {
+        id: "task-queued",
+        role: "reviewer",
+        status: "queued",
+        title: "Verify active task display",
+        assignedAgentId: "reviewer-67890",
+        queuedAtMs: activeNow - 65000,
+        updatedAtMs: activeNow - 4000,
+      },
+    },
+  },
+  runLog: ["[12:00:00] developer running · subagent developer-12345 · task task-run - Implement run log active task summary"],
+});
+process.stdout.columns = originalColumns;
+assert.match(activeTaskHome, /Active: 2 tasks/);
+assert.match(activeTaskHome, /1 running/);
+assert.match(activeTaskHome, /1 queued/);
+assert.match(activeTaskHome, /developer/);
+assert.match(activeTaskHome, /reviewer/);
+assert.match(activeTaskHome, /Implement run log active task summary/);
+const activeTaskHomeLines = stripAnsi(activeTaskHome).split("\n");
+const activeMetaLine = activeTaskHomeLines.find((line) => /running\s+.*developer/.test(line));
+assert.ok(activeMetaLine);
+assert.doesNotMatch(activeMetaLine, /Implement run log active task summary/);
+assert.ok(activeTaskHomeLines.some((line) => /│\s+Implement run log active task summary/.test(line)));
+process.stdout.columns = 60;
+const narrowTuiHome = formatTuiHome({ transcript: [{ role: "assistant", content: "narrow frame" }] });
+process.stdout.columns = originalColumns;
+assert.deepEqual([...new Set(framedLineWidths(narrowTuiHome))], [88]);
 const mergedQueue = mergeContextQueueToIndex([
   { id: "ctx-1", content: "第一条", recorded: true },
   { id: "ctx-2", content: "第二条", recorded: true },
@@ -152,6 +251,64 @@ const promptPreview = formatPromptBufferPreviewLines("帮我规划一个 Todo �
 assert.ok(promptPreview.length > 1);
 assert.equal(promptPreview.at(-1), "/dag list");
 assert.ok(promptPreview.every((line) => !line.includes("...")));
+
+let promptBuffer = "";
+let promptCursor = 0;
+let submittedPrompt = "";
+const promptDecoder = createPromptInputDecoder({
+  appendText(text) {
+    const chars = [...promptBuffer];
+    promptBuffer = [...chars.slice(0, promptCursor), text, ...chars.slice(promptCursor)].join("");
+    promptCursor += [...text].length;
+  },
+  backspace() {
+    if (promptCursor <= 0) return;
+    const chars = [...promptBuffer];
+    promptBuffer = [...chars.slice(0, promptCursor - 1), ...chars.slice(promptCursor)].join("");
+    promptCursor -= 1;
+  },
+  deleteForward() {
+    const chars = [...promptBuffer];
+    promptBuffer = [...chars.slice(0, promptCursor), ...chars.slice(promptCursor + 1)].join("");
+  },
+  moveCursor(delta) {
+    promptCursor = Math.max(0, Math.min([...promptBuffer].length, promptCursor + delta));
+  },
+  moveToStart() {
+    promptCursor = 0;
+  },
+  moveToEnd() {
+    promptCursor = [...promptBuffer].length;
+  },
+  submit() {
+    submittedPrompt = promptBuffer;
+  },
+  abort() {
+    submittedPrompt = "(aborted)";
+  },
+  isClosed() {
+    return false;
+  },
+});
+promptDecoder(Buffer.from("abc"));
+promptDecoder(Buffer.from("\x1b[D"));
+promptDecoder(Buffer.from("X"));
+assert.equal(promptBuffer, "abXc");
+assert.equal(promptCursor, 3);
+promptDecoder(Buffer.from("\x1b[D"));
+promptDecoder(Buffer.from("\x7f"));
+assert.equal(promptBuffer, "aXc");
+assert.equal(promptCursor, 1);
+promptDecoder(Buffer.from("\x1b[C"));
+promptDecoder(Buffer.from("\x1b[3~"));
+assert.equal(promptBuffer, "aX");
+promptDecoder(Buffer.from("\x1b[H"));
+promptDecoder(Buffer.from("!"));
+promptDecoder(Buffer.from("\x1b[F"));
+promptDecoder(Buffer.from("?"));
+promptDecoder(Buffer.from("\r"));
+assert.equal(submittedPrompt, "!aX?");
+
 const assistant = formatTranscriptMessage("assistant", "hello from emily", 80);
 assert.match(assistant, /┊ hello from emily/);
 assert.match(formatThinkingFrame(3), /thinking\.\.\./);

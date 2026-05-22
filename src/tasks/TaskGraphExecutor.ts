@@ -1,5 +1,6 @@
 import {
   createFallbackGraphPatch,
+  assessTaskComplexity,
   parseGraphPatchSpec,
   sanitizePlannerMetadata,
   validateGraphPatchSpec,
@@ -11,7 +12,8 @@ import { taskResultSummary } from "./TaskResult.ts";
 import type { Metadata, Task, TaskDependency, TaskStatus } from "../types.ts";
 import type { RoleAgentManager } from "./RoleAgentManager.ts";
 import type { TaskStore } from "./TaskStore.ts";
-import { clampPermissionMode } from "../tools/PermissionMode.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_MS, normalizeRoleTaskTimeoutMs, roleTaskExecutionTimeoutMs } from "../runtime/RoleTaskTimeout.ts";
+import { graphTaskPermissionMode } from "./TaskPermissions.ts";
 
 const TERMINAL_STATUSES = new Set<TaskStatus>(["done", "failed", "blocked", "cancelled", "dead_letter"]);
 
@@ -68,6 +70,7 @@ export class TaskGraphExecutor {
   maxDynamicTasks: number;
   maxReplanAttempts: number;
   plan: PlanSpec | null;
+  roleTaskTimeoutMs: number;
 
   constructor({
     taskStore,
@@ -76,6 +79,7 @@ export class TaskGraphExecutor {
     maxDynamicTasks = 200,
     maxReplanAttempts = 2,
     plan = null,
+    roleTaskTimeoutMs = DEFAULT_ROLE_TASK_TIMEOUT_MS,
   }: {
     taskStore: TaskStore;
     roleAgentManager: RoleAgentManager;
@@ -83,6 +87,7 @@ export class TaskGraphExecutor {
     maxDynamicTasks?: number;
     maxReplanAttempts?: number;
     plan?: PlanSpec | null;
+    roleTaskTimeoutMs?: number;
   }) {
     this.taskStore = taskStore;
     this.roleAgentManager = roleAgentManager;
@@ -90,6 +95,7 @@ export class TaskGraphExecutor {
     this.maxDynamicTasks = maxDynamicTasks;
     this.maxReplanAttempts = maxReplanAttempts;
     this.plan = plan;
+    this.roleTaskTimeoutMs = normalizeRoleTaskTimeoutMs(roleTaskTimeoutMs);
   }
 
   async execute(tasksByKey: Record<string, Task>): Promise<TaskGraphExecutionResult> {
@@ -165,6 +171,7 @@ export class TaskGraphExecutor {
           return status === "pending" || status === "queued";
         })
         .filter((task) => this.taskStore.dependenciesSatisfied(task.id))
+        .filter((task) => this.materializationReady(task, tasksByKey))
         .slice(0, effectiveParallelTasks);
 
       if (!ready.length) {
@@ -250,7 +257,7 @@ export class TaskGraphExecutor {
   private async runOne(task: Task): Promise<Task> {
     try {
       return await this.roleAgentManager.runTask(task, {
-        timeoutMs: readPositiveNumber(task.metadata.timeoutMs, 60000),
+        timeoutMs: this.executionTimeoutMs(task.metadata.timeoutMs),
       });
     } catch {
       return this.taskStore.getTask(task.id) || task;
@@ -631,7 +638,7 @@ export class TaskGraphExecutor {
       expandsTaskId: parentTask.id,
       expansionDepth: currentDepth,
       maxExpansionDepth: maxDepth,
-      timeoutMs: readPositiveNumber(parentTask.metadata.timeoutMs, 30000),
+      timeoutMs: this.executionTimeoutMs(parentTask.metadata.timeoutMs),
       maxResultChars: 20000,
       maxMemoryCandidates: 0,
       acceptanceCriteria: [
@@ -669,6 +676,8 @@ export class TaskGraphExecutor {
     maxNewTasks: number;
   }): string {
     const parentKey = String(parentTask.metadata.graphKey || "");
+    const assessment = assessTaskComplexity(this.plan?.goal || parentTask.input);
+    const defaultRole = assessment.kind === "research_comparison" || assessment.kind === "research" ? "researcher" : "developer";
     return [
       "Create a GraphPatchSpec JSON object to expand the current rolling DAG one level finer.",
       "Return only JSON. Do not wrap it in markdown.",
@@ -688,7 +697,7 @@ export class TaskGraphExecutor {
         questions: [],
         tasks: [{
           key: "unique_task_key",
-          role: "developer",
+          role: defaultRole,
           title: "short task title",
           input: "full task instructions with enough context",
           parentKey,
@@ -697,7 +706,7 @@ export class TaskGraphExecutor {
           acceptanceCriteria: ["string"],
           toolHints: [],
           skillHints: [],
-          timeoutMs: 30000,
+          timeoutMs: this.roleTaskTimeoutMs,
           maxRetries: 1,
           maxResultChars: 12000,
           maxMemoryCandidates: 1,
@@ -720,6 +729,17 @@ export class TaskGraphExecutor {
       "- Keep the patch focused on the next decomposition layer, not the entire project.",
       "- Mark a new task expandable=true when it is a non-leaf node that should be decomposed again after completion.",
       "- permissionMode is optional; omit it to inherit the run mode, or use read_only/workspace_write/danger_full_access when appropriate.",
+      "- For research_comparison, create researcher leaves for source discovery, per-subject evidence, comparison dimensions, synthesis, and reviewer validation. Do not turn comparison work into developer implementation slices.",
+      "- For software_delivery, create developer leaves only when the parent is ready for implementation or executable design.",
+      "",
+      "Task assessment:",
+      `kind: ${assessment.kind}`,
+      `complexityClass: ${assessment.complexityClass}`,
+      `longTask: ${assessment.longTask}`,
+      `splittable: ${assessment.splittable}`,
+      `estimatedNodes: ${assessment.estimatedNodes}`,
+      "reasons:",
+      ...assessment.reasons.map((reason) => `- ${reason}`),
       "",
       "Current plan:",
       `goal: ${this.plan?.goal || ""}`,
@@ -784,7 +804,7 @@ export class TaskGraphExecutor {
       parentKey,
       replansTaskId: failedTask.id,
       replanAttempt: attempt,
-      timeoutMs: readPositiveNumber(failedTask.metadata.timeoutMs, 30000),
+      timeoutMs: this.executionTimeoutMs(failedTask.metadata.timeoutMs),
       maxResultChars: 20000,
       maxMemoryCandidates: 0,
       acceptanceCriteria: [
@@ -836,7 +856,7 @@ export class TaskGraphExecutor {
           acceptanceCriteria: ["Recovery task produces a usable result or a concrete blocker."],
           toolHints: [],
           skillHints: [],
-          timeoutMs: 30000,
+          timeoutMs: this.roleTaskTimeoutMs,
           maxRetries: 1,
           maxResultChars: 12000,
           maxMemoryCandidates: 1,
@@ -899,7 +919,34 @@ export class TaskGraphExecutor {
       }
     }
 
+    this.linkDynamicTasksToMaterialization(created.map((item) => item.task), tasksByKey);
+
     return created.map((item) => this.taskStore.getTaskOrThrow(item.task.id));
+  }
+
+  private materializationReady(task: Task, tasksByKey: Record<string, Task>): boolean {
+    if (!isMaterializationTask(task)) return true;
+    for (const candidate of Object.values(tasksByKey)) {
+      if (candidate.id === task.id) continue;
+      if (isMaterializationTask(candidate)) continue;
+      if (candidate.role === "reviewer") continue;
+      const current = this.taskStore.getTask(candidate.id) || candidate;
+      if (isReplanSupersededTerminal(current)) continue;
+      if (!TERMINAL_STATUSES.has(current.status)) return false;
+    }
+    return true;
+  }
+
+  private linkDynamicTasksToMaterialization(dynamicTasks: Task[], tasksByKey: Record<string, Task>): void {
+    const materializationTasks = Object.values(tasksByKey).filter(isMaterializationTask);
+    if (!materializationTasks.length) return;
+    for (const dynamicTask of dynamicTasks) {
+      if (isMaterializationTask(dynamicTask) || dynamicTask.role === "reviewer") continue;
+      for (const materializationTask of materializationTasks) {
+        if (dynamicTask.id === materializationTask.id) continue;
+        this.taskStore.addTaskDependency(materializationTask.id, dynamicTask.id, "finished");
+      }
+    }
   }
 
   private adaptiveParallelLimit({
@@ -992,8 +1039,15 @@ export class TaskGraphExecutor {
       acceptanceCriteria: spec.acceptanceCriteria,
       toolHints: spec.toolHints,
       skillHints: spec.skillHints,
-      permissionMode: clampPermissionMode(spec.permissionMode, parentTask.metadata.permissionMode),
-      timeoutMs: spec.timeoutMs,
+      permissionMode: graphTaskPermissionMode({
+        role: spec.role,
+        title: spec.title,
+        input: spec.input,
+        acceptanceCriteria: spec.acceptanceCriteria,
+        toolHints: spec.toolHints,
+        metadata: sanitizePlannerMetadata(spec.metadata) || {},
+      }, spec.permissionMode, parentTask.metadata.runPermissionMode || parentTask.metadata.permissionMode),
+      timeoutMs: this.executionTimeoutMs(spec.timeoutMs),
       maxResultChars: spec.maxResultChars,
       maxMemoryCandidates: spec.maxMemoryCandidates,
       wave: spec.wave,
@@ -1010,6 +1064,10 @@ export class TaskGraphExecutor {
       metadata,
     });
     return this.taskStore.getTaskOrThrow(created.id);
+  }
+
+  private executionTimeoutMs(value: unknown): number {
+    return roleTaskExecutionTimeoutMs(value, this.roleTaskTimeoutMs);
   }
 }
 
@@ -1031,10 +1089,6 @@ function keyFor(tasksByKey: Record<string, Task>, taskId: string): string {
   return Object.entries(tasksByKey).find(([, task]) => task.id === taskId)?.[0] || "";
 }
 
-function readPositiveNumber(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
 function readNonNegativeNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
@@ -1045,6 +1099,10 @@ function emptyExpansion(): ExpansionResult {
     created: [],
     pause: null,
   };
+}
+
+function isMaterializationTask(task: Task): boolean {
+  return task.metadata.materializationTask === true;
 }
 
 function assessGraphQuality({
@@ -1271,5 +1329,11 @@ function baseGraphMetadata(task: Task): Metadata {
     exitCriteria: Array.isArray(task.metadata.exitCriteria) ? task.metadata.exitCriteria : [],
     maxWaves: typeof task.metadata.maxWaves === "number" ? task.metadata.maxWaves : 1,
     permissionMode: typeof task.metadata.permissionMode === "string" ? task.metadata.permissionMode : "workspace_write",
+    runPermissionMode: typeof task.metadata.runPermissionMode === "string"
+      ? task.metadata.runPermissionMode
+      : typeof task.metadata.permissionMode === "string" ? task.metadata.permissionMode : "workspace_write",
+    webSearchProvider: typeof task.metadata.webSearchProvider === "string" ? task.metadata.webSearchProvider : "",
+    webSearchEndpoint: typeof task.metadata.webSearchEndpoint === "string" ? task.metadata.webSearchEndpoint : "",
+    webSearchMethod: typeof task.metadata.webSearchMethod === "string" ? task.metadata.webSearchMethod : "",
   };
 }

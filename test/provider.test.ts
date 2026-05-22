@@ -8,6 +8,7 @@ import { normalizeProviderJsonOutput } from "../src/llm/ProviderJson.ts";
 import { normalizeModelCompleteResult, resetProviderCircuit, ResilientModelProvider } from "../src/llm/ProviderRuntime.ts";
 import { DEFAULT_TOOL_CALL_TIMEOUT_SECONDS, legacyProviderConfigPath, ProviderRegistry, providerConfigPath } from "../src/llm/ProviderRegistry.ts";
 import { createRuntime } from "../src/runtime/createRuntime.ts";
+import { DEFAULT_ROLE_TASK_TIMEOUT_SECONDS } from "../src/runtime/RoleTaskTimeout.ts";
 import { parseTaskResult } from "../src/tasks/TaskResult.ts";
 
 class FlakyProvider implements ModelProvider {
@@ -88,9 +89,11 @@ const runtime = await createRuntime({
 });
 
 assert.deepEqual(runtime.listProviders().map((provider) => provider.id).sort(), ["main-echo", "qa-echo"]);
-const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number };
+const providerFile = JSON.parse(await readFile(providerConfigPath(dataDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number; providerTimeoutSeconds: number; agents?: { roleTaskTimeoutSeconds?: number } };
 assert.equal(providerFile.defaultProviderId, "main-echo");
 assert.equal(providerFile.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
+assert.equal(providerFile.providerTimeoutSeconds, 3600);
+assert.equal(providerFile.agents?.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
 await assert.rejects(() => access(legacyProviderConfigPath(dataDir)), /ENOENT/);
 
 const legacyConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-legacy-provider-config-"));
@@ -105,9 +108,10 @@ await writeFile(legacyProviderConfigPath(legacyConfigDir), JSON.stringify({
 const migratedRegistry = await ProviderRegistry.create({ dataDir: legacyConfigDir });
 assert.equal(migratedRegistry.defaultProviderId, "legacy-main");
 assert.equal(migratedRegistry.getConfig("legacy-main").model, "legacy-model");
-const migratedConfig = JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number };
+const migratedConfig = JSON.parse(await readFile(providerConfigPath(legacyConfigDir), "utf8")) as { defaultProviderId: string; toolCallTimeoutSeconds: number; providerTimeoutSeconds: number };
 assert.equal(migratedConfig.defaultProviderId, "legacy-main");
 assert.equal(migratedConfig.toolCallTimeoutSeconds, DEFAULT_TOOL_CALL_TIMEOUT_SECONDS);
+assert.equal(migratedConfig.providerTimeoutSeconds, 3600);
 await assert.rejects(() => access(legacyProviderConfigPath(legacyConfigDir)), /ENOENT/);
 
 const timeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-tool-timeout-config-"));
@@ -115,12 +119,55 @@ await mkdir(timeoutConfigDir, { recursive: true });
 await writeFile(providerConfigPath(timeoutConfigDir), JSON.stringify({
   defaultProviderId: "echo",
   toolCallTimeoutSeconds: 42,
+  providerTimeoutSeconds: 43,
   providers: [{ id: "echo", type: "echo", model: "echo-local" }],
 }, null, 2), "utf8");
 const timeoutRegistry = await ProviderRegistry.create({ dataDir: timeoutConfigDir });
 assert.equal(timeoutRegistry.toolCallTimeoutSeconds, 42);
-const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number };
+assert.equal(timeoutRegistry.providerTimeoutSeconds, 43);
+assert.equal(timeoutRegistry.agents.roleTaskTimeoutSeconds, DEFAULT_ROLE_TASK_TIMEOUT_SECONDS);
+const timeoutConfig = JSON.parse(await readFile(providerConfigPath(timeoutConfigDir), "utf8")) as { toolCallTimeoutSeconds: number; providerTimeoutSeconds: number };
 assert.equal(timeoutConfig.toolCallTimeoutSeconds, 42);
+assert.equal(timeoutConfig.providerTimeoutSeconds, 43);
+
+const providerTimeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-provider-timeout-config-"));
+await mkdir(providerTimeoutConfigDir, { recursive: true });
+await writeFile(providerConfigPath(providerTimeoutConfigDir), JSON.stringify({
+  defaultProviderId: "openai-seconds",
+  providers: [{
+    id: "openai-seconds",
+    type: "openai",
+    model: "gpt-test",
+    config: {
+      baseUrl: "https://api.openai.com/v1",
+      apiKeyEnv: "OPENAI_API_KEY",
+      timeoutMs: 600000,
+      retryBaseMs: 250,
+      retryMaxMs: 5000,
+      circuitBreakerCooldownMs: 30000,
+    },
+  }],
+}, null, 2), "utf8");
+const providerTimeoutRegistry = await ProviderRegistry.create({ dataDir: providerTimeoutConfigDir });
+const providerTimeoutConfig = providerTimeoutRegistry.getConfigIncludingDisabled("openai-seconds").config || {};
+assert.equal(providerTimeoutConfig.timeoutSeconds, 600);
+assert.equal(providerTimeoutConfig.retryBaseSeconds, 0.25);
+assert.equal(providerTimeoutConfig.retryMaxSeconds, 5);
+assert.equal(providerTimeoutConfig.circuitBreakerCooldownSeconds, 30);
+assert.equal(providerTimeoutConfig.timeoutMs, undefined);
+const providerTimeoutFile = JSON.parse(await readFile(providerConfigPath(providerTimeoutConfigDir), "utf8")) as { providers: ProviderConfig[] };
+assert.equal(providerTimeoutFile.providers[0].config?.timeoutSeconds, 600);
+assert.equal(providerTimeoutFile.providers[0].config?.timeoutMs, undefined);
+
+const roleTimeoutConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-role-timeout-config-"));
+await mkdir(roleTimeoutConfigDir, { recursive: true });
+await writeFile(providerConfigPath(roleTimeoutConfigDir), JSON.stringify({
+  defaultProviderId: "echo",
+  agents: { roleTaskTimeoutSeconds: 42 },
+  providers: [{ id: "echo", type: "echo", model: "echo-local" }],
+}, null, 2), "utf8");
+const roleTimeoutRegistry = await ProviderRegistry.create({ dataDir: roleTimeoutConfigDir });
+assert.equal(roleTimeoutRegistry.agents.roleTaskTimeoutSeconds, 42);
 
 const envConfigDir = await mkdtemp(path.join(os.tmpdir(), "emily-agent-env-provider-config-"));
 const previousEnvFileKey = process.env.EMILY_TEST_ENV_FILE_KEY;
@@ -200,6 +247,44 @@ await runtime.addProvider({
 });
 const providerHealth = await runtime.checkProviders();
 assert.equal(providerHealth.find((item) => item.id === "openai-missing-env")?.ok, false);
+
+const codexAuthPath = path.join(dataDir, "codex-auth.json");
+await writeFile(codexAuthPath, JSON.stringify({
+  auth_mode: "chatgpt",
+  tokens: {
+    access_token: "test-codex-access-token",
+    refresh_token: "test-codex-refresh-token",
+    account_id: "codex-account",
+  },
+  last_refresh: new Date().toISOString(),
+}, null, 2), "utf8");
+await runtime.addProvider({
+  id: "main-codex",
+  type: "codex",
+  model: "gpt-5.5",
+  config: {
+    authJsonPath: codexAuthPath,
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+  },
+});
+const codexModel = runtime.providerRegistry.createProvider("main-codex");
+assert.equal(codexModel.id, "main-codex");
+assert.equal(codexModel.model, "gpt-5.5");
+const codexShallowHealth = await runtime.checkProviders();
+assert.equal(codexShallowHealth.find((item) => item.id === "main-codex")?.ok, true);
+
+await runtime.addProvider({
+  id: "codex-missing-auth",
+  type: "codex",
+  model: "gpt-5.5",
+  config: {
+    authJsonPath: path.join(dataDir, "missing-codex-auth.json"),
+  },
+});
+const codexMissingHealth = await runtime.checkProviders();
+const codexMissing = codexMissingHealth.find((item) => item.id === "codex-missing-auth");
+assert.equal(codexMissing?.ok, false);
+assert.match(codexMissing?.reason || "", /Codex auth file not found/);
 
 const role = await runtime.addRole({
   name: "qa",
@@ -336,8 +421,8 @@ const retryModel = new ResilientModelProvider(flakyProvider, {
   model: flakyProvider.model,
   config: {
     maxRetries: 1,
-    retryBaseMs: 1,
-    retryMaxMs: 1,
+    retryBaseSeconds: 0.001,
+    retryMaxSeconds: 0.001,
   },
 });
 const retryResult = normalizeModelCompleteResult(await retryModel.complete({
@@ -358,7 +443,7 @@ const circuitModel = new ResilientModelProvider(failingProvider, {
   config: {
     maxRetries: 0,
     circuitBreakerFailureThreshold: 1,
-    circuitBreakerCooldownMs: 1000,
+    circuitBreakerCooldownSeconds: 1,
   },
 });
 await assert.rejects(() => circuitModel.complete({

@@ -82,7 +82,7 @@ Use the gateway when another application wants to drive AgentOS directly.
 
 Providers are stored in `.emily/config.json`. Existing `.emily/providers.json` files are migrated automatically on startup.
 
-Use `echo` for local architecture tests only. Use `openai` or `ollama` for real model work.
+Use `echo` for local architecture tests only. Use `openai`, `codex`, or `ollama` for real model work.
 
 Agent runtime limits live in the same file. Emily uses one ordered main-agent context and role-bound subagents: `agents.mainAgents` must stay `1`, and `agents.maxSubagentsPerRole` must stay `1` in the current stable runtime. Use `agents.maxConcurrentSubagents` to cap how many subagents can run at once, and `agents.subagentIdleTtlSeconds` plus `agents.releaseSubagentsAfterTask` to control when idle subagent processes are released.
 
@@ -122,6 +122,29 @@ OpenAI-compatible example:
 }
 ```
 
+Codex subscription example:
+
+```json
+{
+  "defaultProviderId": "main-codex",
+  "fallbackMode": "fallback",
+  "providers": [
+    {
+      "id": "main-codex",
+      "type": "codex",
+      "model": "gpt-5.5",
+      "config": {
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "authJsonPath": "~/.codex/auth.json",
+        "strictJson": true
+      }
+    }
+  ]
+}
+```
+
+This provider reuses the local Codex ChatGPT login from `codex login`. Emily stores only `authJsonPath` and endpoint settings, then reads the latest Codex auth file for each model call.
+
 Then run:
 
 ```bash
@@ -132,6 +155,7 @@ node src/index.ts --doctor --deep
 Provider rules:
 
 - Store only environment variable names, not raw keys.
+- For Codex subscription auth, store only the auth file path, not tokens.
 - Set role-specific providers only when needed.
 - Subagents fallback to the main/default provider if their role provider is unavailable.
 - Check usage with the provider dashboard or `provider.usage` command.
@@ -380,9 +404,9 @@ The builtin `web-search` skill uses `web_search` for discovery and `http_fetch` 
 
 Providers:
 
-- `duckduckgo`: default lightweight search.
+- `ollama`: default Ollama web search endpoint.
+- `duckduckgo`: lightweight fallback search.
 - `endpoint`: custom endpoint via `EMILY_WEB_SEARCH_ENDPOINT`.
-- `ollama`: Ollama experimental web search endpoint.
 
 All search output is marked as untrusted external content. Treat snippets as leads, not facts.
 
@@ -490,6 +514,17 @@ Events:
 curl 'http://127.0.0.1:3000/events?token=<token>'
 ```
 
+Query token URLs are a loopback-only convenience for local browser flows such as the provider dashboard, EventSource events, and WebSocket gateway setup. When the service is exposed beyond `127.0.0.1` or `localhost`, use `x-emily-token` or `Authorization: Bearer ...` instead so tokens do not land in browser history, Referer headers, or proxy logs.
+
+Public health:
+
+```bash
+curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/health/detail' -H "x-emily-token: <token>"
+```
+
+`/health` is only a liveness check. Use authenticated `/health/detail`, `doctor`, or diagnostics commands for runtime and gateway details.
+
 ## 15. Gateway Examples
 
 Send chat:
@@ -542,7 +577,7 @@ Configure a real provider in `.emily/config.json`.
 
 WebUI says unauthorized:
 
-Open with `?token=<token>` or enter the token when prompted.
+On loopback, open with `?token=<token>` or enter the token when prompted. On non-loopback deployments, configure header-based auth through your client or proxy.
 
 HTTP tool cannot access localhost:
 
@@ -566,12 +601,13 @@ Before production use:
 
 1. Set `EMILY_WEB_TOKEN` to a strong admin secret.
 2. Use `EMILY_WEB_READ_TOKEN` or `EMILY_WEB_WRITE_TOKEN` for non-admin WebSocket/REST clients.
-3. Configure a real model provider.
-4. Keep raw API keys out of config files.
-5. Review role tool permissions.
-6. Keep `EMILY_HTTP_ALLOW_PRIVATE` disabled.
-7. Run `npm run check`.
-8. Run `npm audit --audit-level=moderate`.
-9. Run `node src/index.ts --doctor --deep`.
-10. Run `node src/index.ts --security-audit`.
-11. Verify WebUI, TUI, and Gateway flows against your intended deployment.
+3. Do not use `token=` URLs outside loopback; prefer `x-emily-token` or Bearer auth.
+4. Configure a real model provider.
+5. Keep raw API keys out of config files.
+6. Review role tool permissions.
+7. Keep `EMILY_HTTP_ALLOW_PRIVATE` disabled.
+8. Run `npm run check`.
+9. Run `npm audit --audit-level=moderate`.
+10. Run `node src/index.ts --doctor --deep`.
+11. Run `node src/index.ts --security-audit`.
+12. Verify WebUI, TUI, and Gateway flows against your intended deployment.

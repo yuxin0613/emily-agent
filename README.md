@@ -211,7 +211,7 @@ The model setup flow is interactive:
 
 1. Choose an existing provider or `Add a provider` with the arrow keys.
 2. Choose a provider template.
-3. Enter an API key when the selected provider needs one. Keys are written to the local environment file and provider config stores only `apiKeyEnv`.
+3. Enter an API key or local Codex auth path when the selected provider needs one. API keys are written to the local environment file and provider config stores only `apiKeyEnv`; Codex providers store only `authJsonPath`.
 4. Confirm or edit the default base URL.
 5. Let Emily discover available models when the provider exposes a compatible model endpoint.
 6. Pick a default model, enter a custom model name, or skip and keep the current model.
@@ -222,6 +222,7 @@ Common provider templates:
 | Template | Default base URL |
 | --- | --- |
 | OpenAI | `https://api.openai.com/v1` |
+| Codex subscription / ChatGPT login | `https://chatgpt.com/backend-api/codex` |
 | DeepSeek | `https://api.deepseek.com/v1` |
 | Alibaba Cloud DashScope / Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | Moonshot / Kimi | `https://api.moonshot.cn/v1` |
@@ -251,12 +252,16 @@ Runtime settings in `.emily/config.json`:
 | Key | Purpose |
 | --- | --- |
 | `toolCallTimeoutSeconds` | Maximum time to wait for any single tool execution before returning a failed tool result. Default: `3600`. |
+| `providerTimeoutSeconds` | Default maximum time to wait for a single model provider HTTP call. Individual providers can override with `config.timeoutSeconds`. Default: `3600`. |
 | `agents.mainAgents` | Number of main agents. Must be `1`; the main agent owns ordered user context and orchestration. |
 | `agents.maxSubagentsPerRole` | Subagent limit per role. Must be `1` in the current stable model. |
 | `agents.maxConcurrentSubagents` | Global cap for simultaneously running subagents. Default: based on local CPU, capped at `4`. |
 | `agents.releaseSubagentsAfterTask` | Whether idle subagent worker processes are released after they finish work. Default: `true`. |
 | `agents.subagentIdleTtlSeconds` | Idle time before releasing a finished subagent. Use `0` to release immediately. Default: `60`. |
 | `agents.plannerTaskTimeoutSeconds` | Maximum time to wait for the planner subagent to produce the initial DAG. Default: `600`. |
+| `agents.roleTaskTimeoutSeconds` | Default wait budget for role subagent tasks such as developer, researcher, and reviewer. Default: `3600`. |
+
+All timeout and duration settings in `.emily/config.json` use seconds. Legacy provider keys ending in `Ms` are accepted on read and migrated to `...Seconds` when the config is written.
 
 Example:
 
@@ -265,13 +270,15 @@ Example:
   "defaultProviderId": "main-deepseek",
   "fallbackMode": "strict",
   "toolCallTimeoutSeconds": 3600,
+  "providerTimeoutSeconds": 3600,
   "agents": {
     "mainAgents": 1,
     "maxSubagentsPerRole": 1,
     "maxConcurrentSubagents": 4,
     "releaseSubagentsAfterTask": true,
     "subagentIdleTtlSeconds": 60,
-    "plannerTaskTimeoutSeconds": 600
+    "plannerTaskTimeoutSeconds": 600,
+    "roleTaskTimeoutSeconds": 3600
   },
   "providers": []
 }
@@ -291,8 +298,11 @@ Useful environment variables:
 | `EMILY_SKILL_DIRS` | Add one or more external skill roots, separated by the platform path separator (`:` on macOS/Linux, `;` on Windows). |
 | `EMILY_HTTP_EGRESS_ALLOWLIST` | Comma-separated HTTP egress allowlist for private/local destinations. |
 | `EMILY_HTTP_ALLOW_PRIVATE` | Set to `true` only for local development that must access private hosts. |
-| `EMILY_WEB_SEARCH_PROVIDER` | `duckduckgo`, `endpoint`, or `ollama`. |
+| `EMILY_WEB_SEARCH_PROVIDER` | `ollama` (default), `duckduckgo`, or `endpoint`. |
 | `EMILY_WEB_SEARCH_ENDPOINT` | Custom web search endpoint for `provider=endpoint`. |
+| `EMILY_OLLAMA_BASE_URL` / `OLLAMA_HOST` | Ollama host used by `web_search` when `provider=ollama`; defaults to `http://127.0.0.1:11434`. |
+| `EMILY_OLLAMA_API_KEY` | Optional bearer token for the configured Ollama host. |
+| `OLLAMA_API_KEY` | Optional hosted Ollama API key used for `https://ollama.com/api/web_search` fallback. |
 | `EMILY_LLM_WIKI_BASE_URL` | Base URL for the separately deployed LLM Wiki API, for example `http://127.0.0.1:6081`. |
 | `EMILY_LLM_WIKI_TOKEN` | Shared API token for LLM Wiki. Falls back to `LLM_WIKI_API_TOKEN` or `API_ACCESS_TOKEN`. |
 | `EMILY_VECTOR_STORE` | `file`, `chroma`, `qdrant`, `milvus`, or `pgvector`. |
@@ -317,6 +327,7 @@ Example OpenAI-compatible provider:
         "baseUrl": "https://api.openai.com/v1",
         "apiKeyEnv": "OPENAI_API_KEY",
         "strictJson": true,
+        "timeoutSeconds": 600,
         "maxRetries": 2
       }
     }
@@ -324,9 +335,35 @@ Example OpenAI-compatible provider:
 }
 ```
 
+Example Codex subscription provider:
+
+```json
+{
+  "defaultProviderId": "main-codex",
+  "fallbackMode": "fallback",
+  "providers": [
+    {
+      "id": "main-codex",
+      "type": "codex",
+      "model": "gpt-5.5",
+      "config": {
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "authJsonPath": "~/.codex/auth.json",
+        "strictJson": true,
+        "timeoutSeconds": 600,
+        "maxRetries": 2
+      }
+    }
+  ]
+}
+```
+
+Codex providers reuse the local Codex ChatGPT login created by `codex login`. Emily reads the auth file at request time and stores only the auth file path and endpoint settings, never the access token or account id in `.emily/config.json`.
+
 Provider safeguards:
 
 - OpenAI providers must specify `config.apiKeyEnv`.
+- Codex providers read `config.authJsonPath`, defaulting to `~/.codex/auth.json`, and require ChatGPT token auth in that file.
 - Raw `apiKey`, `authorization`, `token`, and `secret` config keys are rejected.
 - Base URLs must be `http` or `https` and cannot include credentials.
 - Provider usage, cost estimates, quotas, latency, and failures are tracked in SQLite.
@@ -454,7 +491,7 @@ Builtin tools:
 | `run_tests` | Run approved test commands. |
 | `create_task` | Create follow-up tasks. |
 | `inspect_task` | Inspect task state and trace. |
-| `web_search` | Bounded web search via DuckDuckGo, custom endpoint, or Ollama. |
+| `web_search` | Bounded web search via Ollama, DuckDuckGo, or a custom endpoint. |
 | `http_fetch` | Bounded HTTP/HTTPS fetch. |
 | `browser` | Lightweight browser-style page actions. |
 | `github` | Structured GitHub PR/issue actions and restricted `gh` allowlist. |
@@ -469,7 +506,7 @@ Permission mode is an additional guard:
 | Mode | Allowed by mode |
 | --- | --- |
 | `read_only` | `read_file`, `inspect_task` |
-| `workspace_write` | `read_file`, `write_file`, `run_tests`, `create_task`, `inspect_task` |
+| `workspace_write` | `read_file`, `write_file`, `run_tests`, `create_task`, `inspect_task`, `http_fetch`, `web_search`, `browser` |
 | `danger_full_access` | role-defined tools, still constrained by forbidden tools and approvals |
 
 Final permission is always:
@@ -493,6 +530,7 @@ Common HTTP endpoints:
 ```bash
 TOKEN=change-me
 curl 'http://127.0.0.1:3000/health'
+curl 'http://127.0.0.1:3000/health/detail' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/doctor?deep=true' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/commands' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/tools' -H "x-emily-token: $TOKEN"
@@ -501,6 +539,8 @@ curl 'http://127.0.0.1:3000/providers' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/cron' -H "x-emily-token: $TOKEN"
 curl 'http://127.0.0.1:3000/events?token='"$TOKEN"
 ```
+
+`token=` query authentication is accepted only for loopback requests, because browser `EventSource` and local WebSocket clients cannot always send custom headers. For non-loopback access, use `x-emily-token` or `Authorization: Bearer ...` and keep query tokens out of URLs, browser history, and proxy logs.
 
 WebSocket gateway:
 
@@ -594,10 +634,13 @@ Hidden or trashed sessions are not implicitly reactivated. Restores are explicit
 Default protections:
 
 - Web/API/Gateway routes require token auth except `/` and `/health`.
+- Public `/health` returns liveness only; authenticated `/health/detail`, `/doctor`, and diagnostics endpoints expose detailed runtime state.
 - Optional read/write scoped tokens limit REST and Gateway methods by CommandRegistry permission.
+- Query token authentication is limited to loopback requests; shared-network clients should use `x-emily-token` or Bearer auth.
 - Unsafe HTTP methods check origin.
 - WebUI and provider dashboard do not embed the server token.
 - HTTP request bodies and list limits are bounded.
+- WebSocket gateway connections enforce bounded frame sizes, per-connection in-flight limits, message-rate limits, and idle cleanup.
 - HTTP tools reject loopback, private networks, link-local, and cloud metadata addresses by default.
 - Workspace file tools resolve real paths and reject symlink escapes.
 - GitHub raw API calls are classified conservatively; mutating calls require write approval.
@@ -610,10 +653,11 @@ Before exposing the server beyond loopback:
 1. Set a strong `EMILY_WEB_TOKEN`.
 2. Put the service behind TLS and network ACLs.
 3. Use `EMILY_WEB_READ_TOKEN` or `EMILY_WEB_WRITE_TOKEN` for non-admin applications instead of sharing the admin token.
-4. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
-5. Configure a real provider and run `node src/index.ts --security-audit`.
-6. Run `npm run check`.
-7. Review roles that allow network, browser, GitHub, or destructive tools.
+4. Do not use `token=` URLs outside loopback; use header-based auth through your client or proxy.
+5. Keep `EMILY_HTTP_ALLOW_PRIVATE` unset.
+6. Configure a real provider and run `node src/index.ts --security-audit`.
+7. Run `npm run check`.
+8. Review roles that allow network, browser, GitHub, or destructive tools.
 
 ## Development
 
@@ -728,7 +772,7 @@ Emily AgentOS keeps third-party references explicit so downstream agent applicat
 
 Design references:
 
-- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model.
+- [OpenClaw](https://github.com/openclaw/openclaw): referenced for the Ollama-backed search extension pattern (`ollama_search`) and the GitHub skill shape. Emily AgentOS implements these ideas as native `web_search`/`github` tools and file-loadable skills under its existing ToolGateway, approval, role, and audit model. The Ollama `web_search` provider follows OpenClaw's local `/api/experimental/web_search`, hosted `/api/web_search`, and `https://ollama.com/api/web_search` fallback shape.
 - [NousResearch Hermes Agent](https://github.com/nousresearch/hermes-agent): referenced for installer ergonomics, local agent runtime packaging conventions, `hermes model`-style provider setup, and terminal transcript/composer interaction patterns. Hermes Agent is MIT-licensed; Emily AgentOS keeps its own runtime architecture and does not vendor Hermes source.
 
 Optional integrations:

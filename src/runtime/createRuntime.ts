@@ -9,7 +9,7 @@ import { ExperienceBuilder } from "../experience/ExperienceBuilder.ts";
 import { ExperienceStore } from "../experience/ExperienceStore.ts";
 import { GATEWAY_METHODS } from "../gateway/GatewayProtocol.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode } from "../llm/ModelProvider.ts";
-import { normalizeAgentRuntimeConfig, ProviderRegistry, type AgentRuntimeConfig } from "../llm/ProviderRegistry.ts";
+import { normalizeAgentRuntimeConfig, ProviderRegistry, type AgentRuntimeConfig, type RuntimeSettingsUpdate } from "../llm/ProviderRegistry.ts";
 import { ProviderUsageStore } from "../llm/ProviderUsageStore.ts";
 import { MemorySystem } from "../memory/MemorySystem.ts";
 import type { VectorStoreConfig } from "../memory/VectorStoreAdapter.ts";
@@ -146,6 +146,7 @@ export async function createRuntime(options: {
     maxConcurrentSubagents: agentRuntimeConfig.maxConcurrentSubagents,
     releaseSubagentsAfterTask: agentRuntimeConfig.releaseSubagentsAfterTask,
     subagentIdleTtlMs: agentRuntimeConfig.subagentIdleTtlSeconds * 1000,
+    roleTaskTimeoutMs: agentRuntimeConfig.roleTaskTimeoutSeconds * 1000,
   });
   await roleAgentManager.start();
 
@@ -160,7 +161,17 @@ export async function createRuntime(options: {
     hooks,
     router,
     plannerTaskTimeoutMs: agentRuntimeConfig.plannerTaskTimeoutSeconds * 1000,
+    roleTaskTimeoutMs: agentRuntimeConfig.roleTaskTimeoutSeconds * 1000,
   });
+
+  function applyAgentRuntimeConfig(config: AgentRuntimeConfig): void {
+    roleAgentManager.maxConcurrentSubagents = config.maxConcurrentSubagents;
+    roleAgentManager.releaseSubagentsAfterTask = config.releaseSubagentsAfterTask;
+    roleAgentManager.subagentIdleTtlMs = config.subagentIdleTtlSeconds * 1000;
+    roleAgentManager.roleTaskTimeoutMs = config.roleTaskTimeoutSeconds * 1000;
+    mainAgent.plannerTaskTimeoutMs = config.plannerTaskTimeoutSeconds * 1000;
+    mainAgent.roleTaskTimeoutMs = config.roleTaskTimeoutSeconds * 1000;
+  }
 
   async function approvePendingMemoryCandidates({ runId }: { runId?: string } = {}): Promise<{
     approved: number;
@@ -439,6 +450,13 @@ export async function createRuntime(options: {
     listProviders: () => providerRegistry.list(),
     checkProviders: (input = {}) => providerRegistry.health(input),
     providerUsage: (input = {}) => providerUsageStore.summary(input),
+    getSettings: () => providerRegistry.getSettings(),
+    updateSettings: async (input: RuntimeSettingsUpdate = {}) => {
+      providerRegistry.updateSettings(input);
+      applyAgentRuntimeConfig(providerRegistry.agents);
+      await providerRegistry.write(dataDir);
+      return providerRegistry.getSettings();
+    },
     listRoles: () => roleManager.listRoles(),
     listSessions: (input = {}) => taskStore.listSessions(input),
     listSessionMessages: (input) => taskStore.listSessionMessages(input),
@@ -579,6 +597,15 @@ export async function createRuntime(options: {
     },
     providerUsage(options: { since?: Date; until?: Date; providerId?: string; limit?: number } = {}) {
       return providerUsageStore.summary(options);
+    },
+    getSettings() {
+      return providerRegistry.getSettings();
+    },
+    async updateSettings(input: RuntimeSettingsUpdate = {}) {
+      providerRegistry.updateSettings(input);
+      applyAgentRuntimeConfig(providerRegistry.agents);
+      await providerRegistry.write(dataDir);
+      return providerRegistry.getSettings();
     },
     async addProvider(config: ProviderConfig) {
       providerRegistry.add(config);
