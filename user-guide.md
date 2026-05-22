@@ -82,7 +82,7 @@ Use the gateway when another application wants to drive AgentOS directly.
 
 Providers are stored in `.emily/config.json`. Existing `.emily/providers.json` files are migrated automatically on startup.
 
-Use `echo` for local architecture tests only. Use `openai` or `ollama` for real model work.
+Use `echo` for local architecture tests only. Use `openai`, `codex`, or `ollama` for real model work.
 
 Agent runtime limits live in the same file. Emily uses one ordered main-agent context and role-bound subagents: `agents.mainAgents` must stay `1`, and `agents.maxSubagentsPerRole` must stay `1` in the current stable runtime. Use `agents.maxConcurrentSubagents` to cap how many subagents can run at once, and `agents.subagentIdleTtlSeconds` plus `agents.releaseSubagentsAfterTask` to control when idle subagent processes are released.
 
@@ -122,6 +122,29 @@ OpenAI-compatible example:
 }
 ```
 
+Codex subscription example:
+
+```json
+{
+  "defaultProviderId": "main-codex",
+  "fallbackMode": "fallback",
+  "providers": [
+    {
+      "id": "main-codex",
+      "type": "codex",
+      "model": "gpt-5.5",
+      "config": {
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "authJsonPath": "~/.codex/auth.json",
+        "strictJson": true
+      }
+    }
+  ]
+}
+```
+
+This provider reuses the local Codex ChatGPT login from `codex login`. Emily stores only `authJsonPath` and endpoint settings, then reads the latest Codex auth file for each model call.
+
 Then run:
 
 ```bash
@@ -132,6 +155,7 @@ node src/index.ts --doctor --deep
 Provider rules:
 
 - Store only environment variable names, not raw keys.
+- For Codex subscription auth, store only the auth file path, not tokens.
 - Set role-specific providers only when needed.
 - Subagents fallback to the main/default provider if their role provider is unavailable.
 - Check usage with the provider dashboard or `provider.usage` command.

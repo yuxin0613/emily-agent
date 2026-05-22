@@ -5,6 +5,8 @@ import { EchoModelProvider } from "./EchoModelProvider.ts";
 import type { ModelProvider, ProviderConfig, ProviderFallbackMode, ProviderHealth } from "./ModelProvider.ts";
 import { OllamaModelProvider } from "./OllamaModelProvider.ts";
 import { OpenAIModelProvider } from "./OpenAIModelProvider.ts";
+import { CodexModelProvider, codexResponsesUrl } from "./CodexModelProvider.ts";
+import { readCodexAuthCredentials } from "./CodexAuth.ts";
 import { isProviderCircuitOpen, ResilientModelProvider } from "./ProviderRuntime.ts";
 import {
   DEFAULT_PROVIDER_TIMEOUT_SECONDS,
@@ -189,6 +191,7 @@ export class ProviderRegistry {
     if (config.type === "echo") provider = new EchoModelProvider({ id: config.id, model: config.model || "echo-local" });
     else if (config.type === "openai") provider = new OpenAIModelProvider(config);
     else if (config.type === "ollama") provider = new OllamaModelProvider(config);
+    else if (config.type === "codex") provider = new CodexModelProvider(config);
     else throw new Error(`Unsupported provider type: ${(config as ProviderConfig).type}`);
     return new ResilientModelProvider(provider, config, { usageStore: this.usageStore });
   }
@@ -364,6 +367,10 @@ export class ProviderRegistry {
       return this.checkOllamaProvider(config, { deep });
     }
 
+    if (config.type === "codex") {
+      return this.checkCodexProvider(config, { deep });
+    }
+
     return { id: config.id, type: config.type, model: config.model || "", ok: false, reason: "Unsupported provider type", deepChecked: false };
   }
 
@@ -441,6 +448,71 @@ export class ProviderRegistry {
     }
   }
 
+  private async checkCodexProvider(config: ProviderConfig, { deep }: { deep: boolean }): Promise<ProviderHealth> {
+    let credentials: Awaited<ReturnType<typeof readCodexAuthCredentials>>;
+    try {
+      credentials = await readCodexAuthCredentials(config.config?.authJsonPath, config.id);
+    } catch (error) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        deepChecked: false,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+
+    if (!deep) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: true,
+        deepChecked: false,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+
+    try {
+      const response = await fetchWithTimeout(codexResponsesUrl(config.config?.baseUrl || "https://chatgpt.com/backend-api/codex"), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${credentials.accessToken}`,
+          "ChatGPT-Account-ID": credentials.accountId,
+          originator: "codex_cli_rs",
+          "user-agent": "emily-agent",
+        },
+        body: JSON.stringify({
+          model: config.model || "gpt-5.5",
+          input: "Reply with the exact text: provider health ok",
+        }),
+        timeoutMs: providerTimeoutMs(config, this.providerTimeoutSeconds),
+      });
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: response.ok,
+        reason: response.ok ? undefined : `Codex provider responded ${response.status}`,
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    } catch (error) {
+      return {
+        id: config.id,
+        type: config.type,
+        model: config.model || "",
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+        deepChecked: true,
+        circuitOpen: isProviderCircuitOpen(config.id),
+      };
+    }
+  }
+
   private assertProviderCanBeRemovedOrDisabled(providerId: string, referencedBy: string[], operation: "disable" | "remove"): void {
     this.getConfigIncludingDisabled(providerId);
     if (providerId === this.defaultProviderId) {
@@ -460,12 +532,27 @@ export function legacyProviderConfigPath(dataDir: string): string {
   return path.join(dataDir, "providers.json");
 }
 
-async function fetchWithTimeout(url: string, { headers = {}, timeoutMs }: { headers?: Record<string, string>; timeoutMs: number }): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  {
+    headers = {},
+    timeoutMs,
+    method = "GET",
+    body,
+  }: {
+    headers?: Record<string, string>;
+    timeoutMs: number;
+    method?: string;
+    body?: string;
+  },
+): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, {
+      method,
       headers,
+      body,
       signal: controller.signal,
     });
   } finally {
@@ -750,7 +837,7 @@ export function validateProviderConfig(config: ProviderConfig): void {
   if (!/^[A-Za-z0-9._-]+$/.test(config.id || "")) {
     throw new Error("Provider id must be non-empty and contain only letters, numbers, dot, underscore, or dash.");
   }
-  if (config.type !== "echo" && config.type !== "openai" && config.type !== "ollama") {
+  if (config.type !== "echo" && config.type !== "openai" && config.type !== "ollama" && config.type !== "codex") {
     throw new Error(`Invalid provider type: ${config.type}`);
   }
   if (config.enabled !== undefined && typeof config.enabled !== "boolean") {
@@ -773,6 +860,7 @@ function validateProviderConfigObject(config: ProviderConfig): void {
   const allowedKeys = new Set([
     "baseUrl",
     "apiKeyEnv",
+    "authJsonPath",
     "temperature",
     "timeoutSeconds",
     "maxRetries",
@@ -794,6 +882,9 @@ function validateProviderConfigObject(config: ProviderConfig): void {
   if (value.baseUrl !== undefined) validateBaseUrl(String(value.baseUrl));
   if (value.apiKeyEnv !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(value.apiKeyEnv))) {
     throw new Error("Provider apiKeyEnv must be a valid environment variable name.");
+  }
+  if (value.authJsonPath !== undefined && (typeof value.authJsonPath !== "string" || !value.authJsonPath.trim())) {
+    throw new Error("Provider authJsonPath must be a non-empty string when provided.");
   }
   assertNumberRange(value.temperature, "temperature", 0, 2);
   assertNumberRange(value.timeoutSeconds, "timeoutSeconds", 1, 24 * 60 * 60);

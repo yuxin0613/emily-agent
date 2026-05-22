@@ -60,7 +60,7 @@ export interface ModelProvider {
   complete(input: ModelCompleteInput): Promise<string | ModelCompleteResult>;
 }
 
-export type ProviderType = "echo" | "openai" | "ollama";
+export type ProviderType = "echo" | "openai" | "ollama" | "codex";
 export type ProviderFallbackMode = "strict" | "fallback";
 
 export interface ProviderConfig {
@@ -71,6 +71,7 @@ export interface ProviderConfig {
   config?: {
     baseUrl?: string;
     apiKeyEnv?: string;
+    authJsonPath?: string;
     temperature?: number;
     timeoutSeconds?: number;
     retryBaseSeconds?: number;

@@ -248,6 +248,44 @@ await runtime.addProvider({
 const providerHealth = await runtime.checkProviders();
 assert.equal(providerHealth.find((item) => item.id === "openai-missing-env")?.ok, false);
 
+const codexAuthPath = path.join(dataDir, "codex-auth.json");
+await writeFile(codexAuthPath, JSON.stringify({
+  auth_mode: "chatgpt",
+  tokens: {
+    access_token: "test-codex-access-token",
+    refresh_token: "test-codex-refresh-token",
+    account_id: "codex-account",
+  },
+  last_refresh: new Date().toISOString(),
+}, null, 2), "utf8");
+await runtime.addProvider({
+  id: "main-codex",
+  type: "codex",
+  model: "gpt-5.5",
+  config: {
+    authJsonPath: codexAuthPath,
+    baseUrl: "https://chatgpt.com/backend-api/codex",
+  },
+});
+const codexModel = runtime.providerRegistry.createProvider("main-codex");
+assert.equal(codexModel.id, "main-codex");
+assert.equal(codexModel.model, "gpt-5.5");
+const codexShallowHealth = await runtime.checkProviders();
+assert.equal(codexShallowHealth.find((item) => item.id === "main-codex")?.ok, true);
+
+await runtime.addProvider({
+  id: "codex-missing-auth",
+  type: "codex",
+  model: "gpt-5.5",
+  config: {
+    authJsonPath: path.join(dataDir, "missing-codex-auth.json"),
+  },
+});
+const codexMissingHealth = await runtime.checkProviders();
+const codexMissing = codexMissingHealth.find((item) => item.id === "codex-missing-auth");
+assert.equal(codexMissing?.ok, false);
+assert.match(codexMissing?.reason || "", /Codex auth file not found/);
+
 const role = await runtime.addRole({
   name: "qa",
   role: "Check runtime behavior and return concise quality notes.",

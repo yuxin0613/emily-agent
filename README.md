@@ -211,7 +211,7 @@ The model setup flow is interactive:
 
 1. Choose an existing provider or `Add a provider` with the arrow keys.
 2. Choose a provider template.
-3. Enter an API key when the selected provider needs one. Keys are written to the local environment file and provider config stores only `apiKeyEnv`.
+3. Enter an API key or local Codex auth path when the selected provider needs one. API keys are written to the local environment file and provider config stores only `apiKeyEnv`; Codex providers store only `authJsonPath`.
 4. Confirm or edit the default base URL.
 5. Let Emily discover available models when the provider exposes a compatible model endpoint.
 6. Pick a default model, enter a custom model name, or skip and keep the current model.
@@ -222,6 +222,7 @@ Common provider templates:
 | Template | Default base URL |
 | --- | --- |
 | OpenAI | `https://api.openai.com/v1` |
+| Codex subscription / ChatGPT login | `https://chatgpt.com/backend-api/codex` |
 | DeepSeek | `https://api.deepseek.com/v1` |
 | Alibaba Cloud DashScope / Qwen | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 | Moonshot / Kimi | `https://api.moonshot.cn/v1` |
@@ -334,9 +335,35 @@ Example OpenAI-compatible provider:
 }
 ```
 
+Example Codex subscription provider:
+
+```json
+{
+  "defaultProviderId": "main-codex",
+  "fallbackMode": "fallback",
+  "providers": [
+    {
+      "id": "main-codex",
+      "type": "codex",
+      "model": "gpt-5.5",
+      "config": {
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "authJsonPath": "~/.codex/auth.json",
+        "strictJson": true,
+        "timeoutSeconds": 600,
+        "maxRetries": 2
+      }
+    }
+  ]
+}
+```
+
+Codex providers reuse the local Codex ChatGPT login created by `codex login`. Emily reads the auth file at request time and stores only the auth file path and endpoint settings, never the access token or account id in `.emily/config.json`.
+
 Provider safeguards:
 
 - OpenAI providers must specify `config.apiKeyEnv`.
+- Codex providers read `config.authJsonPath`, defaulting to `~/.codex/auth.json`, and require ChatGPT token auth in that file.
 - Raw `apiKey`, `authorization`, `token`, and `secret` config keys are rejected.
 - Base URLs must be `http` or `https` and cannot include credentials.
 - Provider usage, cost estimates, quotas, latency, and failures are tracked in SQLite.
